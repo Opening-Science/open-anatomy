@@ -33,25 +33,56 @@
     "s1086": {
       "source": "totalsegmentator-small-v201",
       "ct_sha256": "77b17dac577a5a0cd119024462cc1d5b51a50031ff3bc5380a601d06316dd3e8",
-      "why": "all ten v0 structures present and none cut off by the scan edge; 1.5 mm isotropic; also a taller male reference body: hip-to-shoulder rise 535 mm, arms hanging (12-20 degrees from vertical); the dataset notes a tumour in thorax and abdomen"
+      "why": "all ten v0 structures present and none cut off by the scan edge; 1.5 mm isotropic; also a taller male reference body: hip-to-shoulder rise 535 mm, arms hanging (12-20 degrees from vertical); the dataset notes a tumour in thorax and abdomen",
+      "record": {
+        "sex": "m",
+        "age": 45,
+        "pathology": "tumour",
+        "location": "thorax, abdomen",
+        "typical": false,
+        "note": "pathological reference: the tumour may displace or change organs, so this body shows tumour anatomy, not typical anatomy"
+      }
     },
     "s0903": {
       "source": "totalsegmentator-small-v201",
       "ct_sha256": "ab0a7c7866e6d7bf9e64c9f1899e5b401051aca8ec483725bea7f4fcd410dc89",
       "sex": "m",
       "age": 88,
-      "why": "male reference: no pathology noted, arms down, femoral and humeral heads in the scan"
+      "why": "male reference: no pathology noted, arms down, femoral and humeral heads in the scan",
+      "record": {
+        "sex": "m",
+        "age": 88,
+        "pathology": "none recorded",
+        "location": null,
+        "typical": true
+      }
     },
     "s0859": {
       "source": "totalsegmentator-small-v201",
       "ct_sha256": "bc7f224a80a90efaf6658da8e775521373bdc519b1d99004d29dbc09d896c413",
       "sex": "f",
       "age": 74,
-      "why": "female reference: arms down, femoral and humeral heads in the scan; the dataset notes inflammation"
+      "why": "female reference: arms down, femoral and humeral heads in the scan; the dataset notes inflammation",
+      "record": {
+        "sex": "f",
+        "age": 74,
+        "pathology": "inflammation",
+        "location": "thorax",
+        "typical": true,
+        "note": "inflammation does not change the organs or bones modelled here",
+        "age_note": "74 in the small subset's meta.csv, 70 in the full dataset's"
+      }
     },
     "s0667": {
       "source": "totalsegmentator-v201",
-      "why": "short male: shortest hip-to-shoulder rise (487 mm) and narrowest ribcage (300 mm) among the male candidates; no pathology noted"
+      "why": "short male: shortest hip-to-shoulder rise (487 mm) and narrowest ribcage (300 mm) among the male candidates; no pathology noted",
+      "record": {
+        "sex": "m",
+        "age": 65,
+        "pathology": "none recorded",
+        "location": null,
+        "typical": true
+      }
     }
   },
   "bodies": {

@@ -11,7 +11,9 @@ other sizes are baked with the weight and height pinned there.
 Writes data/reference/<body>.reference.glb and <body>.report.json, and with
 --render three PNGs per body in data/renders/. Each step is a script on its
 own (fetch.py, segment.py, mesh.py, bake_anny.py, blender/assemble.py); this
-only runs them in order and stops at the first that fails. Needs Blender
+only runs them in order and stops at the first that fails. It copies the
+case's record (pathology, location, whether the body is typical) from
+sources.json into the report. Needs Blender
 5.2.x (scripts/blender.py finds it) and uv for the ANNY bake.
 """
 
@@ -74,6 +76,16 @@ def main() -> None:
         if args.render:
             assemble += ["--render-dir", ROOT / "data" / "renders", "--render-name", name]
         step(*blender, "assemble", *assemble)
+        # The case's record goes into the body's report, so a pathological
+        # reference is never mistaken for a typical one.
+        record = SOURCES["cases"][case].get("record", {})
+        report_path = out / f"{name}.report.json"
+        report = json.loads(report_path.read_text())
+        report["case"] = {"id": case, **record}
+        report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+        if record.get("typical") is False:
+            print(f"{name}: PATHOLOGICAL reference ({record.get('pathology')}, "
+                  f"{record.get('location')}), not typical anatomy")  # fmt: skip
 
 
 if __name__ == "__main__":

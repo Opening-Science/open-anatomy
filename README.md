@@ -111,6 +111,16 @@ the female s0859, both from the TotalSegmentator dataset (CC BY 4.0):
 .venv/bin/python scripts/reference.py --render   # data/reference/, data/renders/
 ```
 
+| Reference | Case | Recorded pathology | Typical anatomy |
+| --- | --- | --- | --- |
+| anny-adult-m | s0903, male, 88 | none | yes |
+| anny-adult-f | s0859, female, 74 | inflammation (thorax) | yes |
+| anny-adult-m-w0.9-h0.5.s0667 | s0667, male, 65 | none | yes |
+| anny-adult-m-w0.9-h0.9.s1086 | s1086, male, 45 | tumour (thorax, abdomen) | **no: a pathological reference** |
+
+The s1086 body shows tumour anatomy: the tumour may displace or change organs,
+so it must not stand in for typical anatomy. Its report says so in `case`.
+
 More bodies come from the full dataset. `scripts/select_cases.py` lists the
 cases that qualify (every organ whole, no head, the hip and shoulder joints in
 the scan, arms hanging, no trauma), and `scripts/size_body.py` picks the ANNY
