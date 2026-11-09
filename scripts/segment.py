@@ -54,7 +54,8 @@ def main() -> None:
     for task in (TASK, BODY_TASK):
         if task not in ALLOWED_TASKS:
             sys.exit(
-                f'TotalSegmentator task "{task}" is not Apache-2.0; see structures.ALLOWED_TASKS'
+                f'TotalSegmentator task "{task}" is not Apache-2.0; only these tasks may run: '
+                + ", ".join(sorted(ALLOWED_TASKS))
             )
 
     from totalsegmentator.python_api import totalsegmentator

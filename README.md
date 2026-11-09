@@ -121,7 +121,8 @@ MD5 and SHA-256 against [sources.json](sources.json), and unpacks one case.
 `segment.py` runs TotalSegmentator's `total` task for ten structures and scores
 each against the dataset's own reference segmentation. `mesh.py` writes one GLB
 with a closed mesh per structure, named by UBERON ID, and a manifest; the same
-masks always give the same bytes.
+masks always give the same bytes. The GLB credits the dataset's creator, DOI
+and case in its asset copyright, so the attribution travels with the file.
 
 ## Reference bodies
 
@@ -134,7 +135,8 @@ uv run --script scripts/bake_anny.py male data/bodies/anny-adult-m.rigged.glb
 uv run --script scripts/bake_anny.py female data/bodies/anny-adult-f.rigged.glb
 ```
 
-The bake is pinned by SHA-256 in [sources.json](sources.json).
+The bake is pinned by SHA-256 in [sources.json](sources.json);
+`python3 scripts/bake_check.py --bake` bakes both again and compares.
 
 Each reference body puts one CT's organs and trunk skeleton inside an ANNY
 body and attaches every structure to ANNY's skeleton. The male uses case s0903,
@@ -158,13 +160,20 @@ More bodies come from the full dataset. `scripts/select_cases.py` lists the
 cases that qualify (every organ whole, no head, the hip and shoulder joints in
 the scan, arms hanging, no trauma), and `scripts/size_body.py` picks the ANNY
 weight and height whose trunk matches the case's, which `bake_anny.py` then
-bakes with `--weight` and `--height`.
+bakes with `--weight` and `--height`. It searches up to ANNY's limit of 1.0,
+refines around the best in steps of 0.05 and warns when the best is on the
+edge. The two w0.9 bodies above were sized on an older grid that stopped at
+0.9, where both landed; they will be re-sized when the bodies are rebuilt.
 
 [`blender/assemble.py`](blender/assemble.py) fits the CT to the body: height
 from the hip and shoulder joints, width and depth from the trunk outlines, then
 the shoulder girdle and upper thorax onto ANNY's shoulders. It reports each joint's residual and the share of every structure inside the
 skin. The CT was taken lying down and ANNY stands, so the organs sit as they do
-supine. Other headless Blender 5.2.x scripts in [`blender/`](blender/) clean
+supine. The ages do not match either: ANNY's bodies are young adults, while
+the people scanned were 45 to 88 (s0903 88, s0859 74, s0667 65, s1086 45), so
+the organs and bones are an older person's inside a young adult's shape. The
+released GLB's asset copyright credits the TotalSegmentator dataset (creator,
+DOI, case) and ANNY. Other headless Blender 5.2.x scripts in [`blender/`](blender/) clean
 meshes up and fit an atlas to a body limb by limb; `scripts/blender.py` runs
 them all.
 
@@ -173,6 +182,7 @@ them all.
 ```bash
 .venv/bin/python scripts/mesh_check.py   # meshes synthetic ellipsoids; no download
 scripts/self-check.sh                     # every Blender self-check; skips without Blender
+python3 scripts/bake_check.py             # the bake's lock, and any baked body
 ```
 
 See [CONTRIBUTING](CONTRIBUTING.md) to take part.

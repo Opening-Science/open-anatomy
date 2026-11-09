@@ -8,11 +8,14 @@ Measures the CT, from segment.py's masks:
   the femoral and humeral heads);
 - the trunk's width and depth (body_trunc) halfway up that rise.
 
-It then bakes ANNY on a grid of weight and height phenotypes (0.1 to 0.9),
-caching each body in data/bodies/grid/, measures each the same way (its
-upperleg01 and upperarm01 joints; skin vertices that follow the trunk), and
-prints the weight and height whose rise, width and depth differ least from the
-CT's, summed as squared relative errors. sources.json then records the choice.
+It then bakes ANNY on a grid of weight and height phenotypes (0.1 to 1.0,
+ANNY's top), caching each body in data/bodies/grid/, measures each the same
+way (its upperleg01 and upperarm01 joints; skin vertices that follow the
+trunk), and takes the weight and height whose rise, width and depth differ
+least from the CT's, summed as squared relative errors. It then refines around
+that best in steps of 0.05, and warns when the best lies on the edge of what
+was searched: at ANNY's limit (0 or 1), the CT may be bigger or smaller than
+ANNY can be. sources.json then records the choice.
 """
 
 from __future__ import annotations
@@ -27,7 +30,9 @@ import nibabel as nib
 import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
-GRID = (0.1, 0.3, 0.5, 0.7, 0.9)
+GRID = (0.1, 0.3, 0.5, 0.7, 0.9, 1.0)
+LIMITS = (0.0, 1.0)  # ANNY's phenotype range
+FINE_STEP = 0.05  # the refinement's step around the grid's best
 LIMBS = ("upperarm", "lowerarm", "wrist", "metacarpal", "finger", "upperleg", "lowerleg",
          "foot", "toe")  # fmt: skip
 SLAB_MM = 10
@@ -133,6 +138,23 @@ def measure_anny(path: Path) -> dict:
             "depth": float((hi[2] - lo[2]) * 1000)}  # fmt: skip
 
 
+def around(value: float) -> list[float]:
+    """The refinement's values: two fine steps either side of value, within ANNY's range."""
+    return sorted({round(min(max(value + k * FINE_STEP, LIMITS[0]), LIMITS[1]), 2)
+                   for k in range(-2, 3)})  # fmt: skip
+
+
+def edge_warnings(weight: float, height: float, searched: dict[str, list[float]]) -> list[str]:
+    """Where the best weight or height sits on the edge of what was searched."""
+    warnings = []
+    for name, value in (("weight", weight), ("height", height)):
+        if value in LIMITS:
+            warnings.append(f"{name} {value} is at ANNY's limit; the CT may lie beyond it")
+        elif value in (min(searched[name]), max(searched[name])):
+            warnings.append(f"{name} {value} is on the edge of the search; widen it")
+    return warnings
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--case", required=True)
@@ -143,27 +165,44 @@ def main() -> None:
           f"{target['depth']:.0f} mm")  # fmt: skip
     grid_dir = ROOT / "data" / "bodies" / "grid"
     grid_dir.mkdir(parents=True, exist_ok=True)
-    results = []
-    for weight in GRID:
-        for height in GRID:
-            path = grid_dir / f"anny-{args.sex}-w{weight}-h{height}.rigged.glb"
-            if not path.exists():
-                subprocess.run(
-                    ["uv", "run", "-q", "--script", str(ROOT / "scripts" / "bake_anny.py"),
-                     args.sex, str(path), "--weight", str(weight), "--height", str(height)],
-                    check=True, capture_output=True,
-                )  # fmt: skip
-            got = measure_anny(path)
-            error = sum(((got[k] - target[k]) / target[k]) ** 2 for k in target)
-            results.append((error, weight, height, got))
-    results.sort(key=lambda r: r[0])
+    scored: dict[tuple[float, float], tuple] = {}
+
+    def score(weights: list[float], heights: list[float]) -> tuple:
+        for weight in weights:
+            for height in heights:
+                if (weight, height) in scored:
+                    continue
+                path = grid_dir / f"anny-{args.sex}-w{weight}-h{height}.rigged.glb"
+                if not path.exists():
+                    subprocess.run(
+                        ["uv", "run", "-q", "--script", str(ROOT / "scripts" / "bake_anny.py"),
+                         args.sex, str(path), "--weight", str(weight), "--height", str(height)],
+                        check=True, capture_output=True,
+                    )  # fmt: skip
+                got = measure_anny(path)
+                error = sum(((got[k] - target[k]) / target[k]) ** 2 for k in target)
+                scored[(weight, height)] = (error, weight, height, got)
+        return min(scored.values(), key=lambda r: r[0])
+
+    coarse = score(list(GRID), list(GRID))
+    fine = {"weight": around(coarse[1]), "height": around(coarse[2])}
+    score(fine["weight"], fine["height"])
+    results = sorted(scored.values(), key=lambda r: r[0])
+    searched = {
+        "weight": sorted({w for w, _ in scored}),
+        "height": sorted({h for _, h in scored}),
+    }
     for error, weight, height, got in results[:5]:
         print(f"  weight {weight} height {height}: rise {got['rise']:.0f}, trunk "
               f"{got['width']:.0f} x {got['depth']:.0f} mm, error {error:.4f}")  # fmt: skip
     best = results[0]
+    warnings = edge_warnings(best[1], best[2], searched)
+    for warning in warnings:
+        print(f"warning: {warning}")
     print(json.dumps({"case": args.case, "sex": args.sex, "weight": best[1], "height": best[2],
                       "ct": {k: round(v) for k, v in target.items()},
-                      "anny": {k: round(v) for k, v in best[3].items()}}))  # fmt: skip
+                      "anny": {k: round(v) for k, v in best[3].items()},
+                      "edge": warnings}))  # fmt: skip
 
 
 if __name__ == "__main__":
