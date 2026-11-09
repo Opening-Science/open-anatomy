@@ -55,6 +55,7 @@ SOURCE_LICENCE = "CC-BY-4.0"
 GUARD_MARGIN_MM = 20.0  # how far below the head or neck the guard cuts
 DISPLAY_FACTOR = 2  # the GLB textures are upsampled by this for display
 LANCZOS_TAPS = 3
+WEIGHT_ONE = 4096  # Lanczos weights are fixed point, in steps of 1/4096
 
 
 NECK = [f"vertebrae_C{i}" for i in range(1, 7)]
@@ -157,20 +158,61 @@ def lanczos_weights(size: int, factor: int, taps: int = LANCZOS_TAPS) -> np.ndar
     return matrix / matrix.sum(1, keepdims=True)
 
 
+def fixed_point(matrix: np.ndarray) -> np.ndarray:
+    """Resampling weights as integers in steps of 1/WEIGHT_ONE, each row summing
+    to exactly WEIGHT_ONE (the rounding error goes onto the row's largest weight)."""
+    weights = np.round(matrix * WEIGHT_ONE).astype(np.int64)
+    weights[np.arange(len(weights)), np.abs(weights).argmax(1)] += WEIGHT_ONE - weights.sum(1)
+    return weights
+
+
 def upsample(rgba: np.ndarray, factor: int = 2) -> np.ndarray:
-    """Lanczos upsample for display: premultiplied, so clear pixels add no dark fringe."""
-    image = rgba.astype(np.float64) / 255
-    alpha = image[..., 3:]
-    premultiplied = np.dstack([image[..., :3] * alpha, alpha])
-    rows = lanczos_weights(image.shape[0], factor)
-    cols = lanczos_weights(image.shape[1], factor)
+    """Lanczos upsample of the colour for display; the mask is the native one.
+
+    Colour is filtered premultiplied by the native mask, so clear pixels add no
+    dark fringe: a flat colour stays exactly flat up to any edge. The display
+    mask is the native mask with each pixel repeated factor x factor times, so
+    it stays binary and exactly in place at corners, diagonals and one-voxel
+    features. The filter runs in integers (fixed-point weights, integer
+    products and sums), so the result does not depend on the BLAS build or the
+    thread count; the one float step before that, computing the weights,
+    would have to land within a rounding error of a 1/8192 boundary to change
+    a byte.
+    """
+    inside = rgba[..., 3] >= 128
+    premultiplied = np.dstack([rgba[..., :3] * inside[..., None], inside * 255]).astype(np.int64)
+    rows = fixed_point(lanczos_weights(rgba.shape[0], factor))
+    cols = fixed_point(lanczos_weights(rgba.shape[1], factor))
     big = np.stack([rows @ premultiplied[..., c] @ cols.T for c in range(4)], -1)
-    big = np.clip(big, 0, 1)
-    a = big[..., 3:]
-    rgb = np.where(a > 1e-6, big[..., :3] / np.maximum(a, 1e-6), 0)
-    # Keep the mask crisp: a display pixel is opaque where the slice is inside the body.
-    a = (a >= 0.5).astype(np.float64)
-    return np.round(np.dstack([np.clip(rgb, 0, 1), a]) * 255).astype(np.uint8)
+    weight = big[..., 3:].astype(np.float64)  # Lanczos alpha, times 255 * WEIGHT_ONE**2
+    nearest = np.repeat(np.repeat(rgba[..., :3], factor, 0), factor, 1) / 255
+    # Where the filtered alpha is small (a one-voxel feature, a sharp corner), the
+    # ratio is ill-conditioned: take the source voxel's own colour instead.
+    solid = weight > 0.25 * 255 * WEIGHT_ONE**2
+    rgb = np.where(solid, big[..., :3] / np.maximum(weight, 1), nearest)
+    # Lanczos rings beside a sharp change in colour (a tinted structure at the
+    # body's edge); keep each pixel within the range of the body voxels around
+    # its source voxel, so no ring can overshoot or darken the edge.
+    low, high = neighbourhood_range(rgba[..., :3] / 255, inside)
+    low, high = (np.repeat(np.repeat(v, factor, 0), factor, 1) for v in (low, high))
+    rgb = np.clip(rgb, np.minimum(low, nearest), np.maximum(high, nearest))
+    mask = np.repeat(np.repeat(inside, factor, 0), factor, 1)
+    return np.round(np.dstack([np.clip(rgb, 0, 1), mask]) * 255).astype(np.uint8)
+
+
+def neighbourhood_range(rgb: np.ndarray, inside: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Per-channel min and max over each pixel's 3 x 3 neighbours inside the body
+    (padded, not wrapped, at the image's border; +inf/-inf where none is inside)."""
+    height, width = inside.shape
+    low = np.pad(np.where(inside[..., None], rgb, np.inf), ((1, 1), (1, 1), (0, 0)),
+                 constant_values=np.inf)  # fmt: skip
+    high = np.pad(np.where(inside[..., None], rgb, -np.inf), ((1, 1), (1, 1), (0, 0)),
+                  constant_values=-np.inf)  # fmt: skip
+    shifts = [(dy, dx) for dy in range(3) for dx in range(3)]
+    return (
+        np.min([low[dy : dy + height, dx : dx + width] for dy, dx in shifts], 0),
+        np.max([high[dy : dy + height, dx : dx + width] for dy, dx in shifts], 0),
+    )
 
 
 def png(rgba: np.ndarray) -> bytes:
@@ -396,7 +438,7 @@ def main() -> None:
             "display": {
                 "image": f"{plane}@{DISPLAY_FACTOR}x.png",
                 "pixels": [int(v) * DISPLAY_FACTOR for v in image.shape[1::-1]],
-                "resampling": f"Lanczos-{LANCZOS_TAPS}, premultiplied alpha, mask kept binary",
+                "resampling": f"Lanczos-{LANCZOS_TAPS}, premultiplied, fixed point; native mask",
                 "sha256": hashlib.sha256(display).hexdigest(),
             },
             "structures": [REFERENCE[i - 1].term for i in shown],

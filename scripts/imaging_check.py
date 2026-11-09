@@ -22,7 +22,8 @@ and that a body mask cut by the guard keeps no voxel of a synthetic face, for a
 head far above C7, a bowed head with the face level with C7, and a head just
 above the margin at the scan's bottom; and that the 2x display upsample keeps
 flat regions flat, the mask binary and in place, and adds no dark fringe at
-the body's edge.
+the body's edge, also for an odd image size, a diagonal edge, a one-voxel strip
+and gap, and a tinted structure at the edge.
 """
 
 from __future__ import annotations
@@ -232,6 +233,31 @@ def main() -> int:
     check(int(big[:, 20:22, :3].min()) >= 170, "no dark fringe where the body meets the air")
     check(bool((big[:, :20, 3] == 0).all() and (big[:, 20:, 3] == 255).all()),
           "the body's edge stays at the same place")  # fmt: skip
+
+    # The hard cases: an odd size, a diagonal edge (a staircase of corners), a
+    # one-voxel strip of body and a one-voxel gap, and a tinted structure right
+    # at the edge.
+    height, width = 21, 33
+    r, c = np.mgrid[:height, :width]
+    inside = c > r + 3
+    inside[:, 2] = True  # a one-voxel strip of body in the air
+    inside[:, 25] = False  # a one-voxel gap of air in the body
+    hard = np.zeros((height, width, 4), dtype=np.uint8)
+    hard[..., :3], hard[..., 3] = 180, inside * 255
+    big = upsample(hard, 2)
+    native_mask = np.repeat(np.repeat(inside, 2, 0), 2, 1)
+    check(big.shape == (42, 66, 4), "an odd-sized image is upsampled to exactly twice its size")
+    check(bool((big[..., 3] == native_mask * 255).all()),
+          "diagonal, strip and gap: the display mask is the native mask, in place")  # fmt: skip
+    check(bool((big[native_mask, :3] == 180).all()),
+          "diagonal, strip and gap: a flat body stays exactly flat up to its edge")  # fmt: skip
+    tinted = hard.copy()
+    band = (c > r + 3) & (c < r + 8)  # a structure along the diagonal edge
+    tinted[band, :3] = (200, 80, 60)
+    big = upsample(tinted, 2)
+    shown = big[native_mask, :3].astype(int)
+    check(bool((shown >= (180, 80, 60)).all() and (shown <= (200, 180, 180)).all()),
+          "a structure tinted at the edge: no ring or fringe leaves its colours")  # fmt: skip
 
     print("imaging check passed" if not failures else f"imaging check failed: {len(failures)}")
     return 1 if failures else 0
