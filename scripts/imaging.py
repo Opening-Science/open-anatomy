@@ -12,8 +12,8 @@ writes, in data/imaging/<body>/:
   bone (W1800/L400) window, the segmented structures tinted in their display
   colours, and the air outside the body transparent, one pixel per voxel, for
   measurement;
-- the same at twice the size (axial@2x.png and so on), Lanczos-3 upsampled, for
-  display only: the GLB's textures;
+- the same at twice the size (axial@2x.png and so on), Lanczos-3 upsampled
+  with an anti-aliased edge, for display only: the GLB's textures;
 - <body>.imaging.glb: three double-sided, unlit quads carrying those textures,
   each where its slice lies in the reference body (the trunk fit, not the
   girdle step), so the GLB can be loaded together with <body>.reference.glb;
@@ -53,6 +53,8 @@ SOURCE_LICENCE = "CC-BY-4.0"
 GUARD_MARGIN_SLICES = 14  # about 2 cm at 1.5 mm
 DISPLAY_FACTOR = 2  # the GLB textures are upsampled by this for display
 LANCZOS_TAPS = 3
+EDGE_SOFTNESS = 0.7  # display pixels of Gaussian on the body mask's edge (display only)
+EDGE_BLEED = 5  # display pixels of colour bled across the edge band and the soft fringe
 
 
 NECK = [f"vertebrae_C{i}" for i in range(1, 7)]
@@ -127,9 +129,52 @@ def upsample(rgba: np.ndarray, factor: int = 2) -> np.ndarray:
     big = np.clip(big, 0, 1)
     a = big[..., 3:]
     rgb = np.where(a > 1e-6, big[..., :3] / np.maximum(a, 1e-6), 0)
-    # Keep the mask crisp: a display pixel is opaque where the slice is inside the body.
-    a = (a >= 0.5).astype(np.float64)
-    return np.round(np.dstack([np.clip(rgb, 0, 1), a]) * 255).astype(np.uint8)
+    # The edge is anti-aliased: the crisp mask (where the Lanczos alpha passes
+    # one half) is blurred slightly, and colour is bled outwards under the soft
+    # fringe so it shows the slice's own edge colour, not black.
+    # The trunk mask's outermost voxel is often air at the skin (a dark rim), so
+    # the display edge is pulled in by one source voxel before it is softened.
+    inside = shrink(a[..., 0] >= 0.5, factor).astype(np.float64)
+    soft = np.clip(blur(inside, EDGE_SOFTNESS), 0, 1)
+    # Colour comes only from pixels well inside (Lanczos rings darken the band
+    # right at the edge) and is bled across the edge band and the soft fringe.
+    rgb = bleed(np.clip(rgb, 0, 1), a[..., 0] >= 0.98, steps=EDGE_BLEED)
+    return np.round(np.dstack([rgb, soft]) * 255).astype(np.uint8)
+
+
+def shrink(mask: np.ndarray, steps: int) -> np.ndarray:
+    """Erodes a 2D mask by `steps` pixels (4-neighbourhood)."""
+    for _ in range(steps):
+        p = np.pad(mask, 1, mode="edge")  # the image border is not an edge of the body
+        mask = mask & p[:-2, 1:-1] & p[2:, 1:-1] & p[1:-1, :-2] & p[1:-1, 2:]
+    return mask
+
+
+def blur(image: np.ndarray, sigma: float) -> np.ndarray:
+    """Separable Gaussian blur of a 2D array, edges clamped."""
+    radius = max(1, int(np.ceil(3 * sigma)))
+    x = np.arange(-radius, radius + 1)
+    kernel = np.exp(-(x**2) / (2 * sigma**2))
+    kernel /= kernel.sum()
+    padded = np.pad(image, radius, mode="edge")
+    rows = np.apply_along_axis(lambda r: np.convolve(r, kernel, mode="valid"), 1, padded)
+    return np.apply_along_axis(lambda c: np.convolve(c, kernel, mode="valid"), 0, rows)
+
+
+def bleed(rgb: np.ndarray, valid: np.ndarray, steps: int) -> np.ndarray:
+    """Extends colour from valid pixels into their neighbours, `steps` pixels out."""
+    rgb, valid = rgb.copy(), valid.copy()
+    for _ in range(steps):
+        total = np.zeros_like(rgb)
+        count = np.zeros(valid.shape)
+        for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            shifted = np.roll(valid, (dy, dx), (0, 1))
+            total += np.roll(rgb, (dy, dx), (0, 1)) * shifted[..., None]
+            count += shifted
+        grow = ~valid & (count > 0)
+        rgb[grow] = total[grow] / count[grow, None]
+        valid |= grow
+    return rgb
 
 
 def png(rgba: np.ndarray) -> bytes:
@@ -235,7 +280,7 @@ def write_glb(path: Path, planes: list[dict]) -> None:
         gltf["materials"].append({
             "name": f"imaging-{plane['plane']}",
             "pbrMetallicRoughness": {"baseColorTexture": {"index": i}, "metallicFactor": 0.0},
-            "alphaMode": "MASK", "alphaCutoff": 0.5, "doubleSided": True,
+            "alphaMode": "BLEND", "doubleSided": True,
             "extensions": {"KHR_materials_unlit": {}},
         })  # fmt: skip
         gltf["meshes"].append({
@@ -351,7 +396,7 @@ def main() -> None:
             "display": {
                 "image": f"{plane}@{DISPLAY_FACTOR}x.png",
                 "pixels": [int(v) * DISPLAY_FACTOR for v in image.shape[1::-1]],
-                "resampling": f"Lanczos-{LANCZOS_TAPS}, premultiplied alpha, mask kept binary",
+                "resampling": f"Lanczos-{LANCZOS_TAPS}, premultiplied alpha, edge anti-aliased",
                 "sha256": hashlib.sha256(display).hexdigest(),
             },
             "structures": [REFERENCE[i - 1].term for i in shown],

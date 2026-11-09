@@ -10,8 +10,8 @@ Checks that face_free_top
 - stops 2 cm below the lowest head or neck structure when C7 is not;
 - refuses a case whose skull or brain was never segmented;
 and that a body mask cut at the guard keeps no voxel of a synthetic face; and
-that the 2x display upsample keeps flat regions flat, the mask binary and in
-place, and adds no dark fringe at the body's edge.
+that the 2x display upsample keeps flat regions flat, anti-aliases the body's
+edge one source voxel in (dropping the air rim) and adds no dark fringe there.
 """
 
 from __future__ import annotations
@@ -92,12 +92,15 @@ def main() -> int:
     image[:, 10:, 3] = 255
     big = upsample(image, 2)
     check(big.shape == (40, 60, 4), "the display image is twice the size")
-    check(set(np.unique(big[..., 3])) <= {0, 255}, "the display mask stays binary")
+    edge = big[5, 18:26, 3].astype(int)
+    check(bool((np.diff(edge) >= 0).all()) and 0 < edge[3] < 255,
+          "the display edge is anti-aliased: alpha rises smoothly across it")  # fmt: skip
     # Lanczos-3 rings for up to 6 display pixels beside an edge; beyond that, flat.
     check(bool((big[:, 27:, :3] == 180).all()), "a flat region stays flat")
     check(int(big[:, 20:22, :3].min()) >= 170, "no dark fringe where the body meets the air")
-    check(bool((big[:, :20, 3] == 0).all() and (big[:, 20:, 3] == 255).all()),
-          "the body's edge stays at the same place")  # fmt: skip
+    check(bool((big[:, :19, 3] == 0).all() and (big[:, 25:, 3] == 255).all()
+               and big[:, 21, 3].max() < 128 <= big[:, 22, 3].min()),
+          "the display edge sits one source voxel in, half alpha at 21-22")  # fmt: skip
 
     print("imaging check passed" if not failures else f"imaging check failed: {len(failures)}")
     return 1 if failures else 0
