@@ -5,12 +5,13 @@ structure, named by its UBERON ID, plus a manifest.
   python scripts/mesh.py --case s1086 [--seg-dir <dir>] [--out-dir <dir>]
       [--max-triangles 40000]
 
-For each structure: crop the mask, extract a closed surface with discrete
-flying edges and smooth it (windowed sinc, VTK), keep the largest connected
-piece, decimate it to at most --max-triangles (organs) or --max-bone-triangles
-(bones) while it stays closed, and orient the normals outward. Coordinates go
-from the CT's RAS millimetres to glTF metres (+Y up, +Z anterior, +X the
-body's left), and the whole set is moved so its bounding box is centred on the origin.
+For each structure: crop the mask, upsample it 2x, blur it and contour it at
+the level that keeps the mask's voxel volume, smooth lightly, keep the
+largest connected piece, decimate it to at most --max-triangles (organs) or
+--max-bone-triangles (bones) while it stays closed, and orient the normals
+outward. Coordinates go from the CT's RAS millimetres to glTF metres (+Y up,
++Z anterior, +X the body's left), and the whole set is moved so its bounding
+box is centred on the origin.
 
 --set organs (the default) needs every organ; --set reference adds the trunk
 skeleton and lists, rather than meshes, a bone the scan misses or cuts (the
@@ -20,7 +21,8 @@ assemble.py measures and never releases.
 
 Writes data/work/<case>/<case>.<set>.glb and <case>.<set>.manifest.json with each node's
 UBERON ID, system, licence, triangle count and volume, and the GLB's SHA-256.
-It stops if any surface is open, non-manifold or inside out. VTK runs on
+It stops if any surface is open, non-manifold or inside out, or if its volume
+is more than 5% off the mask's voxel volume. VTK runs on
 one thread so the same masks give the same bytes.
 """
 
@@ -39,6 +41,7 @@ os.environ.setdefault("VTK_SMP_BACKEND_IN_USE", "Sequential")
 import nibabel as nib  # noqa: E402
 import numpy as np  # noqa: E402
 import vtk  # noqa: E402
+from scipy import ndimage  # noqa: E402
 from vtk.util.numpy_support import numpy_to_vtk, vtk_to_numpy  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -49,6 +52,14 @@ from structures import SETS, Structure, node_name  # noqa: E402
 # RAS millimetres to glTF metres: X = -R (the body's left), Y = S, Z = A.
 # Limb bones run out of a trunk scan by design; their joint ends are what count.
 MIN_VOXELS = 100  # a mask smaller than this (0.3 ml at 1.5 mm) is a stray label, not a bone
+SETS_OF_PIECES = {"costal_cartilages"}  # one node, several separate pieces
+MIN_PIECE_VOXELS = 30  # a piece smaller than this in a set is a stray label
+LEVEL_STEPS = 12
+PAD = 2  # empty voxels around a crop, so the surface closes
+UPSAMPLE = 2
+BLUR_VOXELS = (1.0, 0.5, 0.25)  # Gaussian sigmas to try, in source voxels
+BLUR_TOLERANCE = 0.02  # a blur is kept if the surface's volume is this close
+MAX_VOLUME_DRIFT = 0.05  # a mesh may differ from its voxel volume by this share
 CUT_ALLOWED = {"femur_left", "femur_right", "humerus_left", "humerus_right"}
 OUTLINE = Structure("body_trunc", "outline", "trunk outline", "outline", (0.8, 0.8, 0.8))
 RAS_TO_GLTF = np.array([[-1, 0, 0], [0, 0, 1], [0, 1, 0]], dtype=np.float64) * 0.001
@@ -96,46 +107,138 @@ def cut_by_scan(path: Path) -> bool:
     return bool(k[0] == 0 or k[-1] == data.shape[2] - 1)
 
 
-def surface(path: Path, max_triangles: int) -> tuple[np.ndarray, np.ndarray]:
-    """Returns (vertices in RAS mm, triangles) for the mask at path."""
-    image = nib.load(path)
-    data = np.asanyarray(image.dataobj) > 0
-    if not data.any():
-        raise ValueError(f"{path.name} is empty")
-    lo = np.maximum(np.argwhere(data).min(0) - 2, 0)
-    hi = np.argwhere(data).max(0) + 3
-    crop = np.pad(data[lo[0] : hi[0], lo[1] : hi[1], lo[2] : hi[2]], 1).astype(np.uint8)
+def drop_small_pieces(poly: vtk.vtkPolyData, min_volume: float) -> vtk.vtkPolyData:
+    """Keeps the connected pieces of poly enclosing at least min_volume (mm3)."""
+    regions = vtk.vtkPolyDataConnectivityFilter()
+    regions.SetInputData(poly)
+    regions.SetExtractionModeToAllRegions()
+    regions.Update()
+    keep = vtk.vtkAppendPolyData()
+    for region in range(regions.GetNumberOfExtractedRegions()):
+        one = vtk.vtkPolyDataConnectivityFilter()
+        one.SetInputData(poly)
+        one.SetExtractionModeToSpecifiedRegions()
+        one.AddSpecifiedRegion(region)
+        tidy = vtk.vtkCleanPolyData()
+        tidy.SetInputConnection(one.GetOutputPort())
+        triangulate = vtk.vtkTriangleFilter()
+        triangulate.SetInputConnection(tidy.GetOutputPort())
+        mass = vtk.vtkMassProperties()
+        mass.SetInputConnection(triangulate.GetOutputPort())
+        mass.Update()
+        if mass.GetVolume() >= min_volume:
+            keep.AddInputData(tidy.GetOutput())
+    keep.Update()
+    clean = vtk.vtkCleanPolyData()
+    clean.SetInputConnection(keep.GetOutputPort())
+    clean.Update()
+    return clean.GetOutput()
 
-    spacing = np.linalg.norm(image.affine[:3, :3], axis=0)
-    vtk_image = vtk.vtkImageData()
-    vtk_image.SetDimensions(*crop.shape)
-    vtk_image.SetSpacing(*spacing)
-    scalars = numpy_to_vtk(crop.ravel(order="F"), deep=True)
-    vtk_image.GetPointData().SetScalars(scalars)
 
-    # Surface nets leaves open edges where voxels touch only diagonally;
-    # discrete flying edges gives a closed surface, then windowed sinc smooths it.
-    edges = vtk.vtkDiscreteFlyingEdges3D()
-    edges.SetInputData(vtk_image)
-    edges.SetValue(0, 1)
+def contour(image: vtk.vtkImageData, level: float) -> vtk.vtkFlyingEdges3D:
+    edges = vtk.vtkFlyingEdges3D()
+    edges.SetInputData(image)
+    edges.SetValue(0, level)
     edges.ComputeNormalsOff()
-    edges.ComputeGradientsOff()
+    edges.Update()
+    return edges
+
+
+def finished(image: vtk.vtkImageData, level: float, pieces: bool) -> vtk.vtkPolyData:
+    """Contour at level, smooth (windowed sinc), keep the largest piece (or all, for a set)."""
+    edges = contour(image, level)  # kept referenced: VTK must not lose it mid-pipeline
     smooth = vtk.vtkWindowedSincPolyDataFilter()
     smooth.SetInputConnection(edges.GetOutputPort())
     smooth.SetNumberOfIterations(30)
-    smooth.SetPassBand(0.01)
+    smooth.SetPassBand(0.02)
     smooth.NormalizeCoordinatesOn()
     smooth.BoundarySmoothingOff()
     smooth.FeatureEdgeSmoothingOff()
     smooth.NonManifoldSmoothingOn()
-
-    largest = vtk.vtkPolyDataConnectivityFilter()
-    largest.SetInputConnection(smooth.GetOutputPort())
-    largest.SetExtractionModeToLargestRegion()
+    regions = vtk.vtkPolyDataConnectivityFilter()
+    regions.SetInputConnection(smooth.GetOutputPort())
+    if pieces:
+        regions.SetExtractionModeToAllRegions()
+    else:
+        regions.SetExtractionModeToLargestRegion()
     clean = vtk.vtkCleanPolyData()
-    clean.SetInputConnection(largest.GetOutputPort())
+    clean.SetInputConnection(regions.GetOutputPort())
     clean.Update()
-    poly = clean.GetOutput()
+    result = vtk.vtkPolyData()
+    result.DeepCopy(clean.GetOutput())
+    return result
+
+
+def enclosed_volume(poly: vtk.vtkPolyData) -> float:
+    triangulate = vtk.vtkTriangleFilter()
+    triangulate.SetInputData(poly)
+    mass = vtk.vtkMassProperties()
+    mass.SetInputConnection(triangulate.GetOutputPort())
+    mass.Update()
+    return mass.GetVolume()
+
+
+def smoothest(
+    fine: np.ndarray, spacing: np.ndarray, blur: float, target: float, pieces: bool
+) -> vtk.vtkPolyData:
+    """The finished surface of the upsampled mask blurred by `blur` source voxels,
+    at the contour level whose finished volume is the target (bisection)."""
+    field = ndimage.gaussian_filter(fine, blur * UPSAMPLE)
+    image = vtk.vtkImageData()
+    image.SetDimensions(*field.shape)
+    image.SetSpacing(*(spacing / UPSAMPLE))
+    image.SetOrigin(*(-spacing * (UPSAMPLE - 1) / (2 * UPSAMPLE)))
+    image.GetPointData().SetScalars(numpy_to_vtk(field.ravel(order="F"), deep=True))
+    # The level is chosen on the finished surface (contoured, smoothed and cut
+    # to the kept pieces), so neither the blur nor the smoothing moves its volume.
+    low, high = 0.05, 0.95
+    for _ in range(LEVEL_STEPS):
+        level = (low + high) / 2
+        if enclosed_volume(finished(image, level, pieces)) > target:
+            low = level
+        else:
+            high = level
+    return finished(image, (low + high) / 2, pieces)
+
+
+def surface(
+    path: Path, max_triangles: int, pieces: bool = False
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """Returns (vertices in RAS mm, triangles, voxel volume in ml) for the mask at path.
+
+    The mask is upsampled 2x and blurred (Gaussian, one source voxel; half or a
+    quarter where a thin, lobed structure would come apart), so the surface
+    follows a smooth field instead of voxel steps. The contour level is
+    then chosen, by bisection, so the surface encloses the mask's own voxel
+    volume: a fixed 0.5 would shrink a thin bone such as a rib by up to 12%.
+    A light windowed-sinc pass (Taubin-like, volume-keeping) removes the rest
+    of the noise.
+    """
+    image = nib.load(path)
+    data = np.asanyarray(image.dataobj) > 0
+    if not data.any():
+        raise ValueError(f"{path.name} is empty")
+    # The volume to keep is that of the pieces the mesh keeps: the largest, or,
+    # for a set, every piece of at least MIN_PIECE_VOXELS. Stray voxels a
+    # segmentation leaves elsewhere are dropped and do not count.
+    labels, count = ndimage.label(data, structure=np.ones((3, 3, 3)))
+    sizes = np.bincount(labels.ravel())[1:]
+    keep = np.flatnonzero(sizes >= MIN_PIECE_VOXELS) + 1 if pieces else [int(sizes.argmax()) + 1]
+    data = np.isin(labels, keep)  # the contour level must be tuned on what is kept
+    lo = np.maximum(np.argwhere(data).min(0) - 3, 0)
+    hi = np.argwhere(data).max(0) + 4
+    crop = np.pad(data[lo[0] : hi[0], lo[1] : hi[1], lo[2] : hi[2]], PAD).astype(np.float32)
+    spacing = np.linalg.norm(image.affine[:3, :3], axis=0)
+    target = float(data.sum() * np.prod(spacing))
+
+    # grid_mode keeps voxel centres aligned: fine sample j sits at (j + 0.5) / 2 - 0.5.
+    fine = ndimage.zoom(crop, UPSAMPLE, order=1, grid_mode=True, mode="nearest")
+    for blur in BLUR_VOXELS:
+        poly = smoothest(fine, spacing, blur, target, pieces)
+        if abs(enclosed_volume(poly) / target - 1) <= BLUR_TOLERANCE:
+            break  # a thin, lobed organ (the pancreas) can need a lighter blur
+    if pieces:
+        poly = drop_small_pieces(poly, MIN_PIECE_VOXELS * float(np.prod(spacing)))
 
     if poly.GetNumberOfCells() > max_triangles:
         poly = decimate(poly, max_triangles)
@@ -143,9 +246,9 @@ def surface(path: Path, max_triangles: int) -> tuple[np.ndarray, np.ndarray]:
     points = vtk_to_numpy(poly.GetPoints().GetData()).astype(np.float64)
     triangles = triangles_of(poly)
     # The padded crop's first voxel sits at the origin.
-    ijk = points / spacing + lo - 1
+    ijk = points / spacing + lo - PAD
     ras = ijk @ image.affine[:3, :3].T + image.affine[:3, 3]
-    return ras, triangles.astype(np.uint32)
+    return ras, triangles.astype(np.uint32), target / 1000
 
 
 def outward(vertices: np.ndarray, triangles: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -280,7 +383,7 @@ def main() -> None:
     parser.add_argument("--out-dir", type=Path, help="default: data/work/<case>")
     parser.add_argument("--set", choices=SETS, default="organs", help="structures to mesh")
     parser.add_argument("--max-triangles", type=int, default=40000, help="per organ")
-    parser.add_argument("--max-bone-triangles", type=int, default=6000, help="per bone")
+    parser.add_argument("--max-bone-triangles", type=int, default=15000, help="per bone")
     args = parser.parse_args()
 
     work = args.out_dir or ROOT / "data" / "work" / args.case
@@ -296,13 +399,16 @@ def main() -> None:
             missing.append(s.label)
             continue
         try:
-            ras, triangles = surface(path, cap)
+            ras, triangles, voxel_ml = surface(path, cap, pieces=s.label in SETS_OF_PIECES)
         except ValueError:
             if args.set == "organs":
                 raise
             missing.append(s.label)
             continue
-        parts.append({"structure": s, "vertices": ras @ RAS_TO_GLTF.T, "triangles": triangles})
+        parts.append({
+            "structure": s, "vertices": ras @ RAS_TO_GLTF.T, "triangles": triangles,
+            "voxel_ml": voxel_ml,
+        })  # fmt: skip
 
     everything = np.vstack([p["vertices"] for p in parts])
     centre = (everything.min(0) + everything.max(0)) / 2
@@ -318,6 +424,9 @@ def main() -> None:
             p["triangles"], p["normals"] = p["triangles"][:, ::-1].copy(), -p["normals"]
         if signed_volume(p["vertices"], p["triangles"]) <= 0:
             sys.exit(f"{name}: the normals point inward")
+        p["drift"] = signed_volume(p["vertices"], p["triangles"]) * 1e6 / p["voxel_ml"] - 1
+        if abs(p["drift"]) > MAX_VOLUME_DRIFT:
+            sys.exit(f"{name}: the mesh's volume is {p['drift']:+.1%} off its voxel volume")
 
     glb = work / f"{args.case}.{args.set}.glb"
     write_glb(glb, parts)
@@ -325,7 +434,7 @@ def main() -> None:
     if args.set == "reference" and outline_path.exists():
         # The trunk outline, in the same frame, for assemble.py to measure. It is
         # the outer surface of a person's trunk, so it is never released.
-        ras, triangles = surface(outline_path, args.max_triangles)
+        ras, triangles, _ = surface(outline_path, args.max_triangles)
         vertices = (ras @ RAS_TO_GLTF.T - centre).astype(np.float32)
         triangles, normals = outward(vertices, triangles)
         outline = {"structure": OUTLINE, "vertices": vertices, "triangles": triangles}
@@ -348,6 +457,9 @@ def main() -> None:
                 "licence": SOURCE_LICENCE,
                 "triangles": int(len(p["triangles"])),
                 "volume_ml": round(signed_volume(p["vertices"], p["triangles"]) * 1e6, 1),
+                "voxel_volume_ml": round(p["voxel_ml"], 1),
+                "pieces": "several" if p["structure"].label in SETS_OF_PIECES else "one",
+                "volume_drift": round(p["drift"], 4),
             }
             for p in parts
         ],
