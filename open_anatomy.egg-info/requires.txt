@@ -1,9 +1,0 @@
-
-[mesh]
-nibabel==5.4.2
-numpy==2.5.4
-vtk==9.7.2
-
-[pipeline]
-open-anatomy[mesh]
-TotalSegmentator==2.18.0

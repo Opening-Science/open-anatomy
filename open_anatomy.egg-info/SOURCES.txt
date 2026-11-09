@@ -1,9 +1,0 @@
-LICENSE
-NOTICE
-README.md
-pyproject.toml
-open_anatomy.egg-info/PKG-INFO
-open_anatomy.egg-info/SOURCES.txt
-open_anatomy.egg-info/dependency_links.txt
-open_anatomy.egg-info/requires.txt
-open_anatomy.egg-info/top_level.txt
