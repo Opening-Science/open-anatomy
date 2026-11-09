@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import math
 import struct
@@ -13,7 +14,6 @@ import nibabel as nib
 import numpy as np
 import numpy.typing as npt
 import pytest
-
 import size_body
 
 FloatArray = npt.NDArray[np.float64]
@@ -231,7 +231,9 @@ def choose(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     *flags: str,
+    bodies: dict[tuple[float, float], dict[str, float]] | None = None,
 ) -> tuple[dict[str, Any], str]:
+    bodies = BODIES if bodies is None else bodies
     grid = tmp_path / "data" / "bodies" / "grid"
     grid.mkdir(parents=True)
     looked_up: dict[str, dict[str, float]] = {}
@@ -239,7 +241,7 @@ def choose(
         for height in size_body.GRID:
             path = grid / f"anny-male-w{weight}-h{height}.rigged.glb"
             path.write_bytes(b"")
-            looked_up[path.name] = BODIES.get((weight, height), OTHER)
+            looked_up[path.name] = bodies.get((weight, height), OTHER)
 
     def fake_anny(path: Path) -> dict[str, float]:
         return looked_up[path.name]
@@ -283,3 +285,53 @@ def test_scale_free_reports_a_zero_error_for_an_exact_shape(
     best = next(line for line in out.splitlines() if line.startswith("  weight"))
     assert best.startswith("  weight 0.3 height 0.7:")
     assert best.endswith("error 0.0000")
+
+
+# --scale-free and blender/fit_body.py must use the same scale.
+
+
+def test_uniform_scale_is_the_geometric_mean_of_the_three_ratios() -> None:
+    scale, ratios = size_body.uniform_scale(CT, {"rise": 400.0, "width": 250.0, "depth": 200.0})
+    assert ratios == {"rise": 1.25, "width": 1.2, "depth": 1.0}
+    assert scale == pytest.approx((1.25 * 1.2 * 1.0) ** (1 / 3))
+
+
+# Two bodies that the old rule (scale to the rise alone, then compare width and
+# depth) and fit_body's rule (the geometric mean of all three ratios) rank the
+# other way round. Rise-only: 0.0200 against 0.0126; geometric mean: 0.0059
+# against 0.0125.
+EVEN = {"rise": 400.0, "width": 264.0, "depth": 176.0}  # trunk 10% broad for its rise
+UNEVEN = {"rise": 400.0, "width": 260.0, "depth": 148.0}  # rise right, wide and shallow
+
+
+def test_scale_free_scores_bodies_at_the_scale_fit_body_applies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bodies = {(0.5, 0.5): UNEVEN, (0.3, 0.7): EVEN}
+    chosen, out = choose(tmp_path, monkeypatch, capsys, "--scale-free", bodies=bodies)
+    assert (chosen["weight"], chosen["height"]) == (0.3, 0.7)
+    k, _ = size_body.uniform_scale(CT, EVEN)
+    expected = sum(((EVEN[m] * k - CT[m]) / CT[m]) ** 2 for m in ("rise", "width", "depth"))
+    best = next(line for line in out.splitlines() if line.startswith("  weight"))
+    assert best.endswith(f"error {expected:.4f}")
+
+
+def test_fit_body_scales_anny_with_size_bodys_uniform_scale() -> None:
+    # fit_body.py runs only inside Blender, so check its source: it must take
+    # its scale from size_body.uniform_scale and compute none of its own.
+    source = (Path(__file__).resolve().parent.parent / "blender" / "fit_body.py").read_text()
+    tree = ast.parse(source)
+    imported = {
+        alias.name
+        for n in ast.walk(tree)
+        if isinstance(n, ast.ImportFrom) and n.module == "size_body"
+        for alias in n.names
+    }
+    assert "uniform_scale" in imported
+    calls = [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "uniform_scale"
+    ]
+    assert len(calls) == 1
+    assert "np.exp(np.mean(np.log" not in source

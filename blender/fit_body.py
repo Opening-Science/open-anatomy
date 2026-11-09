@@ -10,12 +10,17 @@ Inputs (after `--`):
   --outline <glb>     the CT's trunk outline from the same run (measured, never exported)
   --out <glb>         ANNY's skin and skeleton, posed, plus the CT nodes
   --report <json>     joint residuals before and after, containment, notes
+  --case <id>         the CT's case in sources.json; its record gives the sex for the
+                      ANSUR II comparison
+  [--sex male|female] the sex, for a CT with no case record; must agree with the record
+                      if both are given. Without either, the script stops.
   [--render-dir <dir> --render-name <stem>]   front, three-quarter and trunk renders
 
 Steps:
 1. Scale ANNY uniformly by the geometric mean of three ratios to the CT: the
    hip-to-shoulder rise (sphere centres fitted to the femoral and humeral
-   heads) and the trunk's width and depth halfway up it; turn it about the vertical
+   heads) and the trunk's width and depth halfway up it (size_body.uniform_scale,
+   the scale size_body.py --scale-free assumes); turn it about the vertical
    so the hip axes agree, put its hip midpoint at the CT's height, and centre
    its trunk on the CT's trunk outline side to side and front to back. This
    placed, unposed body gives the "before" residuals.
@@ -42,6 +47,7 @@ the same inputs give the same file.
 
 from __future__ import annotations
 
+import json
 import math
 import sys
 from pathlib import Path
@@ -70,6 +76,7 @@ from assemble import (  # noqa: E402
     trunk_points,
 )
 from mathutils import Matrix, Vector  # noqa: E402
+from size_body import uniform_scale  # noqa: E402
 from structures import SKELETON  # noqa: E402
 from twinblend.blender_env import (  # noqa: E402
     bake_world,
@@ -188,7 +195,34 @@ ROOT = Path(__file__).resolve().parent.parent
 ANSUR = {"male": "ANSUR_II_MALE_Public.csv", "female": "ANSUR_II_FEMALE_Public.csv"}
 ANSUR_MEASURES = ("stature", "biacromialbreadth", "bicristalbreadth", "chestbreadth",
                   "chestdepth", "hipbreadth")  # fmt: skip
+# ANSUR measures these over the skin above the bony landmarks; here they are
+# taken bone to bone on the CT, so they sit systematically low and are given
+# for orientation only, never flagged against ANSUR's range.
+BONE_MEASURES = ("biacromialbreadth", "bicristalbreadth")
 SCAPULA_RIBS = (2, 7)  # a scapula lies over the back of ribs 2 to 7
+SEX = {"m": "male", "f": "female", "male": "male", "female": "female"}
+
+
+def case_sex(case: str | None, given: str | None) -> str:
+    """The sex for the ANSUR II comparison: the case record's, else --sex; never a guess."""
+    recorded = None
+    if case:
+        sources = json.loads((ROOT / "sources.json").read_text())
+        if case not in sources["cases"]:
+            sys.exit(f"fit_body.py: case {case} is not in sources.json")
+        entry = sources["cases"][case]
+        raw = entry.get("record", {}).get("sex", entry.get("sex"))
+        recorded = SEX.get(str(raw).lower()) if raw else None
+    if given is not None and given not in ("male", "female"):
+        sys.exit(f"fit_body.py: --sex must be male or female, not {given}")
+    if recorded and given and recorded != given:
+        sys.exit(f"fit_body.py: --sex {given}, but case {case}'s record says {recorded}")
+    if not (recorded or given):
+        sys.exit(
+            "fit_body.py needs the sex for the ANSUR II comparison: pass --case with a "
+            "case whose record in sources.json gives it, or --sex male|female"
+        )
+    return recorded or given
 
 
 def ansur_ranges(sex: str) -> dict[str, list[float]]:
@@ -209,10 +243,13 @@ def proportions(skin, names: dict, sex: str) -> dict:
 
     Skin (ANNY, fitted): stature; chest breadth and depth at the sternum's
     middle height; hip breadth at the hip joints' height (trunk vertices only).
+    These are placed among the ANSUR II percentiles for the sex and flagged
+    outside the 1st to 99th.
     Bone (the CT, true size): biacromial breadth between the acromions (each
     scapula's most lateral point in its top fifth) and bicristal breadth across
-    the iliac crests (the hip bones' top 3 cm). Each is placed among the ANSUR
-    II percentiles for the sex and flagged outside the 1st to 99th.
+    the iliac crests (the hip bones' top 3 cm). ANSUR takes both over the skin,
+    so a bone-to-bone value sits below it by the soft tissue on each side; they
+    are listed with ANSUR's percentiles for orientation but not flagged.
     """
     skin_pts = trunk_points(skin)
     body_pts = coords_world(skin)
@@ -243,7 +280,12 @@ def proportions(skin, names: dict, sex: str) -> dict:
         mm = metres * 1000
         lo, mid, hi = ranges[k]
         table[k] = {"mm": round(mm), "ansur1": round(lo), "ansur50": round(mid),
-                    "ansur99": round(hi), "inRange": bool(lo <= mm <= hi)}  # fmt: skip
+                    "ansur99": round(hi)}  # fmt: skip
+        if k in BONE_MEASURES:
+            table[k]["basis"] = "bone to bone on the CT; ANSUR's is over the skin, not comparable"
+        else:
+            table[k]["basis"] = "skin of the fitted ANNY body, as ANSUR"
+            table[k]["inRange"] = bool(lo <= mm <= hi)
     girdle = {}
     for side, (scap, clav) in {
         "L": ("FMA_13396", "FMA_13323"),
@@ -304,6 +346,8 @@ def main() -> None:
     if not (body_path and ct_path and outline_path and out and report_path):
         sys.stderr.write("fit_body.py needs --body, --ct, --outline, --out and --report.\n")
         sys.exit(2)
+    case = option(args, "--case")
+    sex = case_sex(case, option(args, "--sex"))
 
     empty_scene()
     body = import_glb(body_path)
@@ -345,8 +389,9 @@ def main() -> None:
     hips_ct = mid("upperleg01", targets.get)[2]
     cw, cd, _ = section(coords(outline), hips_ct + ct_rise / 2, SLAB)
     aw, ad, _ = section(trunk_points(skin), hips_rest + rest_rise / 2, SLAB)
-    ratios = {"rise": ct_rise / rest_rise, "width": cw / aw, "depth": cd / ad}
-    scale = float(np.exp(np.mean(np.log(list(ratios.values())))))
+    scale, ratios = uniform_scale(
+        {"rise": ct_rise, "width": cw, "depth": cd}, {"rise": rest_rise, "width": aw, "depth": ad}
+    )
     armature.scale = (scale, scale, scale)
     bpy.context.view_layer.update()
     hip_ct = targets["upperleg01.L"] - targets["upperleg01.R"]
@@ -469,11 +514,6 @@ def main() -> None:
         o.matrix_world = world
         followed[o.name] = bone
     inside = {o.name: round(inside_share(coords(o)[::4], tree), 3) for o in ct}
-    sex = option(
-        args,
-        "--sex",
-        "female" if "female" in Path(body_path).name or "-f" in Path(body_path).stem else "male",
-    )
     measured = proportions(skin, names, sex)
 
     mat = skin_material()
@@ -494,7 +534,7 @@ def main() -> None:
     report = {
         "method": "one-to-one: the anatomy keeps its true size; ANNY is scaled, placed and posed",
         "body": Path(body_path).name, "bodySha256": sha256(body_path),
-        "ct": Path(ct_path).name, "ctSha256": sha256(ct_path),
+        "ct": Path(ct_path).name, "ctSha256": sha256(ct_path), "case": case, "sex": sex,
         "output": Path(out).name, "outputSha256": sha256(out),
         "blender": bpy.app.version_string,
         "annyScale": round(scale, 4), "annyTurnDeg": round(math.degrees(turn), 2),
@@ -517,9 +557,10 @@ def main() -> None:
     print(f"  spine direction: {spine_before:.1f} -> {spine_after:.1f} deg (mean per bone)")
     print(f"  inside skin: {report['meanInsideSkin']:.1%}")
     for k, v in measured["vsAnsurII"].items():
-        mark = "ok " if v["inRange"] else "OUT"
+        mark = "bone" if "inRange" not in v else "ok  " if v["inRange"] else "OUT "
         spread = f"{v['ansur1']}/{v['ansur50']}/{v['ansur99']}"
-        print(f"  {mark} {k}: {v['mm']} mm (ANSUR II 1st/50th/99th {spread})")
+        caveat = "; bone to bone, ANSUR's is over the skin" if "inRange" not in v else ""
+        print(f"  {mark} {k}: {v['mm']} mm (ANSUR II 1st/50th/99th {spread}{caveat})")
     for k, v in measured["girdle"].items():
         print(f"  {k}: {v}")
     for n in notes:

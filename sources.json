@@ -36,7 +36,7 @@
       "file": "ANSUR_II_MALE_Public.csv",
       "bytes": 2000794,
       "sha256": "0547aea0170e5293de519389981135e75803f02e6d40c77ace740decc0caac64",
-      "used": "blender/fit_body.py compares body proportions with its 1st, 50th and 99th percentiles"
+      "used": "blender/fit_body.py compares body proportions with its 1st, 50th and 99th percentiles, as a plausibility check only; never in a released asset (see NOTICE)"
     },
     "ansur-ii-female": {
       "title": "ANSUR II anthropometric survey, female public data (US Army, 2012; released 2017)",
@@ -46,7 +46,7 @@
       "file": "ANSUR_II_FEMALE_Public.csv",
       "bytes": 976573,
       "sha256": "ed7e800aa97a4d42f8286b988be2fe1883a2e789588169db959864b707d1757a",
-      "used": "blender/fit_body.py compares body proportions with its 1st, 50th and 99th percentiles"
+      "used": "blender/fit_body.py compares body proportions with its 1st, 50th and 99th percentiles, as a plausibility check only; never in a released asset (see NOTICE)"
     }
   },
   "cases": {
