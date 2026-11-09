@@ -12,7 +12,9 @@ It then bakes ANNY on a grid of weight and height phenotypes (0.1 to 0.9),
 caching each body in data/bodies/grid/, measures each the same way (its
 upperleg01 and upperarm01 joints; skin vertices that follow the trunk), and
 prints the weight and height whose rise, width and depth differ least from the
-CT's, summed as squared relative errors. sources.json then records the choice.
+CT's, summed as squared relative errors; with --scale-free, whose width and
+depth do once ANNY is scaled to the CT's rise, as fit_body.py scales it.
+sources.json then records the choice.
 """
 
 from __future__ import annotations
@@ -137,6 +139,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--case", required=True)
     parser.add_argument("--sex", choices=("male", "female"), required=True)
+    parser.add_argument(
+        "--scale-free", action="store_true",
+        help="match shape only (width and depth per unit of rise), for fit_body.py, "
+        "which scales ANNY uniformly to the CT's rise",
+    )  # fmt: skip
     args = parser.parse_args()
     target = measure_ct(args.case)
     print(f"{args.case}: rise {target['rise']:.0f} mm, trunk {target['width']:.0f} x "
@@ -154,7 +161,11 @@ def main() -> None:
                     check=True, capture_output=True,
                 )  # fmt: skip
             got = measure_anny(path)
-            error = sum(((got[k] - target[k]) / target[k]) ** 2 for k in target)
+            if args.scale_free:
+                k = target["rise"] / got["rise"]
+                error = sum(((got[m] * k - target[m]) / target[m]) ** 2 for m in ("width", "depth"))
+            else:
+                error = sum(((got[k] - target[k]) / target[k]) ** 2 for k in target)
             results.append((error, weight, height, got))
     results.sort(key=lambda r: r[0])
     for error, weight, height, got in results[:5]:
