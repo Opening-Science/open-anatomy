@@ -213,8 +213,11 @@ def test_measure_ct_on_a_synthetic_body(tmp_path: Path, monkeypatch: pytest.Monk
     assert got["depth"] == pytest.approx(39 * 2.0)
 
 
-# The choice of body in main(), with the CT and ANNY measures stubbed and the
-# grid of baked bodies already cached under tmp_path, so nothing is baked.
+# The choice of body in main(), with the CT and ANNY measures stubbed and every
+# body the grid and its refinement may ask for already cached under tmp_path,
+# so nothing is baked.
+
+VALUES = sorted({*size_body.GRID, *(round(k * size_body.FINE_STEP, 2) for k in range(21))})
 
 CT = {"rise": 500.0, "width": 300.0, "depth": 200.0}
 OTHER = {"rise": 400.0, "width": 330.0, "depth": 150.0}
@@ -237,8 +240,8 @@ def choose(
     grid = tmp_path / "data" / "bodies" / "grid"
     grid.mkdir(parents=True)
     looked_up: dict[str, dict[str, float]] = {}
-    for weight in size_body.GRID:
-        for height in size_body.GRID:
+    for weight in VALUES:
+        for height in VALUES:
             path = grid / f"anny-male-w{weight}-h{height}.rigged.glb"
             path.write_bytes(b"")
             looked_up[path.name] = bodies.get((weight, height), OTHER)
@@ -285,6 +288,26 @@ def test_scale_free_reports_a_zero_error_for_an_exact_shape(
     best = next(line for line in out.splitlines() if line.startswith("  weight"))
     assert best.startswith("  weight 0.3 height 0.7:")
     assert best.endswith("error 0.0000")
+
+
+def test_a_best_body_between_grid_points_is_found_by_the_refinement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    near = {"rise": 495.0, "width": 295.0, "depth": 202.0}
+    bodies = {(0.5, 0.5): near, (0.55, 0.45): CT}
+    chosen, out = choose(tmp_path, monkeypatch, capsys, bodies=bodies)
+    assert (chosen["weight"], chosen["height"]) == (0.55, 0.45)
+    assert chosen["edge"] == []
+    assert "warning" not in out
+
+
+def test_a_best_body_at_annys_limit_is_warned_about(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    chosen, out = choose(tmp_path, monkeypatch, capsys, bodies={(1.0, 0.5): CT})
+    assert (chosen["weight"], chosen["height"]) == (1.0, 0.5)
+    assert chosen["edge"] == ["weight 1.0 is at ANNY's limit; the CT may lie beyond it"]
+    assert "warning: weight 1.0 is at ANNY's limit" in out
 
 
 # --scale-free and blender/fit_body.py must use the same scale.
