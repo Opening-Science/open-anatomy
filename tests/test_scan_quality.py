@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 import pytest
+
 import scan_quality
 from scan_quality import closest_on_triangles, cross_section, measures, regions, shape_change
 
