@@ -330,30 +330,34 @@ def modelled_cartilage(
     return np.vstack(vertices), np.vstack(triangles).astype(np.uint32), skipped
 
 
-def scan_outside(ct_path: Path) -> np.ndarray:
+def scan_outside(ct_path: Path) -> tuple[np.ndarray, np.ndarray]:
     """The part of a CT volume that was never scanned: the constant fill a
     scanner writes beyond its field of view (a circle in-plane, a slanted edge
     from a tilted gantry, empty end slices). Voxels at or below PADDING_HU
-    (never tissue; air is about -1000 HU with noise) that survive a small
-    opening and join the volume's border."""
-    hu = np.asanyarray(nib.load(ct_path).dataobj)
-    pad = ndimage.binary_opening(hu <= PADDING_HU, structure=np.ones((3, 3, 3)))
+    (never tissue; air is about -1000 HU with noise) in regions that survive a
+    small opening and join the volume's border, grown back through the fill
+    so the thin end of a gantry wedge stays outside too. Returns the mask and
+    the CT's affine, so masks can be checked against the same grid."""
+    image = nib.load(ct_path)
+    fill = np.asanyarray(image.dataobj) <= PADDING_HU
+    pad = ndimage.binary_opening(fill, structure=np.ones((3, 3, 3)))
     labels, _ = ndimage.label(pad)
     border = np.concatenate([
         labels[0].ravel(), labels[-1].ravel(), labels[:, 0].ravel(), labels[:, -1].ravel(),
         labels[:, :, 0].ravel(), labels[:, :, -1].ravel(),
     ])  # fmt: skip
-    return np.isin(labels, np.setdiff1d(np.unique(border), [0]))
+    kept = np.isin(labels, np.setdiff1d(np.unique(border), [0]))
+    return ndimage.binary_propagation(kept, mask=fill), image.affine
 
 
-def cut_reason(path: Path, outside: np.ndarray | None = None) -> str | None:
+def cut_reason(path: Path, outside: tuple[np.ndarray, np.ndarray] | None = None) -> str | None:
     """Why a mask cannot be a whole structure, or None if it is whole.
 
     Smaller than MIN_ML (measured with the voxel size from the affine, so the
     limit is the same at 0.8 mm and 1.5 mm), touching any face of the volume
     (the first or last slice, or the in-plane border), or touching the part of
     the volume that was never scanned (outside, from scan_outside): the scan
-    cut it.
+    cut it. A mask on another grid than the CT's raises ValueError.
     """
     if not path.exists():
         return "not segmented"
@@ -365,12 +369,20 @@ def cut_reason(path: Path, outside: np.ndarray | None = None) -> str | None:
         k = np.flatnonzero(data.any(tuple(a for a in range(3) if a != axis)))
         if k[0] == 0 or k[-1] == data.shape[axis] - 1:
             return f"cut by the scan's edge (axis {axis})"
-    if outside is not None and (ndimage.binary_dilation(data) & outside).any():
+    if outside is not None and (ndimage.binary_dilation(data) & on_grid(image, outside)).any():
         return "cut by the scan's edge (unscanned padding)"
     return None
 
 
-def cut_faces(path: Path, outside: np.ndarray | None = None) -> set[str]:
+def on_grid(image: nib.Nifti1Image, outside: tuple[np.ndarray, np.ndarray]) -> np.ndarray:
+    """The unscanned padding, after checking the mask lies on the CT's own grid."""
+    pad, affine = outside
+    if image.shape != pad.shape or not np.allclose(image.affine, affine, atol=1e-3):
+        raise ValueError(f"{image.get_filename()} is not on the CT's grid")
+    return pad
+
+
+def cut_faces(path: Path, outside: tuple[np.ndarray, np.ndarray] | None = None) -> set[str]:
     """The sides of the body where the scan cuts a mask: "S" or "I" (its top
     or bottom slice), "L", "R", "A" or "P" (the in-plane border), named by the
     direction each face of the volume points in RAS. Where the mask meets
@@ -392,7 +404,7 @@ def cut_faces(path: Path, outside: np.ndarray | None = None) -> set[str]:
         if k[-1] == data.shape[axis] - 1:
             faces.add(high)
     if outside is not None:
-        contact = np.argwhere(ndimage.binary_dilation(data) & outside)
+        contact = np.argwhere(ndimage.binary_dilation(data) & on_grid(image, outside))
         if len(contact):
             towards = image.affine[:3, :3] @ (contact.mean(0) - np.argwhere(data).mean(0))
             ras = int(np.argmax(np.abs(towards)))

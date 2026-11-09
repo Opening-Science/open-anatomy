@@ -94,9 +94,33 @@ def test_a_mask_one_slice_below_the_padding_is_whole(tmp_path: Path) -> None:
 
 
 def test_air_round_the_body_is_not_padding(tmp_path: Path) -> None:
-    outside = mesh.scan_outside(padded_ct(tmp_path))
+    outside, _ = mesh.scan_outside(padded_ct(tmp_path))
     assert not outside[:, :, :30].any()  # noisy air below the fill value's band stays scanned
     assert outside[:, :, 34:].all()
+
+
+def test_the_thin_end_of_a_gantry_wedge_is_outside(tmp_path: Path) -> None:
+    hu = np.full((40, 40, 40), 40.0)
+    hu[:, :, 36:] = -1024  # a thick band of padding at the top
+    for y in range(40):  # and a wedge from it, one or two voxels thin at y 30 and up
+        hu[:, y, 36 - (1 if y >= 30 else 3) : 36] = -1024
+    outside, _ = mesh.scan_outside(save_ct(tmp_path / "ct.nii.gz", hu))
+    assert outside[20, 35, 35]  # a one-voxel-thin part of the wedge
+    mask = box((40, 40, 40), (12, 30, 20), (20, 38, 35))  # reaches the wedge's thin end
+    edge = (outside, FLIPPED)
+    assert mesh.cut_reason(save(tmp_path / "m.nii.gz", mask), edge) is not None
+
+
+def test_a_mask_on_another_grid_than_the_ct_raises(tmp_path: Path) -> None:
+    edge = mesh.scan_outside(padded_ct(tmp_path))
+    mask = box((40, 40, 40), (12, 12, 12), (20, 20, 20))
+    shifted = FLIPPED.copy()
+    shifted[2, 3] += 1.5
+    with pytest.raises(ValueError, match="CT's grid"):
+        mesh.cut_reason(save(tmp_path / "m.nii.gz", mask, shifted), edge)
+    small = save(tmp_path / "s.nii.gz", mask[:30])
+    with pytest.raises(ValueError, match="CT's grid"):
+        mesh.cut_reason(small, edge)
 
 
 @pytest.mark.parametrize("axis", [0, 1, 2])
