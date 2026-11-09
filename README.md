@@ -61,6 +61,31 @@ source.
   [`assets/cc-by-sa/`](assets/cc-by-sa/), under CC BY-SA. Share-alike material
   never mixes into the CC BY folder.
 
+## Credits
+
+[NOTICE](NOTICE) has every credit line in full. In short:
+
+- **TotalSegmentator dataset (CC BY 4.0): credit required.** Every mesh,
+  slice and reference body here is derived from its CT scans, and attribution
+  is the licence's condition, not a courtesy. Anything you share that is
+  built from them must carry the credit: *TotalSegmentator dataset, Jakob
+  Wasserthal, Zenodo, CC BY 4.0* (DOI
+  [10.5281/zenodo.10047292](https://doi.org/10.5281/zenodo.10047292), small
+  subset [10.5281/zenodo.10047263](https://doi.org/10.5281/zenodo.10047263)),
+  and please cite Wasserthal et al., *Radiology: Artificial Intelligence*
+  2023 ([10.1148/ryai.230024](https://doi.org/10.1148/ryai.230024)).
+- **TotalSegmentator (Apache-2.0):** the segmentation code and the weights of
+  the Apache-2.0 tasks we run. It is installed from PyPI, not redistributed
+  here, and ships no NOTICE file of its own; NOTICE credits it, and if you
+  redistribute its code, keep its licence with it.
+- **ANNY (CC0 shapes, Apache-2.0 code):** CC0 asks for no credit; we credit
+  NAVER LABS Europe anyway (arXiv:2511.03589), as good practice. The bake uses
+  only the CC0 shapes, never ANNY's non-commercial SMPL/SMPL-X data.
+- **BodyParts3D and HRA:** nothing from them is used in this repository's
+  outputs, so no credit is needed. `blender/fit_atlas.py` can fit them; if
+  you use it, credit them, and put BodyParts3D results (CC BY-SA) under
+  `assets/cc-by-sa/`.
+
 ## Personalisation (planned)
 
 A person's clinician-verified facts will adjust the layers at load time. For
