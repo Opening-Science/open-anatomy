@@ -39,7 +39,9 @@ inputs give the same file.
 
 from __future__ import annotations
 
+import json
 import math
+import struct
 import sys
 from pathlib import Path
 
@@ -72,6 +74,7 @@ LIMB_GROUPS = ("upperarm", "lowerarm", "wrist", "metacarpal", "finger", "upperle
                "foot", "toe")  # fmt: skip
 LEVELS = (0.25, 0.4, 0.55, 0.7)  # fractions of the hip-to-shoulder rise
 SLAB = 0.01  # metres either side of a level
+MIN_BAND_POINTS = 20  # fewer outline points than this at a level: the outline misses it
 GIRDLE_RAMP = 0.15  # metres below the humeral heads where the girdle's pull fades out
 HEAD_DEPTH = 0.045  # metres of bone end used for a joint's sphere fit
 SKIN_RGBA = (0.80, 0.62, 0.52, 0.16)
@@ -181,10 +184,34 @@ def trunk_points(skin: bpy.types.Object) -> np.ndarray:
 
 
 def section(points: np.ndarray, height: float, slab: float) -> tuple[float, float, np.ndarray]:
-    """Width (x), depth (y) and centre of the points within slab of height."""
+    """Width (x), depth (y) and centre of the points within slab of height.
+
+    Raises ValueError when fewer than MIN_BAND_POINTS lie there (an outline
+    that stops below the level): percentiles of nothing are NaN, and one NaN
+    would make the whole scale NaN.
+    """
     band = points[np.abs(points[:, 2] - height) <= slab]
+    if len(band) < MIN_BAND_POINTS:
+        raise ValueError(f"{len(band)} points within {slab * 100:.1f} cm of {height:.3f} m")
     lo, hi = np.percentile(band[:, :2], 1, 0), np.percentile(band[:, :2], 99, 0)
     return float(hi[0] - lo[0]), float(hi[1] - lo[1]), (lo + hi) / 2
+
+
+def glb_asset(path: str) -> dict:
+    """The asset object of a GLB's JSON chunk (generator, copyright, extras)."""
+    with open(path, "rb") as f:
+        f.seek(12)
+        length, _ = struct.unpack("<II", f.read(8))
+        return json.loads(f.read(length)).get("asset", {})
+
+
+def credit_line(ct_path: str, body_path: str) -> str:
+    """The reference body's copyright: the CT's source (CC BY 4.0) and ANNY's."""
+    ct, body = glb_asset(ct_path), glb_asset(body_path)
+    if not ct.get("copyright") or not body.get("copyright"):
+        sys.stderr.write("The CT or body GLB has no asset copyright to credit; rebuild it.\n")
+        sys.exit(1)
+    return f"Organs and skeleton: {ct['copyright']}. Body: {body['copyright']}"
 
 
 def skin_tree(skin: bpy.types.Object) -> BVHTree:
@@ -280,6 +307,8 @@ def main() -> None:
         sys.stderr.write("assemble.py needs --body, --ct, --outline, --out and --report.\n")
         sys.exit(2)
 
+    credit = credit_line(ct_path, body_path)
+    case = glb_asset(ct_path).get("extras", {}).get("case", Path(ct_path).name)
     empty_scene()
     body = import_glb(body_path)
     armature = next(o for o in body if o.type == "ARMATURE")
@@ -321,8 +350,15 @@ def main() -> None:
     anny_trunk = trunk_points(skin)
     widths, depths, centres_c, centres_a = [], [], [], []
     for f in LEVELS:
-        wc, dc, cc = section(ct_outline, hips_c + f * (shoulders_c - hips_c), SLAB / sz)
-        wa, da, ca = section(anny_trunk, hips_a + f * (shoulders_a - hips_a), SLAB)
+        try:
+            wc, dc, cc = section(ct_outline, hips_c + f * (shoulders_c - hips_c), SLAB / sz)
+            wa, da, ca = section(anny_trunk, hips_a + f * (shoulders_a - hips_a), SLAB)
+        except ValueError as error:
+            sys.stderr.write(
+                f"Case {case}: at level {f} of the hip-to-shoulder rise the trunk "
+                f"outlines are too sparse to measure ({error}).\n"
+            )
+            sys.exit(1)
         widths.append(wa / wc)
         depths.append(da / dc)
         centres_c.append(cc)
@@ -391,6 +427,7 @@ def main() -> None:
         export_skins=True,
         export_animations=False,
         export_morph=False,
+        export_copyright=credit,
     )
 
     report = {
@@ -401,6 +438,7 @@ def main() -> None:
         "output": Path(out).name,
         "outputSha256": sha256(out),
         "blender": bpy.app.version_string,
+        "copyright": credit,
         "scale": rounded(scale),
         "shiftM": rounded(shift),
         "girdle": girdle_report,

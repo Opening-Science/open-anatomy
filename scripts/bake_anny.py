@@ -13,7 +13,8 @@
 # # The CPU index has Linux and Windows wheels only (2.14.1+cpu, no CUDA
 # # libraries). macOS takes torch 2.14.1 from PyPI, which is CPU (and MPS) only
 # # and has one wheel: Apple Silicon, macOS 14 or later. The lock is universal;
-# # scripts/anatomy/bake-lock.test.ts checks it has a wheel for every platform.
+# # scripts/bake_check.py checks it has a wheel for every platform, and that a
+# # bake matches the sha256 in sources.json.
 # [tool.uv.sources]
 # torch = [
 #   { index = "pytorch-cpu", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
@@ -211,6 +212,9 @@ def bake(sex: str) -> bytes:
     gltf = {
         "asset": {
             "version": "2.0",
+            # Kept as twin-llm's script name on purpose: it is part of the pinned
+            # bytes, which match twin-llm's anatomy-rigged-v1 release exactly, so
+            # either project's bake can be checked against the other's.
             "generator": "twin-llm scripts/anatomy/bake-anny-rigged.py",
             "copyright": (
                 "ANNY, NAVER LABS Europe / NAVER Corporation: Apache-2.0 code over CC0-1.0 "
