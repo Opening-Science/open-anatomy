@@ -58,6 +58,7 @@ from structures import SETS, Structure, node_name  # noqa: E402
 # RAS millimetres to glTF metres: X = -R (the body's left), Y = S, Z = A.
 # Limb bones run out of a trunk scan by design; their joint ends are what count.
 MIN_ML = 0.3  # a mask smaller than this is a stray label, not a bone (volume, not voxels)
+PADDING_HU = -1020  # at or below: a scanner's fill beyond what it scanned, never tissue
 SETS_OF_PIECES = {"costal_cartilages"}  # one node, several separate pieces
 MIN_PIECE_VOXELS = 150  # a piece smaller than this (0.5 ml) in a set is a loose blob
 LEVEL_STEPS = 12
@@ -329,12 +330,30 @@ def modelled_cartilage(
     return np.vstack(vertices), np.vstack(triangles).astype(np.uint32), skipped
 
 
-def cut_reason(path: Path) -> str | None:
+def scan_outside(ct_path: Path) -> np.ndarray:
+    """The part of a CT volume that was never scanned: the constant fill a
+    scanner writes beyond its field of view (a circle in-plane, a slanted edge
+    from a tilted gantry, empty end slices). Voxels at or below PADDING_HU
+    (never tissue; air is about -1000 HU with noise) that survive a small
+    opening and join the volume's border."""
+    hu = np.asanyarray(nib.load(ct_path).dataobj)
+    pad = ndimage.binary_opening(hu <= PADDING_HU, structure=np.ones((3, 3, 3)))
+    labels, _ = ndimage.label(pad)
+    border = np.concatenate([
+        labels[0].ravel(), labels[-1].ravel(), labels[:, 0].ravel(), labels[:, -1].ravel(),
+        labels[:, :, 0].ravel(), labels[:, :, -1].ravel(),
+    ])  # fmt: skip
+    return np.isin(labels, np.setdiff1d(np.unique(border), [0]))
+
+
+def cut_reason(path: Path, outside: np.ndarray | None = None) -> str | None:
     """Why a mask cannot be a whole structure, or None if it is whole.
 
     Smaller than MIN_ML (measured with the voxel size from the affine, so the
-    limit is the same at 0.8 mm and 1.5 mm), or touching any face of the scan
-    (the first or last slice, or the in-plane border): the scan cut it.
+    limit is the same at 0.8 mm and 1.5 mm), touching any face of the volume
+    (the first or last slice, or the in-plane border), or touching the part of
+    the volume that was never scanned (outside, from scan_outside): the scan
+    cut it.
     """
     if not path.exists():
         return "not segmented"
@@ -346,13 +365,17 @@ def cut_reason(path: Path) -> str | None:
         k = np.flatnonzero(data.any(tuple(a for a in range(3) if a != axis)))
         if k[0] == 0 or k[-1] == data.shape[axis] - 1:
             return f"cut by the scan's edge (axis {axis})"
+    if outside is not None and (ndimage.binary_dilation(data) & outside).any():
+        return "cut by the scan's edge (unscanned padding)"
     return None
 
 
-def cut_faces(path: Path) -> set[str]:
+def cut_faces(path: Path, outside: np.ndarray | None = None) -> set[str]:
     """The sides of the body where the scan cuts a mask: "S" or "I" (its top
     or bottom slice), "L", "R", "A" or "P" (the in-plane border), named by the
-    direction each face of the volume points in RAS."""
+    direction each face of the volume points in RAS. Where the mask meets
+    unscanned padding (outside), the side is the direction from the mask's
+    centre to where it meets it."""
     image = nib.load(path)
     data = np.asanyarray(image.dataobj) > 0
     faces = set()
@@ -368,6 +391,12 @@ def cut_faces(path: Path) -> set[str]:
             faces.add(low)
         if k[-1] == data.shape[axis] - 1:
             faces.add(high)
+    if outside is not None:
+        contact = np.argwhere(ndimage.binary_dilation(data) & outside)
+        if len(contact):
+            towards = image.affine[:3, :3] @ (contact.mean(0) - np.argwhere(data).mean(0))
+            ras = int(np.argmax(np.abs(towards)))
+            faces.add("RAS"[ras] if towards[ras] > 0 else "LPI"[ras])
     return faces
 
 
@@ -804,6 +833,7 @@ def main() -> None:
     parser.add_argument(
         "--synthetic", action="store_true", help="test masks with no source to credit"
     )
+    parser.add_argument("--ct", type=Path, help="default: data/cases/<case>/ct.nii.gz")
     args = parser.parse_args()
     attribution = (
         {"copyright": "Synthetic test data", "extras": {"case": args.case}}
@@ -816,7 +846,11 @@ def main() -> None:
     seg_dir = args.seg_dir or work / "seg"
     parts, missing, dropped, landmarks = [], [], [], []
     labels = [s.label for s in SETS[args.set]]
-    reasons = {label: cut_reason(seg_dir / f"{label}.nii.gz") for label in labels}
+    ct_path = args.ct or ROOT / "data" / "cases" / args.case / "ct.nii.gz"
+    if not ct_path.exists() and not args.synthetic:
+        sys.exit(f"{ct_path} is missing: the CT is needed to see where the scan ends")
+    outside = scan_outside(ct_path) if ct_path.exists() else None
+    reasons = {label: cut_reason(seg_dir / f"{label}.nii.gz", outside) for label in labels}
     if args.set == "reference":
         reasons = reference_rules(reasons)
     for s in SETS[args.set]:
@@ -831,7 +865,7 @@ def main() -> None:
             # meshed into the landmarks file for their joint centres.
             dropped.append({"label": s.label, "reason": reason})
             if s.label in LANDMARK_BONES and not reason.startswith(("absent", "not segmented")):
-                faces = cut_faces(path) if reason.startswith("cut by") else set()
+                faces = cut_faces(path, outside) if reason.startswith("cut by") else set()
                 if landmark_ok(s.label, reason, faces):
                     landmarks.append(s)
                 else:

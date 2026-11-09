@@ -59,6 +59,46 @@ def test_a_mask_one_voxel_from_every_face_is_whole(tmp_path: Path) -> None:
     assert mesh.cut_reason(path) is None
 
 
+def padded_ct(tmp_path: Path, slanted: bool = False) -> Path:
+    """A 40-cube CT: noisy air (about -1000 HU) round a body (40 HU), with the
+    top 6 slices never scanned (-1024 fill), or a slanted unscanned edge as a
+    tilted gantry leaves."""
+    rng = np.random.default_rng(0)
+    hu = rng.normal(-1000, 8, (40, 40, 40)).round()
+    hu[8:32, 8:32, :] = 40
+    z = np.arange(40)[None, None, :]
+    edge = 34 - (np.arange(40)[None, :, None] // 8 if slanted else 0)
+    hu = np.where(z >= edge, -1024, hu)
+    return save_ct(tmp_path / "ct.nii.gz", hu)
+
+
+def save_ct(path: Path, hu: FloatArray) -> Path:
+    nib.save(nib.Nifti1Image(hu.astype(np.int16), FLIPPED), path)
+    return path
+
+
+@pytest.mark.parametrize("slanted", [False, True])
+def test_a_mask_meeting_the_unscanned_padding_is_cut(tmp_path: Path, slanted: bool) -> None:
+    outside = mesh.scan_outside(padded_ct(tmp_path, slanted))
+    mask = box((40, 40, 40), (12, 12, 20), (20, 20, 34 - (2 if slanted else 0)))
+    path = save(tmp_path / "m.nii.gz", mask)
+    assert mesh.cut_reason(path) is None  # no array face: the old test called it whole
+    assert mesh.cut_reason(path, outside) == "cut by the scan's edge (unscanned padding)"
+    assert mesh.cut_faces(path, outside) == {"S"}
+
+
+def test_a_mask_one_slice_below_the_padding_is_whole(tmp_path: Path) -> None:
+    outside = mesh.scan_outside(padded_ct(tmp_path))
+    mask = box((40, 40, 40), (12, 12, 20), (20, 20, 33))  # top slice 32; padding from 34
+    assert mesh.cut_reason(save(tmp_path / "m.nii.gz", mask), outside) is None
+
+
+def test_air_round_the_body_is_not_padding(tmp_path: Path) -> None:
+    outside = mesh.scan_outside(padded_ct(tmp_path))
+    assert not outside[:, :, :30].any()  # noisy air below the fill value's band stays scanned
+    assert outside[:, :, 34:].all()
+
+
 @pytest.mark.parametrize("axis", [0, 1, 2])
 @pytest.mark.parametrize("end", ["first", "last"])
 def test_a_mask_touching_any_face_is_cut(tmp_path: Path, axis: int, end: str) -> None:
@@ -122,7 +162,7 @@ def run_main(
     surfaced: list[str] = []
     shares = shares or {}
 
-    def fake_reason(path: Path) -> str | None:
+    def fake_reason(path: Path, outside: object = None) -> str | None:
         return reasons.get(path.name.removesuffix(".nii.gz"))
 
     def fake_surface(path: Path, max_triangles: int, **_: object) -> tuple[Any, Any, float, float]:
@@ -133,7 +173,7 @@ def run_main(
     def fake_cartilage(seg_dir: Path, kept_ribs: list[str]) -> tuple[Any, Any, Any]:
         return TETRA.copy(), TETRA_TRIANGLES.copy(), []
 
-    def fake_faces(path: Path) -> set[str]:
+    def fake_faces(path: Path, outside: object = None) -> set[str]:
         return {"I"} if faces is None else faces
 
     monkeypatch.setattr(mesh, "cut_reason", fake_reason)
