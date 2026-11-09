@@ -117,7 +117,10 @@ the female s0859, both from the TotalSegmentator dataset (CC BY 4.0):
 from the hip and shoulder joints, width and depth from the trunk outlines. It
 reports each joint's residual and the share of every structure inside the
 skin. The CT was taken lying down and ANNY stands, so the organs sit as they do
-supine. Other headless Blender 5.2.x scripts in [`blender/`](blender/) clean
+supine. The ages do not match either: ANNY's bodies are young adults, while
+s0903 was 88 and s0859 74 when scanned, so the organs and bones are an older
+person's inside a young adult's shape. The released GLB's asset copyright credits the TotalSegmentator dataset
+(creator, DOI, case) and ANNY. Other headless Blender 5.2.x scripts in [`blender/`](blender/) clean
 meshes up and fit an atlas to a body limb by limb; `scripts/blender.py` runs
 them all.
 

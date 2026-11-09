@@ -10,14 +10,15 @@ flying edges and smooth it (windowed sinc, VTK), keep the largest connected
 piece, decimate it to at most --max-triangles (organs) or --max-bone-triangles
 (bones) while it stays closed, and orient the normals outward. The share of
 the volume in the other pieces goes into the manifest, and above
-MAX_DROPPED_SHARE the run stops: a structure in two pieces is a segmentation
-problem, not noise. Coordinates go from the CT's RAS millimetres to glTF metres
-(+Y up, +Z anterior, +X the body's left), and the whole set is moved so its
-bounding box is centred on the origin.
+MAX_DROPPED_SHARE the run stops for an organ: an organ in two pieces is a
+segmentation problem, not noise. Coordinates go from the CT's RAS millimetres
+to glTF metres (+Y up, +Z anterior, +X the body's left), and the whole set is
+moved so its bounding box is centred on the origin.
 
 --set organs (the default) needs every organ; --set reference adds the trunk
 skeleton and lists, rather than meshes, a bone the scan misses or cuts (the
-femurs and humeri may be cut). With body_trunc.nii.gz in the masks it also
+femurs and humeri may be cut). An organ that is empty, cut by the scan or
+split always stops the run; a bone in pieces only warns. With body_trunc.nii.gz in the masks it also
 writes <case>.outline.glb, the trunk outline in the same frame, which
 assemble.py measures and never releases.
 
@@ -340,25 +341,36 @@ def main() -> None:
     seg_dir = args.seg_dir or work / "seg"
     parts, missing = [], []
     for s in SETS[args.set]:
-        cap = args.max_bone_triangles if s.system == "skeletal" else args.max_triangles
+        bone = s.system == "skeletal"
+        cap = args.max_bone_triangles if bone else args.max_triangles
         path = seg_dir / f"{s.label}.nii.gz"
         if args.set == "reference" and s.label not in CUT_ALLOWED and cut_by_scan(path):
             # A bone the scan covers only partly (an upper cervical vertebra) would
             # be a fragment; it is listed instead. Every organ must be whole.
+            if not bone:
+                sys.exit(
+                    f"{s.label}: empty or cut by the scan in {args.case}; organs must be whole"
+                )
             missing.append(s.label)
             continue
         try:
             ras, triangles, dropped = surface(path, cap)
         except ValueError:
-            if args.set == "organs":
-                raise
+            if not bone:
+                sys.exit(f"{s.label}: the mask is empty in {args.case}; organs must be whole")
             missing.append(s.label)
             continue
         if dropped > MAX_DROPPED_SHARE:
-            sys.exit(
+            message = (
                 f"{s.label}: {dropped:.1%} of its volume is outside its largest piece "
-                f"(at most {MAX_DROPPED_SHARE:.0%} may be dropped)"
+                f"(at most {MAX_DROPPED_SHARE:.0%} may be dropped from an organ)"
             )
+            if not bone:
+                sys.exit(message)
+            # A segmented bone often comes in pieces (a vertebra's processes, a
+            # humerus leaving and re-entering the scan); its share is recorded
+            # in the manifest and said here, not silently dropped.
+            print(f"warning: {message}", file=sys.stderr)
         parts.append({
             "structure": s, "vertices": ras @ RAS_TO_GLTF.T, "triangles": triangles,
             "dropped": dropped,
