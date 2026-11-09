@@ -118,6 +118,9 @@ def apply_modifier(obj: bpy.types.Object, kind: str, **settings) -> None:
     bpy.ops.object.modifier_apply(modifier=mod.name)
 
 
+MAX_INFLUENCES = 4
+
+
 def clean(obj: bpy.types.Object, smooth: int, voxel: float | None) -> None:
     def repair():
         bpy.ops.mesh.remove_doubles(threshold=1e-6)
@@ -253,6 +256,126 @@ def run_one(
     return result
 
 
+def keep_rig(obj: bpy.types.Object, source: bpy.types.Object) -> None:
+    """Gives every vertex of the cleaned mesh the weights and per-vertex
+    attributes of the nearest point on the original surface, interpolated
+    across that face, then keeps the MAX_INFLUENCES strongest joints and
+    normalises them to sum to 1. Holes the cleanup filled get weights this way."""
+    src = source.data
+    tree = bvh_of(source)
+    groups = [g.name for g in source.vertex_groups]
+    weights = np.zeros((len(src.vertices), len(groups)))
+    for v in src.vertices:
+        for g in v.groups:
+            weights[v.index, g.group] = g.weight
+    attributes = {
+        a.name: a
+        for a in src.attributes
+        if a.name.startswith("_") and a.domain == "POINT" and a.data_type == "FLOAT"
+    }
+    values = {}
+    for name, a in attributes.items():
+        arr = np.zeros(len(src.vertices), dtype=np.float32)
+        a.data.foreach_get("value", arr)
+        values[name] = arr
+    new_w = np.zeros((len(obj.data.vertices), len(groups)))
+    new_a = {k: np.zeros(len(obj.data.vertices)) for k in values}
+    for v in obj.data.vertices:
+        hit, _, face, _ = tree.find_nearest(v.co)
+        corners = list(src.polygons[face].vertices)
+        if hit is None:
+            continue
+        pts = [src.vertices[i].co for i in corners]
+        bary = barycentric(hit, *pts[:3])
+        for i, w in zip(corners[:3], bary, strict=True):
+            new_w[v.index] += w * weights[i]
+            for k in values:
+                new_a[k][v.index] += w * values[k][i]
+    # Strongest joints only, normalised.
+    keep = np.argsort(-new_w, axis=1)[:, :MAX_INFLUENCES]
+    mask = np.zeros_like(new_w, dtype=bool)
+    np.put_along_axis(mask, keep, True, axis=1)
+    new_w = np.where(mask & (new_w > 0), new_w, 0)
+    totals = new_w.sum(1, keepdims=True)
+    new_w = np.where(totals > 0, new_w / np.maximum(totals, 1e-12), 0)
+    obj.vertex_groups.clear()
+    for j, name in enumerate(groups):
+        group = obj.vertex_groups.new(name=name)
+        for i in np.flatnonzero(new_w[:, j]):
+            group.add([int(i)], float(new_w[i, j]), "REPLACE")
+    for k, arr in new_a.items():
+        if k in obj.data.attributes:
+            obj.data.attributes.remove(obj.data.attributes[k])
+        attribute = obj.data.attributes.new(k, "FLOAT", "POINT")
+        attribute.data.foreach_set("value", arr.astype(np.float32))
+
+
+def barycentric(p, a, b, c) -> tuple[float, float, float]:
+    v0, v1, v2 = b - a, c - a, p - a
+    d00, d01, d11 = v0.dot(v0), v0.dot(v1), v1.dot(v1)
+    d20, d21 = v2.dot(v0), v2.dot(v1)
+    denom = d00 * d11 - d01 * d01 or 1e-30
+    v = (d11 * d20 - d01 * d21) / denom
+    w = (d00 * d21 - d01 * d20) / denom
+    return (1 - v - w, v, w)
+
+
+def rig_check(obj: bpy.types.Object, armature: bpy.types.Object, joints: list[str]) -> dict:
+    """Same joints as the input, every vertex weighted, weights summing to 1."""
+    sums = np.zeros(len(obj.data.vertices))
+    influences = np.zeros(len(obj.data.vertices), dtype=int)
+    for v in obj.data.vertices:
+        for g in v.groups:
+            if g.weight > 0:
+                sums[v.index] += g.weight
+                influences[v.index] += 1
+    return {
+        "sameJoints": sorted(b.name for b in armature.data.bones) == joints,
+        "joints": len(joints),
+        "unweightedVertices": int((sums == 0).sum()),
+        "weightSumOffBy1e3": int((np.abs(sums - 1) > 1e-3).sum()),
+        "maxInfluences": int(influences.max()) if len(influences) else 0,
+    }
+
+
+def run_rigged(obj, source, armature, joints, world, out_dir, name, smooth, reference) -> dict:
+    """Cleans a skinned scan's mesh (already in world space) and keeps its rig;
+    exports mesh and skeleton, the mesh back in its own space."""
+    before = measure(obj)
+    before_error = surface_error(obj, reference) if reference else None
+    as_input = bvh_of(obj)
+    clean(obj, smooth, None)
+    keep_rig(obj, source)
+    bpy.data.objects.remove(source)
+    after = measure(obj)
+    result = {
+        "before": before, "after": after, "rig": rig_check(obj, armature, joints),
+        "smoothIterations": smooth, "inputToOutputMm": surface_error(obj, as_input),
+        "faceProtected": False,
+    }  # fmt: skip
+    if reference:
+        result["surfaceErrorBefore"] = before_error
+        result["surfaceErrorAfter"] = surface_error(obj, reference)
+    obj.data.transform(world.inverted())
+    obj.matrix_world = world
+    for mod in list(obj.modifiers):
+        obj.modifiers.remove(mod)
+    modifier = obj.modifiers.new("armature", "ARMATURE")
+    modifier.object = armature
+    path = Path(out_dir) / f"{name}.lod0.glb"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    bpy.ops.object.select_all(action="DESELECT")
+    for o in (armature, obj):
+        o.select_set(True)
+    bpy.ops.export_scene.gltf(
+        filepath=str(path), export_format="GLB", use_selection=True, export_skins=True,
+        export_normals=True, export_texcoords=True, export_attributes=True,
+        export_materials="NONE", export_animations=False, export_morph=False,
+    )  # fmt: skip
+    result["outputs"] = [{"lod": 0, "file": path.name, "sha256": sha256(str(path)), **after}]
+    return result
+
+
 def bvh_of(obj: bpy.types.Object) -> BVHTree:
     bm = bmesh.new()
     bm.from_mesh(obj.data)
@@ -272,14 +395,24 @@ def run(args: list[str]) -> None:
     voxel = float(voxel_arg) if voxel_arg else None
     name = option(args, "--name", Path(source).stem.split(".")[0])
     empty_scene()
-    meshes = [o for o in import_glb(source) if o.type == "MESH"]
-    if len(meshes) != 1:
+    imported = import_glb(source)
+    meshes = [o for o in imported if o.type == "MESH"]
+    armature = next((o for o in imported if o.type == "ARMATURE"), None)
+    if armature is not None:
+        # A skinned scan: clean its largest mesh and keep the rig (see keep_rig).
+        obj = max(meshes, key=lambda o: len(o.data.vertices))
+        world = obj.matrix_world.copy()
+        obj.data.transform(world)  # work in world space, like a static scan
+        obj.matrix_world.identity()
+        joints = sorted(b.name for b in armature.data.bones)
+    elif len(meshes) != 1:
         sys.stderr.write(f"cleanup_mesh.py expects one mesh in {source}; found {len(meshes)}.\n")
         sys.exit(2)
-    obj = meshes[0]
-    obj.parent = None
-    obj.data.transform(obj.matrix_world)
-    obj.matrix_world.identity()
+    else:
+        obj = meshes[0]
+        obj.parent = None
+        obj.data.transform(obj.matrix_world)
+        obj.matrix_world.identity()
     report: dict = {
         "input": Path(source).name,
         "inputSha256": sha256(source),
@@ -293,7 +426,15 @@ def run(args: list[str]) -> None:
             obj, int(option(args, "--seed", "7") or 7), 0.002, holes=8, flips=6
         )
     meshopt = "--no-meshopt" not in args
-    report.update(run_one(obj, out_dir, name, lods, smooth, voxel, reference, meshopt))
+    if armature is not None:
+        source_copy = obj.copy()  # after any demo damage: the input as the cleanup sees it
+        source_copy.data = obj.data.copy()
+        bpy.context.scene.collection.objects.link(source_copy)
+        report.update(
+            run_rigged(obj, source_copy, armature, joints, world, out_dir, name, smooth, reference)
+        )
+    else:
+        report.update(run_one(obj, out_dir, name, lods, smooth, voxel, reference, meshopt))
     report_path = option(args, "--report", str(Path(out_dir) / f"{name}.cleanup.json"))
     write_json(report_path, report)
     print(f"cleanup_mesh: wrote {out_dir} and {report_path}")

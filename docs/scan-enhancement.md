@@ -60,16 +60,20 @@ existing connection. The export has no camera photos and no calibration
 (neither an endpoint nor files), so reprojection cannot be measured.
 
 The pipeline never reads the folder where real scans are synced. Everything in
-this repository is tested on a synthetic ANNY body exported in the same shape
-(skinned, with joints, weights and normals).
+this repository is tested on a synthetic scan in the same shape, made by
+`blender/make_demo_scan.py` from a rigged ANNY body: one skin, its joints and
+weights, smooth normals, a cylindrical UV, and synthetic `_DepthMap`,
+`_GaussianCurvature` and `_MeanCurvature` attributes.
 
 ## What the cleanup does
 
 `blender/cleanup_mesh.py`: merge duplicate vertices, fill holes, make the
 normals consistent and outward, smooth lightly (Taubin, which keeps volume),
-and export the cleaned mesh plus levels of detail. For the scanner's export it
-must also keep the rig: the same skin and joints, and weights for every vertex
-(carried over, or re-transferred from the input after any remeshing).
+and export the cleaned mesh plus levels of detail. A skinned scan keeps its
+rig: every vertex of the cleaned mesh, including those that fill a hole, takes
+the joint weights and the per-vertex attributes of the nearest point on the
+original surface (interpolated across that face), keeps its four strongest
+joints and is normalised, and the mesh is exported with its skeleton.
 
 ## How we know a scan got better, without ground truth
 
@@ -101,8 +105,10 @@ the "depth" can be simulated) before it is relied on.
 
 ## Demo results (synthetic ANNY female, three damaged repeats)
 
-Each repeat damages the same body differently (8 holes punched, about 65 faces
-flipped, 2 mm of noise), then cleans it.
+Each repeat damages the same skinned synthetic scan differently (8 holes
+punched, about 65 faces flipped, 2 mm of noise), then cleans it. In every
+repeat the rig check passes: the same 104 joints, no vertex without weights,
+every vertex's weights summing to 1, at most 4 joints per vertex.
 
 | Repeat | Holes | Flipped edges | Error against undamaged body (mean) | Shape change (mean / p95) | Stature | Hip breadth |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -131,6 +137,9 @@ repeatable a real scanner is, which needs repeat scans of one person.
   smoothing in a face region) before any real scan is processed.
 - **Chest breadth is not measured.** Where the arms rest against the chest
   there is no gap to tell them from the trunk.
-- **The rig is not kept yet.** cleanup_mesh.py works on one static mesh; the
-  scan's skin weights must be carried over (or re-transferred after remeshing)
-  before it can run on the real export.
+- **Attribute names change case.** Blender's glTF exporter writes custom
+  attributes upper-cased (`_DEPTHMAP`), where the scanner writes `_DepthMap`;
+  the viewer must match them without regard to case, or the names are put back
+  after export.
+- **The demo has ANNY's 104 joints**, where the scanner has 34–36; the rig
+  check does not depend on the count.
