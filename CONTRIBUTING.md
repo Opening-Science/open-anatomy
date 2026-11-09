@@ -12,6 +12,7 @@
    ruff check scripts blender
    ruff format --check scripts blender
    python scripts/mesh_check.py
+   python scripts/imaging_check.py
    scripts/self-check.sh   # needs Blender 5.2+; skips without it
    ```
 

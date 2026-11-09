@@ -18,7 +18,9 @@ writes, in data/imaging/<body>/:
 
 The slices are cut at kidney level (axial), through the kidneys (coronal) and
 on the spine's midline (sagittal), and cropped to the trunk, from 5 cm below
-the hip joints to the scan top, so no face is ever included. This is CT, not
+the hip joints to the scan top. A head guard (face_free_top) refuses a case
+whose skull and brain were not segmented, and stops every slice at the top of
+C7 when the scan reaches the head, so no face is ever included. This is CT, not
 MRI: "MRI layer" is the product name for an imaging-style view. Pure numpy;
 the same inputs give the same bytes.
 """
@@ -40,11 +42,50 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from mesh import RAS_TO_GLTF  # noqa: E402
-from structures import REFERENCE  # noqa: E402
+from structures import HEAD_GUARD, REFERENCE  # noqa: E402
 
 WINDOWS = {"soft": (400, 40), "bone": (1800, 400)}
 TINT = 0.38  # share of a structure's colour mixed into its voxels
 SOURCE_LICENCE = "CC-BY-4.0"
+GUARD_MARGIN_SLICES = 14  # about 2 cm at 1.5 mm
+
+
+NECK = [f"vertebrae_C{i}" for i in range(1, 7)]
+
+
+def face_free_top(masks: dict[str, np.ndarray | None]) -> int | None:
+    """The highest axial index (canonical, superior = higher) a slice may show.
+
+    masks maps HEAD_GUARD labels and C1-C6 to their masks, plus vertebrae_C7.
+    With none of the skull, brain or C1-C6 in the scan, the scan starts below
+    the head and nothing is cropped (None). Otherwise the cut is the lowest of:
+    2 cm below the lowest skull or brain voxel (a bowed head brings the jaw down
+    beside the neck, level with C7), the top of C7, and, without C7, 2 cm below
+    the lowest of C1-C6. A guard label that was never segmented (None) is an
+    error: absence must be shown, not assumed.
+    """
+    for label in HEAD_GUARD:
+        if masks.get(label) is None:
+            raise ValueError(f"{label} was not segmented; run segment.py --set reference")
+
+    def present(labels):
+        return [m for k, m in masks.items() if k in labels and m is not None and m.any()]
+
+    def lowest(ms):
+        return min(int(np.flatnonzero(m.any((0, 1)))[0]) for m in ms)
+
+    head, neck = present(HEAD_GUARD), present(NECK)
+    if not head and not neck:
+        return None
+    cuts = []
+    if head:
+        cuts.append(lowest(head) - GUARD_MARGIN_SLICES)
+    c7 = masks.get("vertebrae_C7")
+    if c7 is not None and c7.any():
+        cuts.append(int(np.flatnonzero(c7.any((0, 1)))[-1]))
+    elif neck:
+        cuts.append(lowest(neck) - GUARD_MARGIN_SLICES)
+    return min(cuts)
 
 
 def canonical(path: Path) -> nib.Nifti1Image:
@@ -220,6 +261,19 @@ def main() -> None:
     femurs = [np.argwhere(labels == [s.label for s in REFERENCE].index(f) + 1)
               for f in ("femur_left", "femur_right")]  # fmt: skip
     hip_k = max(int(f[:, 2].max()) for f in femurs)  # the femoral heads' top
+    guard = {}
+    for label in (*HEAD_GUARD, *NECK, "vertebrae_C7"):
+        path = work / "seg" / f"{label}.nii.gz"
+        guard[label] = np.asanyarray(canonical(path).dataobj) > 0 if path.exists() else None
+    try:
+        top = face_free_top(guard)
+    except ValueError as error:
+        sys.exit(f"head guard: {error}")
+    if top is not None:
+        body[:, :, top + 1 :] = False  # nothing above the guard reaches an image
+        print(f"head guard: the scan reaches the head; slices stop at axial index {top}")
+    if not body.any():
+        sys.exit("head guard: nothing of the trunk is left below the head")
     inside = np.argwhere(body)
     lo = inside.min(0)
     hi = inside.max(0)

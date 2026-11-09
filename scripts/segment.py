@@ -9,7 +9,8 @@ Reads data/cases/<case>/ct.nii.gz, written by fetch.py. Writes one mask per
 structure to data/work/<case>/seg/<label>.nii.gz, and seg.json with each
 structure's voxel count and Dice score against the reference segmentation (null
 where the dataset has none). For --set reference it also runs the Apache-2.0
-"body" task, whose trunk outline assemble.py measures.
+"body" task, whose trunk outline assemble.py measures, and also segments the
+skull and brain, which imaging.py's head guard needs.
 Only tasks in structures.ALLOWED_TASKS run; TotalSegmentator's licensed tasks
 are never used. GPU inference is not bit-exact, so masks can differ by a few
 boundary voxels between machines; the Dice scores show by how much.
@@ -28,7 +29,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from structures import ALLOWED_TASKS, SETS  # noqa: E402
+from structures import ALLOWED_TASKS, HEAD_GUARD, SETS  # noqa: E402
 
 TASK = "total"
 BODY_TASK = "body"  # trunk outline, for the reference set only
@@ -66,7 +67,8 @@ def main() -> None:
         case_dir / "ct.nii.gz",
         out,
         task=TASK,
-        roi_subset=[s.label for s in structures],
+        roi_subset=[s.label for s in structures]
+        + (list(HEAD_GUARD) if args.set == "reference" else []),
         fast=args.fast,
         device=args.device,
         quiet=True,

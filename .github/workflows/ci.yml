@@ -27,3 +27,4 @@ jobs:
       - run: pipx run uv venv .venv -p 3.12
       - run: pipx run uv pip install --python .venv/bin/python -e '.[mesh]'
       - run: .venv/bin/python scripts/mesh_check.py
+      - run: .venv/bin/python scripts/imaging_check.py
