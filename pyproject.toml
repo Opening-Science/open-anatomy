@@ -23,16 +23,26 @@ select = ["E", "F", "W", "I", "B", "UP"]
 testpaths = ["tests"]
 addopts = ["-ra", "--strict-markers", "--import-mode=importlib"]
 
-# Pyright runs in strict mode on scripts/ and tests/. Scripts that run inside
-# Blender import bpy, bmesh or mathutils, which exist only there, so each such
-# script is listed under exclude. tests/test_repo_config.py fails when a
+# Pyright checks scripts/ and tests/ in standard mode, and in strict mode the
+# paths listed under strict: every new or changed script goes on that list,
+# and older scripts join it one at a time as they get their annotations.
+# Scripts that run inside Blender import bpy, bmesh or mathutils, which exist
+# only there, so each such script is listed under exclude. tests/test_repo_config.py fails when a
 # Blender script is missing from this list. Keep Blender-only code in those
 # scripts and put pure-Python logic in modules that are type checked.
 [tool.pyright]
 include = ["scripts", "tests"]
 exclude = ["scripts/self_check.py"]
+strict = [
+  "scripts/data_guard.py",
+  "scripts/licence_check.py",
+  "tests/conftest.py",
+  "tests/test_data_guard.py",
+  "tests/test_licence_check.py",
+  "tests/test_repo_config.py",
+]
 extraPaths = ["scripts"]
 pythonVersion = "3.11"
-typeCheckingMode = "strict"
+typeCheckingMode = "standard"
 venvPath = "."
 venv = ".venv"

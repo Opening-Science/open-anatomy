@@ -6,9 +6,10 @@ Run it from anywhere inside the repository:
   python3 scripts/data_guard.py
 
 A tracked file is an offender when it is under data/, when it is a medical
-image (NIfTI, DICOM, NRRD or MetaImage, by extension, in any case), or when it
-is larger than 5 MB. Each offender is printed with its reason and the script
-exits 1. It exits 0 when there are none.
+image (NIfTI, DICOM, NRRD or MetaImage, by extension, in any case), when it is
+a mesh outside assets/ and tests/fixtures/ (a body scan arrives as a mesh, and
+a low-detail one can be under 5 MB), or when it is larger than 5 MB. Each
+offender is printed with its reason and the script exits 1. It exits 0 when there are none.
 """
 
 from __future__ import annotations
@@ -22,6 +23,8 @@ MAX_BYTES = 5 * 1024 * 1024
 DATA_DIR = "data/"
 # Compared against the lower-cased path, so .NII.GZ and .Dcm match too.
 IMAGE_SUFFIXES = (".nii", ".nii.gz", ".dcm", ".nrrd", ".mha", ".mhd")
+MESH_SUFFIXES = (".glb", ".gltf", ".ply", ".obj", ".stl", ".fbx", ".vtk", ".vtp", ".usdz", ".blend")
+MESH_FOLDERS = ("assets/", "tests/fixtures/")  # released assets and synthetic test meshes
 
 
 def reasons(path: str, size: int | None) -> list[str]:
@@ -38,6 +41,8 @@ def reasons(path: str, size: int | None) -> list[str]:
         if lower.endswith(suffix):
             found.append(f"it is a medical image ({suffix})")
             break
+    if lower.endswith(MESH_SUFFIXES) and not path.startswith(MESH_FOLDERS):
+        found.append("it is a mesh outside assets/ and tests/fixtures/")
     if size is not None and size > MAX_BYTES:
         found.append(f"it is {size / 1024 / 1024:.1f} MB, over the 5 MB limit")
     return found

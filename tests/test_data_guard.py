@@ -67,3 +67,13 @@ def test_tracked_files_lists_only_what_git_tracks(tmp_path: Path) -> None:
     (tmp_path / "untracked.dcm").write_text("x")
     subprocess.run(["git", "add", "kept.txt"], cwd=tmp_path, check=True)
     assert data_guard.tracked_files(tmp_path) == ["kept.txt"]
+
+
+@pytest.mark.parametrize("path", ["scan.glb", "scripts/body.PLY", "docs/x.obj", "a/b.stl"])
+def test_a_mesh_outside_assets_and_fixtures_is_refused(path: str) -> None:
+    assert reasons(path, 1000) == ["it is a mesh outside assets/ and tests/fixtures/"]
+
+
+@pytest.mark.parametrize("path", ["assets/cc-by/liver.glb", "tests/fixtures/cube.ply"])
+def test_a_mesh_in_assets_or_fixtures_is_fine(path: str) -> None:
+    assert reasons(path, 1000) == []
