@@ -73,6 +73,7 @@ JOIN_OVERLAP_MM = 6.0  # a modelled cartilage starts this far inside its rib's e
 CARTILAGE_FLAT = 2.5  # a cartilage band is this many times wider than deep
 ARCH_JOIN = {8: 0.75, 9: 0.6, 10: 0.5}  # where along the cartilage above ribs 8-10 join it
 START_DIP = 0.25  # a cartilage leaves its rib no more steeply downward than this (sine)
+CARTILAGE_HALF_W_MM = 9.0  # a band is at most 18 mm wide, whatever its rib's end measures
 TANGENT_SHARE = 0.7  # of the rib-to-sternum span, for the cartilage curve's end tangents
 KNOB_MAX_ML = 1.0  # a lump the opening separates from a rib is taken off below this volume
 RIB_BIN_MM = 3.0
@@ -251,6 +252,45 @@ def sweep(curve: np.ndarray, start_across: np.ndarray, half_w: np.ndarray, half_
     return vertices, np.array(triangles, dtype=np.uint32)
 
 
+def rounded_ends(
+    curve: np.ndarray, half_w: np.ndarray, half_d: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Trims each end of a band's centreline by its half-width there and adds
+    a half-disc dome in its place, so the band keeps its length and ends in
+    a round tip rather than a cut face. The trim follows the arc length, so
+    a dome never folds the curve back on itself."""
+    steps = np.linalg.norm(np.diff(curve, axis=0), axis=1)
+    length = np.concatenate([[0.0], np.cumsum(steps)])
+    angle = np.linspace(0, 0.45 * np.pi, 7)[1:]
+
+    def at(distance: float) -> tuple[np.ndarray, float, float]:
+        distance = float(np.clip(distance, 0, length[-1]))
+        return (
+            np.array([np.interp(distance, length, curve[:, d]) for d in range(3)]),
+            float(np.interp(distance, length, half_w)),
+            float(np.interp(distance, length, half_d)),
+        )
+
+    cut0, cut1 = min(half_w[0], length[-1] * 0.3), min(half_w[-1], length[-1] * 0.3)
+    inner = (length > cut0) & (length < length[-1] - cut1)
+    start, w0, d0 = at(cut0)
+    end, w1, d1 = at(length[-1] - cut1)
+    tip1 = end - at(length[-1] - cut1 - 1e-3)[0]
+    tip1 /= np.linalg.norm(tip1)
+    tip0 = start - at(cut0 + 1e-3)[0]
+    tip0 /= np.linalg.norm(tip0)
+    dome1 = end + np.outer(cut1 * np.sin(angle), tip1)
+    dome0 = start + np.outer(cut0 * np.sin(angle), tip0)
+    points = np.vstack([dome0[::-1], start[None], curve[inner], end[None], dome1])
+    widths = np.concatenate(
+        [(w0 * np.cos(angle))[::-1], [w0], half_w[inner], [w1], w1 * np.cos(angle)]
+    )
+    depths = np.concatenate(
+        [(d0 * np.cos(angle))[::-1], [d0], half_d[inner], [d1], d1 * np.cos(angle)]
+    )
+    return points, widths, depths
+
+
 def modelled_cartilage(
     seg_dir: Path, kept_ribs: list[str]
 ) -> tuple[np.ndarray, np.ndarray, list[tuple[str, str]]]:
@@ -260,10 +300,11 @@ def modelled_cartilage(
     cross-section (no step at the join), then takes the pair's mean section so
     left and right match. Ribs 1 to 7 turn medially and rise into the sternum
     (more for lower ribs), widening about 15% on the way, and end against
-    the sternum's edge on their own side. Ribs 8 to 10 rise to meet the lower
-    edge of the cartilage above them (ARCH_JOIN says where along it), which
-    makes the costal arch. Bands touch their targets and never pass into
-    them, so the set has no faces crossing each other.
+    the sternum's edge on their own side, just inside it as a notch would
+    hold them. Ribs 8 to 10 run in under the cartilage above them and meet
+    its lower edge with their upper edge (ARCH_JOIN says where), which makes
+    the costal arch; bands touch and never pass through each other, so the
+    set has no faces crossing each other.
     Returns RAS mm vertices and triangles, and each kept rib that gets no
     cartilage with the reason; the manifest marks the node as modelled."""
     from scipy.spatial import cKDTree
@@ -306,16 +347,21 @@ def modelled_cartilage(
         if start[2] < -START_DIP:
             start[2] = -START_DIP
             start /= np.linalg.norm(start)
-        w_pair = (e["halfWidth"] + partner["halfWidth"]) / 2
+        w_pair = min((e["halfWidth"] + partner["halfWidth"]) / 2, CARTILAGE_HALF_W_MM)
         if number <= 7:
             # Aim at the sternum's border on the rib's own side, so the lowest
             # pairs meet it side by side instead of crossing at the xiphoid.
             own = sternum[(sternum[:, 0] - midline) * side >= 0]
             p1 = own[cKDTree(own).query(e["tip"])[1]]
-            rise = 0.15 + 0.2 * (number - 2)  # lower cartilages rise more steeply
+            # Lower cartilages rise more steeply into the sternum, but never
+            # much more than the line from rib to sternum does, or the band
+            # would dip first and hook up at the end.
+            chord = p1 - p0
+            chord_rise = chord[2] / max(np.hypot(chord[0], chord[1]), 1e-6)
+            rise = min(0.15 + 0.2 * (number - 2), max(chord_rise, 0.0) + 0.3)
             t1 = np.array([-side, 0.0, rise])
             t1 /= np.linalg.norm(t1)
-            p1 = p1 - t1 * 0.5  # end against the sternum's surface, not inside it
+            p1 = p1 + t1 * 2.0  # end just inside the sternum, as a notch would hold it
             # But no further in than the sternum's midline at that height less the
             # band's own half-width, so a left and a right end never overlap.
             level = np.abs(sternum[:, 2] - p1[2]) < 10
@@ -331,12 +377,13 @@ def modelled_cartilage(
             k = int(round(ARCH_JOIN[number] * (len(above["curve"]) - 1)))
             t1 = above["curve"][min(k + 1, len(above["curve"]) - 1)] - above["curve"][k - 1]
             t1 /= np.linalg.norm(t1)
-            # Meet the band above at its lower edge, so the two touch and
-            # neither passes through the other.
+            # Run in under the band above and meet its lower edge with this
+            # band's upper edge, so the two touch along their length without
+            # passing through each other.
             down = np.array([0.0, 0.0, -1.0]) - t1 * (-t1[2])
             down /= np.linalg.norm(down)
-            p1 = above["curve"][k] + down * above["halfW"][k]
-            end_w, end_d, widen = above["halfW"][k] * 0.8, above["halfD"][k], 0.1
+            end_w, end_d, widen = above["halfW"][k] * 0.7, above["halfD"][k], 0.1
+            p1 = above["curve"][k] + down * (above["halfW"][k] + end_w)
         span = np.linalg.norm(p1 - p0)
         if span < 1.0 or abs(float(start @ (p1 - p0))) < 1e-6 * span:
             skipped.append((rib, "its end lies on its target"))
@@ -344,7 +391,9 @@ def modelled_cartilage(
         s = np.linspace(0, 1, 32)[:, None]
         h00, h10 = 2 * s**3 - 3 * s**2 + 1, s**3 - 2 * s**2 + s
         h01, h11 = -2 * s**3 + 3 * s**2, s**3 - s**2
-        reach = TANGENT_SHARE * span  # longer tangents overshoot into a hook on short spans
+        # Longer tangents overshoot into a hook on short spans; a band joining
+        # the one above runs along it, so its tangents are longer.
+        reach = (TANGENT_SHARE if number <= 7 else 1.0) * span
         curve = h00 * p0 + h10 * start * reach + h01 * p1 + h11 * t1 * reach
         f = s[:, 0]
         blend = np.clip(f / 0.35, 0, 1)  # from the rib's own section to the pair's within a third
@@ -354,25 +403,17 @@ def modelled_cartilage(
         half_w = half_w * (1 - f**2) + f**2 * end_w * (1 + widen - 0.15)
         half_d = half_d * (1 - f**2) + f**2 * end_d
         bands[rib] = {"curve": curve, "halfW": half_w, "halfD": half_d}
-        # Round the far end into a dome whose tip lands on the target point,
-        # so the end is not a flat cut face and the band touches the sternum
-        # or the band above without passing into it.
-        tip = curve[-1] - curve[-2]
-        tip /= np.linalg.norm(tip)
-        angle = np.linspace(0, 0.45 * np.pi, 7)[1:]
-        depth = min(half_w[-1], half_d[-1])
-        curve[-1] = curve[-1] - tip * depth
-        curve = np.vstack([curve, curve[-1] + np.outer(depth * np.sin(angle), tip)])
-        half_w = np.concatenate([half_w, half_w[-1] * np.cos(angle)])
-        half_d = np.concatenate([half_d, half_d[-1] * np.cos(angle)])
-        # A band's broad face points forward: its width runs up and down the
-        # chest wall, so the frame starts from the vertical, not from the
-        # rib end's own (often noisy) flat direction.
-        t0 = curve[1] - curve[0]
-        t0 /= np.linalg.norm(t0)
-        upright = np.array([0.0, 0.0, 1.0]) - t0 * t0[2]
-        upright /= np.linalg.norm(upright)
-        v, t = sweep(curve, upright, half_w, half_d)
+        # Round both ends over the band's full width (a half disc seen from
+        # the front, a pill seen edge on), the far tip on the target point and
+        # the near one inside the rib, so no end is a flat cut face wherever
+        # it shows.
+        curve, half_w, half_d = rounded_ends(curve, half_w, half_d)
+        # The band's section starts as the rib end's own, in the rib's own
+        # flat direction (pointing up, so left and right match), and the
+        # rotation-minimising frame carries it on; a rib's anterior end is
+        # already flattened with its broad face forward.
+        across = e["across"] if e["across"][2] >= 0 else -e["across"]
+        v, t = sweep(curve, across, half_w, half_d)
         triangles.append(t + sum(len(x) for x in vertices))
         vertices.append(v)
     if not vertices:

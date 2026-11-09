@@ -637,3 +637,17 @@ def test_pieces_in_line_are_left_for_bridging(tmp_path: Path) -> None:
     save(tmp_path / "rib_left_5.nii.gz", rib)
     masks, notes = mesh.settle_fragments(tmp_path, ["rib_left_5"])
     assert notes == [] and masks["rib_left_5"].sum() == rib.sum()
+
+
+def test_rounded_ends_keep_the_length_and_round_both_tips() -> None:
+    curve = np.c_[np.linspace(0, 60, 31), np.zeros(31), np.zeros(31)]  # 60 mm straight band
+    half_w, half_d = np.full(31, 6.0), np.full(31, 2.0)
+    points, widths, depths = mesh.rounded_ends(curve, half_w, half_d)
+    assert points[0, 0] == pytest.approx(0.0, abs=0.1)
+    assert points[-1, 0] == pytest.approx(60.0, abs=0.1)
+    assert np.all(np.diff(points[:, 0]) > 0)  # never folds back
+    assert widths[0] < 1.0 and widths[-1] < 1.0 and widths.max() == 6.0
+    assert depths[0] < 0.4 and depths[-1] < 0.4
+    vertices, triangles = mesh.sweep(points, np.array([0.0, 1.0, 0.0]), widths, depths)
+    assert mesh.open_edges(triangles) == 0
+    assert abs(mesh.signed_volume(vertices, triangles)) > 0  # main() turns it outward

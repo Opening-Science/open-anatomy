@@ -117,11 +117,12 @@ def render(objects: list[bpy.types.Object], view: str, path: Path) -> None:
     width, height = RESOLUTION
     camera.data.type = "ORTHO"
     # ortho_scale spans the render's longer side; fit both the skeleton's
-    # width (its diagonal, so the three-quarter view fits too) and its height.
-    across, tall = math.hypot(extent.x, extent.y), extent.z
+    # width as seen from this view and its height.
+    across = extent.x if view == "front" else math.hypot(extent.x, extent.y)
+    tall = extent.z
     aspect = width / height
     span = max(tall, across / aspect) if aspect < 1 else max(across, tall * aspect)
-    camera.data.ortho_scale = 1.08 * span
+    camera.data.ortho_scale = 1.04 * span
     distance = 3.0
     camera.location = centre + Vector((
         distance * math.sin(turn) * math.cos(tilt),

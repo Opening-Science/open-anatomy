@@ -46,7 +46,7 @@ FACES = {
     "vertebra": 8000,
     "sacrum": 12000,
     "hip bone": 12000,
-    "rib": 4000,
+    "rib": 6500,
     "sternum": 6000,
     "clavicle": 4000,
     "scapula": 10000,
@@ -126,7 +126,20 @@ def remesh(
     result = quadriflow(obj, faces, seed) if method == "quadriflow" else set()
     if "FINISHED" not in result:
         result = voxel(obj, faces)
+    if "FINISHED" in result:
+        relax(obj)
     return result
+
+
+def relax(obj: bpy.types.Object) -> None:
+    """Two light smoothing passes: the voxel remesher's quads step along a
+    thin rib at the voxel size, and this takes the steps out. The drift
+    check afterwards says whether it moved the surface too far."""
+    smooth = obj.modifiers.new("relax", "SMOOTH")
+    smooth.factor = 0.5
+    smooth.iterations = 2
+    with bpy.context.temp_override(object=obj, active_object=obj, selected_objects=[obj]):
+        bpy.ops.object.modifier_apply(modifier="relax")
 
 
 def voxel(obj: bpy.types.Object, faces: int) -> set[str]:
