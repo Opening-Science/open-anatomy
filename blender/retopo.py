@@ -7,15 +7,16 @@ surface. Blender 5.2.x, headless.
   blender --background --factory-startup --python blender/retopo.py -- --self-check
   [--only <node>] retopologises that node alone, for looking at one bone
 
-Each bone (system "skeletal", not modelled) is remeshed with QuadriFlow to a
-face budget set by its class (FACES), then wrapped back onto its own original
-surface so crests, foramina and processes stay where the CT put them. Organs
-and the modelled cartilage are left as they are. The report gives, per bone,
-the face count before and after, the largest distance from the new surface
-to the old one, and whether the result is still closed and manifold; a bone
-that comes out open or further than MAX_DRIFT_MM from its CT surface keeps
-its original mesh and is listed under "kept". The drift is measured from the
-CT surface to the new one, so a smoothed-over foramen or crest shows. Node extras (term, name,
+Each bone (system "skeletal", not modelled) is remeshed into quads to a face
+budget set by its class (FACES): QuadriFlow first, then the voxel remesher
+at rising density, until the result is closed, manifold, free of faces that
+cross each other, and within MAX_DRIFT_MM of the CT surface everywhere (so
+crests, foramina and processes stay). No shrinkwrap: wrapping a quad mesh
+back onto a thin process folded faces through each other. Organs and the
+modelled cartilage are left as they are. The report gives, per bone, the
+face count before and after, every try, the largest distance from the CT
+surface to the new one, and whether it passed; a bone that never passes
+keeps its original mesh and is listed under "kept". Node extras (term, name,
 system, licence, modelled) travel through unchanged.
 """
 
@@ -52,7 +53,11 @@ FACES = {
     "humerus": 4000,
     "femur": 4000,
 }
-RETRIES = (1.0, 1.5, 2.25)  # face budget multipliers tried until the result is sound
+# Tried in turn until the result is sound: QuadriFlow first, then the voxel
+# remesher at rising density. QuadriFlow's flow-aligned quads fold through
+# each other on the thin processes of a 1.5 mm segmentation more often than
+# not; the voxel remesher's quads are uniform and never cross.
+RETRIES = (("quadriflow", 1.0), ("voxel", 1.0), ("voxel", 1.6), ("voxel", 2.5))
 MIN_FACES = 800
 MAX_DRIFT_MM = 1.0  # a retopologised surface may sit this far from the CT surface at most
 
@@ -72,11 +77,19 @@ def is_bone(obj: bpy.types.Object) -> bool:
 def measure(obj: bpy.types.Object) -> dict:
     bm = bmesh.new()
     bm.from_mesh(obj.data)
+    tree = BVHTree.FromBMesh(bm)
+    bm.faces.ensure_lookup_table()
+    crossings = sum(
+        1
+        for a, b in tree.overlap(tree)
+        if a < b and not {v.index for v in bm.faces[a].verts} & {v.index for v in bm.faces[b].verts}
+    )
     report = {
         "faces": len(bm.faces),
         "quads": sum(1 for f in bm.faces if len(f.verts) == 4),
         "open_edges": sum(1 for e in bm.edges if e.is_boundary),
         "non_manifold_edges": sum(1 for e in bm.edges if not e.is_manifold),
+        "self_intersections": crossings,
     }
     bm.free()
     return report
@@ -100,24 +113,31 @@ def lost_detail(original: bpy.types.Object, obj: bpy.types.Object) -> float:
     return worst
 
 
-def remesh(obj: bpy.types.Object, faces: int, seed: int = 0) -> set[str]:
-    """QuadriFlow on obj. It refuses a mesh with doubled vertices or a
-    non-manifold edge, so those are mended first. If it still refuses (it
-    does on some long thin bones that are manifold by every other test), the
-    mesh is voxel-remeshed at a size that gives about the same face count:
-    that is an all-quad manifold mesh too, only less evenly flowing."""
+def remesh(
+    obj: bpy.types.Object, faces: int, seed: int = 0, method: str = "quadriflow"
+) -> set[str]:
+    """QuadriFlow on obj, or the voxel remesher. QuadriFlow refuses a mesh
+    with doubled vertices or a non-manifold edge, so those are mended first.
+    If it still refuses (it does on some long thin bones that are manifold by
+    every other test), or when method is "voxel", the mesh is voxel-remeshed
+    at a size that gives about the same face count: that is an all-quad
+    manifold mesh too, only less evenly flowing."""
     mend(obj)
-    result = quadriflow(obj, faces, seed)
+    result = quadriflow(obj, faces, seed) if method == "quadriflow" else set()
     if "FINISHED" not in result:
-        bm = bmesh.new()
-        bm.from_mesh(obj.data)
-        area = sum(f.calc_area() for f in bm.faces)
-        bm.free()
-        obj.data.remesh_voxel_size = max(math.sqrt(area / faces), 0.0005)
-        obj.data.remesh_voxel_adaptivity = 0.0
-        with bpy.context.temp_override(object=obj, active_object=obj, selected_objects=[obj]):
-            result = bpy.ops.object.voxel_remesh()
+        result = voxel(obj, faces)
     return result
+
+
+def voxel(obj: bpy.types.Object, faces: int) -> set[str]:
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    area = sum(f.calc_area() for f in bm.faces)
+    bm.free()
+    obj.data.remesh_voxel_size = max(math.sqrt(area / faces), 0.0005)
+    obj.data.remesh_voxel_adaptivity = 0.0
+    with bpy.context.temp_override(object=obj, active_object=obj, selected_objects=[obj]):
+        return bpy.ops.object.voxel_remesh()
 
 
 def mend(obj: bpy.types.Object) -> None:
@@ -142,26 +162,6 @@ def quadriflow(obj: bpy.types.Object, faces: int, seed: int) -> set[str]:
         )  # fmt: skip
 
 
-def wrap_to(obj: bpy.types.Object, target: bpy.types.Object) -> None:
-    """Puts obj's vertices back onto target's surface, then relaxes the quads."""
-    wrap = obj.modifiers.new("wrap", "SHRINKWRAP")
-    wrap.target = target
-    wrap.wrap_method = "NEAREST_SURFACEPOINT"
-    with bpy.context.temp_override(object=obj, active_object=obj, selected_objects=[obj]):
-        bpy.ops.object.modifier_apply(modifier="wrap")
-    smooth = obj.modifiers.new("relax", "CORRECTIVE_SMOOTH")
-    smooth.factor = 0.5
-    smooth.iterations = 5
-    smooth.smooth_type = "LENGTH_WEIGHTED"
-    with bpy.context.temp_override(object=obj, active_object=obj, selected_objects=[obj]):
-        bpy.ops.object.modifier_apply(modifier="relax")
-    wrap = obj.modifiers.new("wrap2", "SHRINKWRAP")
-    wrap.target = target
-    wrap.wrap_method = "NEAREST_SURFACEPOINT"
-    with bpy.context.temp_override(object=obj, active_object=obj, selected_objects=[obj]):
-        bpy.ops.object.modifier_apply(modifier="wrap2")
-
-
 def self_check() -> int:
     """A dented sphere, retopologised: it must come back closed, in quads,
     and within MAX_DRIFT_MM of where it was, dent included."""
@@ -177,13 +177,13 @@ def self_check() -> int:
     bpy.context.scene.collection.objects.link(original)
     before = measure(obj)
     result = remesh(obj, 1500)
-    wrap_to(obj, original)
     after = measure(obj)
     drift = lost_detail(original, obj) * 1000
     checks = {
         "remesh finished": "FINISHED" in result,
         "all quads": after["quads"] == after["faces"] > 0,
         "closed and manifold": after["open_edges"] == 0 and after["non_manifold_edges"] == 0,
+        "no faces cross": after["self_intersections"] == 0,
         f"within {MAX_DRIFT_MM} mm of the surface ({drift:.3f} mm)": drift <= MAX_DRIFT_MM,
         "fewer faces than before": after["faces"] < before["faces"],
     }
@@ -213,12 +213,13 @@ def main() -> None:
         bpy.context.scene.collection.objects.link(original)
         budget = max(FACES[bone_class(obj.get("name", obj.name))], MIN_FACES)
         tries, ok, after = [], False, {}
-        for k, factor in enumerate(RETRIES):
-            # A thin or holed bone can come out open or smoothed over at a low
-            # budget; a denser remesh with another seed usually settles it.
+        for k, (method, factor) in enumerate(RETRIES):
+            # QuadriFlow can fold faces through each other on a thin process;
+            # a denser try with another seed often settles it, and the voxel
+            # remesh (all quads, never self-crossing) is the last resort.
             obj.data = original.data.copy()
             try:
-                result = remesh(obj, int(budget * factor), seed=k)
+                result = remesh(obj, int(budget * factor), seed=k, method=method)
             except RuntimeError as error:
                 result = {str(error)}
             if "FINISHED" not in result or measure(obj)["quads"] == 0:
@@ -226,12 +227,11 @@ def main() -> None:
                     {"faces": int(budget * factor), "why": f"QuadriFlow gave up: {result}"}
                 )
                 continue
-            wrap_to(obj, original)
             after = measure(obj)
             drift = lost_detail(original, obj) * 1000
             after["driftMm"] = round(drift, 3)
             ok = after["open_edges"] == 0 and after["non_manifold_edges"] == 0
-            ok = ok and drift <= MAX_DRIFT_MM
+            ok = ok and after["self_intersections"] == 0 and drift <= MAX_DRIFT_MM
             tries.append({"faces": int(budget * factor), **after})
             if ok:
                 break

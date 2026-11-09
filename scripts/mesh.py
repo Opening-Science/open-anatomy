@@ -64,7 +64,7 @@ SETS_OF_PIECES = {"costal_cartilages"}  # one node, several separate pieces
 MIN_PIECE_VOXELS = 150  # a piece smaller than this (0.5 ml) in a set is a loose blob
 LEVEL_STEPS = 12
 SLICE_SMOOTHED = ("sternum", "rib_", "vertebrae_", "costal_cartilages", "sacrum")
-SLICE_BLURS = ((0.5, 1.5), (0.5, 1.0), (0.25, 0.5))  # (in-plane, along slices), source voxels
+SLICE_BLURS = ((0.5, 2.0), (0.5, 1.5), (0.25, 1.0))  # (in-plane, along slices), source voxels
 STERNUM_BLURS = ((1.0, 3.0), (0.75, 2.0), (0.5, 1.5))  # its ripples span several slices
 RIB_BLURS = ((0.75, 2.5), (0.5, 2.0), (0.5, 1.5))  # ribs ripple slice to slice the same way
 CARTILAGE_BLURS = ((1.0, 1.5), (0.75, 1.0), (0.5, 0.75))  # thin, lumpy segmentation
@@ -259,9 +259,11 @@ def modelled_cartilage(
     leaves its rib along the rib's own end direction with the rib's own
     cross-section (no step at the join), then takes the pair's mean section so
     left and right match. Ribs 1 to 7 turn medially and rise into the sternum
-    (more for lower ribs), widening about 30% on the way, and end at the
-    sternum's edge on their own side. Ribs 8 to 10 rise to join the cartilage
-    above them (ARCH_JOIN says where along it), which makes the costal arch.
+    (more for lower ribs), widening about 15% on the way, and end against
+    the sternum's edge on their own side. Ribs 8 to 10 rise to meet the lower
+    edge of the cartilage above them (ARCH_JOIN says where along it), which
+    makes the costal arch. Bands touch their targets and never pass into
+    them, so the set has no faces crossing each other.
     Returns RAS mm vertices and triangles, and each kept rib that gets no
     cartilage with the reason; the manifest marks the node as modelled."""
     from scipy.spatial import cKDTree
@@ -313,7 +315,7 @@ def modelled_cartilage(
             rise = 0.15 + 0.2 * (number - 2)  # lower cartilages rise more steeply
             t1 = np.array([-side, 0.0, rise])
             t1 /= np.linalg.norm(t1)
-            p1 = p1 + t1 * 2.0  # end just inside the sternum
+            p1 = p1 - t1 * 0.5  # end against the sternum's surface, not inside it
             # But no further in than the sternum's midline at that height less the
             # band's own half-width, so a left and a right end never overlap.
             level = np.abs(sternum[:, 2] - p1[2]) < 10
@@ -327,10 +329,14 @@ def modelled_cartilage(
                 skipped.append((rib, "no cartilage above it to join"))
                 continue
             k = int(round(ARCH_JOIN[number] * (len(above["curve"]) - 1)))
-            p1 = above["curve"][k]
             t1 = above["curve"][min(k + 1, len(above["curve"]) - 1)] - above["curve"][k - 1]
             t1 /= np.linalg.norm(t1)
-            end_w, end_d, widen = above["halfW"][k], above["halfD"][k], 0.1
+            # Meet the band above at its lower edge, so the two touch and
+            # neither passes through the other.
+            down = np.array([0.0, 0.0, -1.0]) - t1 * (-t1[2])
+            down /= np.linalg.norm(down)
+            p1 = above["curve"][k] + down * above["halfW"][k]
+            end_w, end_d, widen = above["halfW"][k] * 0.8, above["halfD"][k], 0.1
         span = np.linalg.norm(p1 - p0)
         if span < 1.0 or abs(float(start @ (p1 - p0))) < 1e-6 * span:
             skipped.append((rib, "its end lies on its target"))
@@ -348,13 +354,14 @@ def modelled_cartilage(
         half_w = half_w * (1 - f**2) + f**2 * end_w * (1 + widen - 0.15)
         half_d = half_d * (1 - f**2) + f**2 * end_d
         bands[rib] = {"curve": curve, "halfW": half_w, "halfD": half_d}
-        # Round the far end into a dome, so an end that shows beside the
-        # sternum (as at the xiphoid) is not a flat cut face. A band joining
-        # the cartilage above ends inside it, so its dome stays short.
+        # Round the far end into a dome whose tip lands on the target point,
+        # so the end is not a flat cut face and the band touches the sternum
+        # or the band above without passing into it.
         tip = curve[-1] - curve[-2]
         tip /= np.linalg.norm(tip)
         angle = np.linspace(0, 0.45 * np.pi, 7)[1:]
-        depth = min(half_w[-1], half_d[-1]) * (1.0 if number <= 7 else 0.6)
+        depth = min(half_w[-1], half_d[-1])
+        curve[-1] = curve[-1] - tip * depth
         curve = np.vstack([curve, curve[-1] + np.outer(depth * np.sin(angle), tip)])
         half_w = np.concatenate([half_w, half_w[-1] * np.cos(angle)])
         half_d = np.concatenate([half_d, half_d[-1] * np.cos(angle)])
