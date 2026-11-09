@@ -1019,6 +1019,23 @@ def main() -> None:
         bone = s.system == "skeletal"
         cap = args.max_bone_triangles if bone else args.max_triangles
         path = seg_dir / f"{s.label}.nii.gz"
+        if s.label == "costal_cartilages" and args.set in RULED_SETS:
+            # The segmented cartilage is too lumpy and broken to show, and it
+            # may be cut where the ribs are not; the body carries modelled
+            # cartilages instead, so its own cut status does not matter.
+            kept_ribs = [r for r in labels if r.startswith("rib_") and not reasons[r]]
+            ras, triangles, skipped = modelled_cartilage(seg_dir, kept_ribs)
+            dropped += [
+                {"label": f"costal_cartilages:{rib}", "reason": why} for rib, why in skipped
+            ]
+            if len(triangles) == 0:
+                dropped.append({"label": s.label, "reason": "no rib ends to model from"})
+                continue
+            parts.append({
+                "structure": s, "vertices": ras @ RAS_TO_GLTF.T, "triangles": triangles,
+                "voxel_ml": None, "modelled": True,
+            })  # fmt: skip
+            continue
         reason = reasons[s.label] if args.set in RULED_SETS else None
         if reason and not bone:
             sys.exit(f"{s.label}: {reason} in {args.case}; organs must be whole")
@@ -1033,22 +1050,6 @@ def main() -> None:
                 else:
                     # A head cut by the scan would fit a joint to the cut face.
                     dropped[-1]["landmark"] = f"not used: cut at {''.join(sorted(faces))}"
-            continue
-        if s.label == "costal_cartilages" and args.set in RULED_SETS:
-            # The segmented cartilage is too lumpy and broken to show; the
-            # reference body carries modelled cartilages instead.
-            kept_ribs = [r for r in labels if r.startswith("rib_") and not reasons[r]]
-            ras, triangles, skipped = modelled_cartilage(seg_dir, kept_ribs)
-            dropped += [
-                {"label": f"costal_cartilages:{rib}", "reason": why} for rib, why in skipped
-            ]
-            if len(triangles) == 0:
-                dropped.append({"label": s.label, "reason": "no rib ends to model from"})
-                continue
-            parts.append({
-                "structure": s, "vertices": ras @ RAS_TO_GLTF.T, "triangles": triangles,
-                "voxel_ml": None, "modelled": True,
-            })  # fmt: skip
             continue
         knobless, trimmed_ml = settled.get(s.label), 0.0
         if s.label.startswith("rib_") and path.exists():

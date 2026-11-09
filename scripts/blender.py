@@ -93,7 +93,7 @@ def guard_check() -> list[str]:
 
 def main() -> int:
     task, args = (sys.argv[1], sys.argv[2:]) if len(sys.argv) > 1 else ("", [])
-    if task not in ("self-check", "cleanup", "fit", "assemble", "qa"):
+    if task not in ("self-check", "cleanup", "fit", "assemble", "qa", "retopo", "studio"):
         print(__doc__.split("\n\n")[1], file=sys.stderr)
         return 2
     if task == "self-check":
@@ -128,7 +128,7 @@ def main() -> int:
         return 1 if failed else 0
     script = {
         "cleanup": "cleanup_mesh.py", "fit": "fit_atlas.py", "assemble": "assemble.py",
-        "qa": "qa.py",
+        "qa": "qa.py", "retopo": "retopo.py", "studio": "studio.py",
     }[task]  # fmt: skip
     return run(blender, ROOT / "blender" / script, args)
 
