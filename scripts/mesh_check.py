@@ -44,7 +44,7 @@ def run(seg: Path, out: Path) -> dict:
          "--seg-dir", str(seg), "--out-dir", str(out)],
         check=True, capture_output=True,
     )  # fmt: skip
-    return json.loads((out / "manifest.json").read_text())
+    return json.loads((out / "synthetic.organs.manifest.json").read_text())
 
 
 def main() -> int:
@@ -58,12 +58,12 @@ def main() -> int:
             centre = np.array(SHAPE) * SPACING / 2 + (i - 4.5) * 2
             mask = ellipsoid(radii, centre).astype(np.uint8)
             nib.save(nib.Nifti1Image(mask, AFFINE), seg / f"{s.label}.nii.gz")
-            expected[node_name(s.uberon)] = 4 / 3 * math.pi * radii.prod() / 1000  # ml
+            expected[node_name(s.term)] = 4 / 3 * math.pi * radii.prod() / 1000  # ml
 
         first = run(seg, Path(tmp) / "a")
         second = run(seg, Path(tmp) / "b")
         names = [n["name"] for n in first["nodes"]]
-        if names != [node_name(s.uberon) for s in STRUCTURES]:
+        if names != [node_name(s.term) for s in STRUCTURES]:
             failures.append(f"node names {names}")
         for node in first["nodes"]:
             error = abs(node["volume_ml"] - expected[node["name"]]) / expected[node["name"]]

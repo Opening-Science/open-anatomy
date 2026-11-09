@@ -3,11 +3,13 @@ Runs the headless Blender scripts in blender/ with a checked Blender.
 
   python scripts/blender.py self-check
   python scripts/blender.py cleanup --in <glb> --out-dir <dir> [cleanup_mesh.py options]
+  python scripts/blender.py assemble --body <glb> --ct <glb> --out <glb> --report <json>
   python scripts/blender.py fit --atlas <glb> --scheme bodyparts3d|hra --body <glb> \
       --out <glb> --report <json> [fit_atlas.py options]
 
 Blender comes from BLENDER_BIN, else `blender` on PATH, and must be 5.2.x LTS.
-Without one it says so and exits 0, so CI (which has none) skips. self-check
+Without one, self-check says so and exits 0, so CI (which has none) skips;
+the other tasks fail. self-check
 runs this repository's glTF round trip and both ported scripts on synthetic
 meshes. Inputs under a data/vitronic/ folder are refused: the scripts are only
 ever run on synthetic bodies, open atlases and open CT data, never on a scan of
@@ -52,19 +54,21 @@ def run(blender: str, script: Path, args: list[str]) -> int:
 
 
 def personal_inputs(args: list[str]) -> list[str]:
-    paths = [args[i + 1] for i, a in enumerate(args[:-1]) if a in ("--in", "--atlas", "--body")]
+    flags = ("--in", "--atlas", "--body", "--ct")
+    paths = [args[i + 1] for i, a in enumerate(args[:-1]) if a in flags]
     return [p for p in paths if PERSONAL.search(str(Path(p).resolve()))]
 
 
 def main() -> int:
     task, args = (sys.argv[1], sys.argv[2:]) if len(sys.argv) > 1 else ("", [])
-    if task not in ("self-check", "cleanup", "fit"):
+    if task not in ("self-check", "cleanup", "fit", "assemble"):
         print(__doc__.split("\n\n")[1], file=sys.stderr)
         return 2
     blender = find_blender()
     if blender is None:
-        print("Blender was not found: set BLENDER_BIN to a Blender 5.2.x binary. Skipping.")
-        return 0
+        # Only the self-check skips (for CI); a build without Blender must fail.
+        print("Blender was not found: set BLENDER_BIN to a Blender 5.2.x binary.", file=sys.stderr)
+        return 0 if task == "self-check" else 1
     found = version(blender)
     if found is None or found[:2] != SERIES:
         shown = ".".join(map(str, found)) if found else "not a Blender this script can read"
@@ -83,7 +87,7 @@ def main() -> int:
         failed = [s.name for s, a in checks if run(blender, s, a) != 0]
         print("all Blender self-checks passed" if not failed else f"failed: {', '.join(failed)}")
         return 1 if failed else 0
-    script = "cleanup_mesh.py" if task == "cleanup" else "fit_atlas.py"
+    script = {"cleanup": "cleanup_mesh.py", "fit": "fit_atlas.py", "assemble": "assemble.py"}[task]
     return run(blender, ROOT / "blender" / script, args)
 
 
