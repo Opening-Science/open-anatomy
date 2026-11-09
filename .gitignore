@@ -5,3 +5,5 @@ __pycache__/
 .venv/
 .ruff_cache/
 .brief-from-twin-llm.md
+*.egg-info/
+build/

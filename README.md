@@ -69,10 +69,32 @@ FHIR Condition and Procedure codes to anatomy edits will drive this, applied
 on the person's own machine. The released base models stay generic. This is a
 design only for now.
 
-## Self-check
+## Build one case
+
+Needs Python 3.11+ (3.12 recommended), Blender 5.2+ for the render, and a GPU
+for a quick segmentation (a CPU works, slowly).
 
 ```bash
-scripts/self-check.sh   # builds and checks a tiny synthetic mesh; skips without Blender
+uv venv .venv -p 3.12 && uv pip install --python .venv/bin/python -e '.[pipeline]'
+.venv/bin/python scripts/fetch.py               # 3.2 GB subset, checked, then case s1086
+.venv/bin/python scripts/segment.py --case s1086
+.venv/bin/python scripts/mesh.py --case s1086   # data/work/s1086/s1086.organs.glb
+blender --background --factory-startup --python scripts/render.py -- \
+  --in data/work/s1086/s1086.organs.glb --out data/renders/s1086-organs-front.png
+```
+
+`fetch.py` downloads the pinned source from its official record, checks its
+MD5 and SHA-256 against [sources.json](sources.json), and unpacks one case.
+`segment.py` runs TotalSegmentator's `total` task for ten structures and scores
+each against the dataset's own reference segmentation. `mesh.py` writes one GLB
+with a closed mesh per structure, named by UBERON ID, and a manifest; the same
+masks always give the same bytes.
+
+## Self-checks
+
+```bash
+.venv/bin/python scripts/mesh_check.py   # meshes synthetic ellipsoids; no download
+scripts/self-check.sh                     # glTF round trip in Blender; skips without it
 ```
 
 See [CONTRIBUTING](CONTRIBUTING.md) to take part.

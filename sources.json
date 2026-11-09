@@ -1,0 +1,27 @@
+{
+  "default": {
+    "source": "totalsegmentator-small-v201",
+    "case": "s1086"
+  },
+  "sources": {
+    "totalsegmentator-small-v201": {
+      "title": "Small subset of TotalSegmentator Dataset, v2.0.1 (102 subjects)",
+      "creator": "Jakob Wasserthal",
+      "record": "https://zenodo.org/records/10047263",
+      "doi": "10.5281/zenodo.10047263",
+      "licence": "CC-BY-4.0",
+      "url": "https://zenodo.org/records/10047263/files/Totalsegmentator_dataset_small_v201.zip",
+      "file": "Totalsegmentator_dataset_small_v201.zip",
+      "bytes": 3244617817,
+      "md5": "6b5524af4b15e6ba06ef2d700c0c73e0",
+      "sha256": "6c47636d9727cd97048616383365dd5a588d0bbc5723b5eb0fa736ed08480ffc"
+    }
+  },
+  "cases": {
+    "s1086": {
+      "source": "totalsegmentator-small-v201",
+      "ct_sha256": "77b17dac577a5a0cd119024462cc1d5b51a50031ff3bc5380a601d06316dd3e8",
+      "why": "all ten v0 structures present and none cut off by the scan edge; 1.5 mm isotropic"
+    }
+  }
+}

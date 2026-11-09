@@ -11,6 +11,7 @@
    ```bash
    ruff check scripts
    ruff format --check scripts
+   python scripts/mesh_check.py
    scripts/self-check.sh   # needs Blender 5.2+; skips without it
    ```
 

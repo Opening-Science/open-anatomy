@@ -10,5 +10,21 @@ Sources
 Each source used to build a released asset is listed here with its licence and
 credit line. Input data is downloaded from the source's official page into the
 gitignored data/ folder and is not distributed with this repository.
+sources.json pins every download by MD5 (from the record) and SHA-256.
 
-(No sources are used yet.)
+TotalSegmentator dataset, small subset, v2.0.1
+  Jakob Wasserthal. Zenodo, 2023. https://doi.org/10.5281/zenodo.10047263
+  Licence: CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/)
+  File: Totalsegmentator_dataset_small_v201.zip
+  SHA-256: 6c47636d9727cd97048616383365dd5a588d0bbc5723b5eb0fa736ed08480ffc
+  Used: case s1086 (CT and reference segmentations)
+  Please also cite: Wasserthal J. et al. TotalSegmentator: Robust Segmentation
+  of 104 Anatomic Structures in CT Images. Radiology: Artificial Intelligence,
+  2023. https://doi.org/10.1148/ryai.230024
+
+Tools
+-----
+
+TotalSegmentator (https://github.com/wasserth/TotalSegmentator)
+  Code and the weights of the "total" task: Apache License 2.0. Only tasks
+  whose weights are Apache-2.0 are used; see scripts/structures.py.

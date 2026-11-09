@@ -5,9 +5,18 @@ description = "Open, imaging-based human anatomy models built from scripts"
 license = "Apache-2.0"
 requires-python = ">=3.11"
 
+[project.optional-dependencies]
+# mesh.py and mesh_check.py
+mesh = ["nibabel==5.4.2", "numpy==2.5.4", "vtk==9.7.2"]
+# fetch.py, segment.py and mesh.py
+pipeline = ["open-anatomy[mesh]", "TotalSegmentator==2.18.0"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP"]
+
+[tool.setuptools]
+py-modules = []

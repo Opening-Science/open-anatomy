@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   check:
-    name: Lint and self-check
+    name: Lint and self-checks
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -24,3 +24,6 @@ jobs:
       - run: shellcheck scripts/*.sh
       # No Blender on the runner, so this reports a skip. Run it locally with Blender.
       - run: scripts/self-check.sh
+      - run: pipx run uv venv .venv -p 3.12
+      - run: pipx run uv pip install --python .venv/bin/python -e '.[mesh]'
+      - run: .venv/bin/python scripts/mesh_check.py
