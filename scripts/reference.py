@@ -82,6 +82,9 @@ def main() -> None:
             "--out", out / f"{name}.reference.glb",
             "--report", out / f"{name}.report.json",
         ]  # fmt: skip
+        marks = ROOT / "data" / "work" / case / f"{case}.landmarks.glb"
+        if marks.exists():
+            assemble += ["--landmarks", marks]
         if args.render:
             assemble += ["--render-dir", ROOT / "data" / "renders", "--render-name", name]
         step(*blender, "assemble", *assemble)
