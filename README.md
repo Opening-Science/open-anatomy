@@ -85,11 +85,22 @@ blender --background --factory-startup --python scripts/render.py -- \
 
 `fetch.py` downloads the pinned source from its official record, checks its
 MD5 and SHA-256 against [sources.json](sources.json), and unpacks one case.
-`segment.py` runs TotalSegmentator's `total` task for ten structures and scores
-each against the dataset's own reference segmentation. `mesh.py` writes one GLB
-with a closed mesh per structure, named by UBERON ID, and a manifest; the same
-masks always give the same bytes. The GLB credits the dataset's creator, DOI
-and case in its asset copyright, so the attribution travels with the file.
+`segment.py` runs TotalSegmentator's `total` task for the set's structures and
+scores each against the dataset's own reference segmentation; the default set,
+`organs`, is these ten. `mesh.py` writes one GLB with a closed mesh per
+structure, named by UBERON ID, and a manifest; the same masks always give the
+same bytes. The GLB credits the dataset's creator, DOI and case in its asset
+copyright, so the attribution travels with the file.
+
+Both scripts take `--set`: `organs`, `reference` (the organs and the trunk
+skeleton), `skeleton`, one set per body system (`cardiovascular`,
+`respiratory`, `digestive`, `urinary`, `nervous`, `endocrine`, `muscular`) and
+`body`, the skeleton with every system. The lists are in
+[scripts/structures.py](scripts/structures.py). `segment.py --set body` keeps
+every label of the Apache-2.0 `total` and `head_glands_cavities` tasks in
+`data/work/<case>/seg/`, so a system's masks are ready for
+`mesh.py --set <system>`; the head task segments inside the skull, so its
+masks are empty in a scan without one.
 
 ## Reference bodies
 
