@@ -105,6 +105,7 @@ def run_main(
     monkeypatch: pytest.MonkeyPatch,
     reasons: dict[str, str],
     which: str = "reference",
+    faces: set[str] | None = None,
 ) -> dict[str, Any]:
     surfaced: list[str] = []
 
@@ -115,12 +116,16 @@ def run_main(
         surfaced.append(path.name.removesuffix(".nii.gz"))
         return TETRA + len(surfaced), TETRA_TRIANGLES.copy(), TETRA_ML
 
-    def fake_cartilage(seg_dir: Path, kept_ribs: list[str]) -> tuple[Any, Any]:
-        return TETRA.copy(), TETRA_TRIANGLES.copy()
+    def fake_cartilage(seg_dir: Path, kept_ribs: list[str]) -> tuple[Any, Any, Any]:
+        return TETRA.copy(), TETRA_TRIANGLES.copy(), []
+
+    def fake_faces(path: Path) -> set[str]:
+        return {"I"} if faces is None else faces
 
     monkeypatch.setattr(mesh, "cut_reason", fake_reason)
     monkeypatch.setattr(mesh, "surface", fake_surface)
     monkeypatch.setattr(mesh, "modelled_cartilage", fake_cartilage)
+    monkeypatch.setattr(mesh, "cut_faces", fake_faces)
     seg = tmp_path / "seg"
     seg.mkdir(exist_ok=True)
     argv = ["mesh.py", "--case", "c", "--seg-dir", str(seg), "--out-dir", str(tmp_path)]
@@ -191,6 +196,70 @@ def test_a_cut_femur_is_dropped_without_touching_the_girdle(
     manifest = run_main(tmp_path, monkeypatch, {"femur_left": "cut by the scan's edge (axis 2)"})
     assert dropped(manifest) == {"femur_left": "cut by the scan's edge (axis 2)"}
     assert (tmp_path / "c.landmarks.glb").exists()
+
+
+def test_a_humerus_cut_at_its_head_is_not_a_landmark(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cut = {"humerus_left": "cut by the scan's edge (axis 2)"}
+    manifest = run_main(tmp_path, monkeypatch, cut, faces={"S"})
+    assert "humerus_left" not in manifest["surfaced"]
+    note = next(d for d in manifest["dropped"] if d["label"] == "humerus_left")
+    assert note["landmark"] == "not used: cut at S"
+    # Its partner was dropped only for symmetry, so it is whole and still measured.
+    assert "humerus_right" in manifest["surfaced"]
+
+
+@pytest.mark.parametrize(
+    ("label", "reason", "faces", "ok"),
+    [
+        ("humerus_left", "cut by the scan's edge (axis 2)", {"I"}, True),
+        ("humerus_left", "cut by the scan's edge (axis 2)", {"S"}, False),
+        ("femur_right", "cut by the scan's edge (axis 0)", {"I", "R"}, False),
+        ("humerus_right", "shoulder girdle dropped: scapula_left cut", set(), True),
+        ("femur_left", "absent or a stray label", set(), False),
+        ("rib_left_1", "cut by the scan's edge (axis 2)", {"I"}, False),
+    ],
+)
+def test_landmark_ok(label: str, reason: str, faces: set[str], ok: bool) -> None:
+    assert mesh.landmark_ok(label, reason, faces) is ok
+
+
+def test_reference_rules_leave_the_input_alone() -> None:
+    reasons: dict[str, str | None] = {"rib_left_4": "cut by the scan's edge (axis 0)"}
+    ruled = mesh.reference_rules(reasons)
+    assert ruled["rib_right_4"] == "its pair rib_left_4 is missing"
+    assert reasons == {"rib_left_4": "cut by the scan's edge (axis 0)"}
+
+
+@pytest.mark.parametrize(
+    ("index", "expected"),
+    [((0, 10), "I"), ((-1, 10), "S"), ((10, 0), "R"), ((10, -1), "L")],
+)
+def test_cut_faces_names_the_side_in_ras(
+    tmp_path: Path, index: tuple[int, int], expected: str
+) -> None:
+    # FLIPPED runs x towards the right as the index falls, as real CTs do.
+    mask = box((20, 20, 20), (5, 5, 5), (15, 15, 15))
+    axis_k, z = index
+    if index[0] in (0, -1):
+        mask[10, 10, axis_k] = True  # reaches the bottom or top slice
+    else:
+        mask[z, 10, 10] = True  # reaches the low or high x index
+    assert mesh.cut_faces(save(tmp_path / "m.nii.gz", mask)) == {expected}
+
+
+def test_trim_knobs_takes_off_a_lump_on_a_thin_neck_and_keeps_thin_rib() -> None:
+    mask = np.zeros((40, 24, 20), bool)
+    mask[2:38, 8:12, 8:12] = True  # the rib, 4 voxels across
+    mask[20, 12:15, 10] = True  # a neck one voxel thin, three long
+    mask[19:22, 15:18, 9:12] = True  # a 27-voxel lump beyond it
+    mask[26:38, 4:8, 9:11] = True  # a flange 2 voxels thin, 96 voxels: part of the rib
+    trimmed, ml = mesh.trim_knobs(mask, voxel_ml=0.02)  # lump 0.54 ml, flange over 1 ml
+    assert not trimmed[20, 16, 10]
+    assert trimmed[25, 10, 10] and trimmed[34, 5, 10]
+    assert ml == pytest.approx(0.02 * (mask.sum() - trimmed.sum()))
+    assert mask.sum() - trimmed.sum() >= 27
 
 
 @pytest.mark.parametrize(

@@ -62,7 +62,7 @@ CARTILAGE_BLURS = ((1.0, 1.5), (0.75, 1.0), (0.5, 0.75))  # thin, lumpy segmenta
 CARTILAGE_MAX_MM = 120  # the 6th and 7th costal cartilages run 10-12 cm
 JOIN_OVERLAP_MM = 6.0  # a modelled cartilage starts this far inside its rib's end
 TANGENT_SHARE = 0.7  # of the rib-to-sternum span, for the cartilage curve's end tangents
-BRIDGE_MM = 5.0  # cartilage-to-rib gaps narrower than this are closed
+KNOB_MAX_ML = 1.0  # a lump the opening separates from a rib is taken off below this volume
 RIB_BIN_MM = 3.0
 RIB_SMOOTH_MM = 9.0
 PAD = 2  # empty voxels around a crop, so the surface closes
@@ -224,13 +224,16 @@ def sweep(curve: np.ndarray, start_across: np.ndarray, half_w: np.ndarray, half_
     return vertices, np.array(triangles, dtype=np.uint32)
 
 
-def modelled_cartilage(seg_dir: Path, kept_ribs: list[str]) -> tuple[np.ndarray, np.ndarray]:
-    """Costal cartilages modelled, not segmented, for ribs 2 to 7 in left-right
+def modelled_cartilage(
+    seg_dir: Path, kept_ribs: list[str]
+) -> tuple[np.ndarray, np.ndarray, list[tuple[str, str]]]:
+    """Costal cartilages modelled, not segmented, for ribs 1 to 7 in left-right
     pairs. Each leaves its rib along the rib's own end direction with the rib's
     own cross-section (no step at the join), turns medially and rises into the
     sternum (more for lower ribs), flattens to about 1.5:1 and widens about 20%
-    where it meets the sternum. Returns RAS mm vertices and triangles; the
-    manifest marks the node as modelled."""
+    where it meets the sternum, ending at the sternum's edge on its own side.
+    Returns RAS mm vertices and triangles, and each kept rib that gets no
+    cartilage with the reason; the manifest marks the node as modelled."""
     from scipy.spatial import cKDTree
 
     sternum_image = nib.load(seg_dir / "sternum.nii.gz")
@@ -238,18 +241,25 @@ def modelled_cartilage(seg_dir: Path, kept_ribs: list[str]) -> tuple[np.ndarray,
     sternum = sternum @ sternum_image.affine[:3, :3].T + sternum_image.affine[:3, 3]
     tree = cKDTree(sternum)
     midline = float(np.median(sternum[:, 0]))
-    ends = {}
+    ends, skipped = {}, []
     for rib in kept_ribs:
         if int(rib.rsplit("_", 1)[1]) > 7:
             continue  # ribs 8 to 10 reach the sternum through the arch, 11 and 12 not at all
         end = rib_end(seg_dir / f"{rib}.nii.gz")
-        if end is not None and tree.query(end["tip"])[0] <= CARTILAGE_MAX_MM:
+        if end is None:
+            skipped.append((rib, "its front end could not be measured"))
+        elif tree.query(end["tip"])[0] > CARTILAGE_MAX_MM:
+            skipped.append((rib, f"its end is over {CARTILAGE_MAX_MM} mm from the sternum"))
+        elif tree.query(end["tip"])[0] < 1.0:
+            skipped.append((rib, "its end already touches the sternum"))
+        else:
             ends[rib] = end
 
     def has_pair(r: str) -> bool:
         return r.replace("left", "right") in ends and r.replace("right", "left") in ends
 
     paired = [r for r in ends if has_pair(r)]
+    skipped += [(r, "its pair has no cartilage") for r in ends if not has_pair(r)]
     vertices, triangles = [], []
     for rib in sorted(paired):
         e = ends[rib]
@@ -265,7 +275,21 @@ def modelled_cartilage(seg_dir: Path, kept_ribs: list[str]) -> tuple[np.ndarray,
         t1 = medial + np.array([0.0, 0.0, rise])
         t1 /= np.linalg.norm(t1)
         p1 = p1 + t1 * 2.0  # end just inside the sternum
+        # But no further in than the sternum's midline at that height less the
+        # cartilage's own radius, so a left and a right end never overlap.
+        partner = ends[
+            rib.replace("left", "right") if "left" in rib else rib.replace("right", "left")
+        ]
+        w_pair = (e["halfWidth"] + partner["halfWidth"]) / 2
+        radius = w_pair * 1.2
+        level = np.abs(sternum[:, 2] - p1[2]) < 10
+        centre = float(np.median(sternum[level, 0])) if level.any() else midline
+        if (p1[0] - centre) * side < radius:
+            p1[0] = centre + side * radius
         span = np.linalg.norm(p1 - p0)
+        if span < 1.0 or abs(float(e["direction"] @ (p1 - p0))) < 1e-6 * span:
+            skipped.append((rib, "its end lies on the sternum"))
+            continue
         s = np.linspace(0, 1, 32)[:, None]
         h00, h10 = 2 * s**3 - 3 * s**2 + 1, s**3 - 2 * s**2 + s
         h01, h11 = -2 * s**3 + 3 * s**2, s**3 - s**2
@@ -275,64 +299,24 @@ def modelled_cartilage(seg_dir: Path, kept_ribs: list[str]) -> tuple[np.ndarray,
         blend = np.clip(f / 0.35, 0, 1)  # from the rib's own section to cartilage's within a third
         # Start with this rib's own section (no step at the join), then take the
         # pair's mean, so left and right cartilages match.
-        partner = ends[
-            rib.replace("left", "right") if "left" in rib else rib.replace("right", "left")
-        ]
-        w_pair = (e["halfWidth"] + partner["halfWidth"]) / 2
         w0, d0 = e["halfWidth"], e["halfDepth"]
         half_w = ((1 - blend) * w0 + blend * w_pair) * (1 + 0.2 * f**2)
         half_d = (1 - blend) * d0 + blend * (w_pair / 1.5)
+        # Round the sternal end into a dome, so an end that shows beside the
+        # sternum (as at the xiphoid) is not a flat cut face.
+        tip = curve[-1] - curve[-2]
+        tip /= np.linalg.norm(tip)
+        angle = np.linspace(0, 0.45 * np.pi, 7)[1:]
+        depth = min(half_w[-1], half_d[-1])
+        curve = np.vstack([curve, curve[-1] + np.outer(depth * np.sin(angle), tip)])
+        half_w = np.concatenate([half_w, half_w[-1] * np.cos(angle)])
+        half_d = np.concatenate([half_d, half_d[-1] * np.cos(angle)])
         v, t = sweep(curve, e["across"], half_w, half_d)
         triangles.append(t + sum(len(x) for x in vertices))
         vertices.append(v)
     if not vertices:
-        return np.zeros((0, 3)), np.zeros((0, 3), dtype=np.uint32)
-    return np.vstack(vertices), np.vstack(triangles).astype(np.uint32)
-
-
-def bridged_cartilage(seg_dir: Path, kept_ribs: list[str]) -> np.ndarray:
-    """The costal cartilage mask, cleaned for a reference body.
-
-    - Below the sternum's lowest slice the cartilages of ribs 8 to 10 merge
-      into the costal arch, which the segmentation leaves lumpy and branching;
-      it is cut away there, with any piece the cut passes through.
-    - A small opening (3 voxels) takes off blobs left on a cartilage.
-    - Gaps narrower than BRIDGE_MM between cartilage and rib are closed (a
-      closing of both with a ball of half BRIDGE_MM, keeping what it adds
-      beside the cartilage), so each cartilage meets its rib.
-    - Only pieces that touch a rib kept in the body stay: a cartilage whose
-      rib the scan cut would otherwise float.
-    """
-    image = nib.load(seg_dir / "costal_cartilages.nii.gz")
-    cartilage = np.asanyarray(image.dataobj) > 0
-    ribs = np.zeros_like(cartilage)
-    for rib in kept_ribs:
-        ribs |= np.asanyarray(nib.load(seg_dir / f"{rib}.nii.gz").dataobj) > 0
-    axis = int(np.argmax(np.abs(image.affine[2, :3])))  # the slice axis (superior)
-    sternum = np.asanyarray(nib.load(seg_dir / "sternum.nii.gz").dataobj) > 0
-    if sternum.any():
-        k = np.flatnonzero(sternum.any(tuple(a for a in range(3) if a != axis)))
-        upward = image.affine[2, axis] > 0
-        bottom = k[0] if upward else k[-1]
-        index = np.indices(cartilage.shape)[axis]
-        cartilage &= index >= bottom if upward else index <= bottom
-        # A piece the cut slices through is a remnant of the arch: it goes too.
-        labels, _ = ndimage.label(cartilage, structure=np.ones((3, 3, 3)))
-        sliced = np.unique(labels[index == bottom][labels[index == bottom] > 0])
-        cartilage &= ~np.isin(labels, sliced)
-    # A small opening takes off the blobs the segmentation leaves on a cartilage.
-    cartilage = ndimage.binary_opening(cartilage, structure=np.ones((3, 3, 3)))
-    spacing = np.linalg.norm(image.affine[:3, :3], axis=0)
-    radius = np.maximum(np.round(BRIDGE_MM / 2 / spacing), 1).astype(int)
-    grid = np.indices(2 * radius + 1).T - radius
-    ball = ((grid * spacing) ** 2).sum(-1).T <= (BRIDGE_MM / 2) ** 2
-    union = cartilage | ribs
-    filled = ndimage.binary_closing(union, structure=ball) & ~union
-    near = ndimage.binary_dilation(cartilage, structure=ball)
-    cartilage = cartilage | (filled & near)
-    labels, count = ndimage.label(cartilage, structure=np.ones((3, 3, 3)))
-    touching = np.unique(labels[ndimage.binary_dilation(ribs) & (labels > 0)])
-    return np.isin(labels, touching)
+        return np.zeros((0, 3)), np.zeros((0, 3), dtype=np.uint32), skipped
+    return np.vstack(vertices), np.vstack(triangles).astype(np.uint32), skipped
 
 
 def cut_reason(path: Path) -> str | None:
@@ -351,6 +335,82 @@ def cut_reason(path: Path) -> str | None:
         if k[0] == 0 or k[-1] == data.shape[axis] - 1:
             return f"cut by the scan's edge (axis {axis})"
     return None
+
+
+def cut_faces(path: Path) -> set[str]:
+    """The sides of the body where the scan cuts a mask: "S" or "I" (its top
+    or bottom slice), "L", "R", "A" or "P" (the in-plane border), named by the
+    direction each face of the volume points in RAS."""
+    image = nib.load(path)
+    data = np.asanyarray(image.dataobj) > 0
+    faces = set()
+    for axis in range(3):
+        k = np.flatnonzero(data.any(tuple(a for a in range(3) if a != axis)))
+        if len(k) == 0:
+            continue
+        column = image.affine[:3, axis]
+        ras = int(np.argmax(np.abs(column)))
+        up, down = "RAS"[ras], "LPI"[ras]  # the RAS axis's positive and negative ends
+        high, low = (up, down) if column[ras] > 0 else (down, up)
+        if k[0] == 0:
+            faces.add(low)
+        if k[-1] == data.shape[axis] - 1:
+            faces.add(high)
+    return faces
+
+
+def trim_knobs(mask: np.ndarray, voxel_ml: float) -> tuple[np.ndarray, float]:
+    """Takes off lumps joined to a rib only by a thin neck: an opening (one
+    voxel, 6-connected) separates them, the largest piece is grown back, and
+    what is left over in pieces under KNOB_MAX_ML goes. Larger left-over
+    pieces are thin parts of the rib itself and stay. Returns the mask and
+    the volume taken off in ml."""
+    six = ndimage.generate_binary_structure(3, 1)
+    opened = ndimage.binary_opening(mask, structure=six)
+    labels, count = ndimage.label(opened, structure=np.ones((3, 3, 3)))
+    if count == 0:
+        return mask, 0.0
+    main = labels == int(np.argmax(np.bincount(labels.ravel())[1:])) + 1
+    body = ndimage.binary_dilation(main, structure=six) & mask
+    rest, _ = ndimage.label(mask & ~body, structure=np.ones((3, 3, 3)))
+    sizes = np.bincount(rest.ravel())[1:]
+    small = np.flatnonzero(sizes * voxel_ml < KNOB_MAX_ML) + 1
+    trimmed = mask & ~np.isin(rest, small)
+    return trimmed, float((mask.sum() - trimmed.sum()) * voxel_ml)
+
+
+def reference_rules(reasons: dict[str, str | None]) -> dict[str, str | None]:
+    """The drop rules of a reference body, applied to each label's cut_reason.
+
+    A shoulder girdle with any bone cut is dropped on both sides, arm
+    included, so a reference body is symmetric and nothing floats. Paired
+    ribs go together: a rib whose partner is cut or missing is dropped too.
+    Returns a new mapping; every dropped label has its reason.
+    """
+    reasons = dict(reasons)
+    girdle = [f"{b}_{side}" for b in ("clavicula", "scapula", "humerus")
+              for side in ("left", "right")]  # fmt: skip
+    cut = [g for g in girdle if reasons.get(g)]
+    if cut:
+        for g in girdle:
+            reasons[g] = reasons.get(g) or f"shoulder girdle dropped: {', '.join(cut)} cut"
+    for k in range(1, 13):
+        pair = (f"rib_left_{k}", f"rib_right_{k}")
+        for a, b in (pair, pair[::-1]):
+            if reasons.get(a) and not reasons.get(b):
+                reasons[b] = f"its pair {a} is missing"
+    return reasons
+
+
+def landmark_ok(label: str, reason: str, faces: set[str]) -> bool:
+    """Whether a dropped femur or humerus can still give its joint centre: it
+    is in the scan, and the scan cuts it only at its far (inferior) end, so
+    its head is whole."""
+    if label not in LANDMARK_BONES or reason.startswith(("absent", "not segmented")):
+        return False
+    if not reason.startswith("cut by"):
+        return True  # dropped by a rule (its girdle), not cut: the bone is whole
+    return faces == {"I"}
 
 
 def drop_small_pieces(poly: vtk.vtkPolyData, min_volume: float) -> vtk.vtkPolyData:
@@ -711,20 +771,7 @@ def main() -> None:
     labels = [s.label for s in SETS[args.set]]
     reasons = {label: cut_reason(seg_dir / f"{label}.nii.gz") for label in labels}
     if args.set == "reference":
-        # A shoulder girdle with any bone cut is dropped on both sides, arm
-        # included, so a reference body is symmetric and nothing floats.
-        girdle = [f"{b}_{side}" for b in ("clavicula", "scapula", "humerus")
-                  for side in ("left", "right")]  # fmt: skip
-        cut = [g for g in girdle if reasons.get(g)]
-        if cut:
-            for g in girdle:
-                reasons[g] = reasons.get(g) or f"shoulder girdle dropped: {', '.join(cut)} cut"
-        # Paired bones go together: a rib whose partner is cut is dropped too.
-        for k in range(1, 13):
-            pair = (f"rib_left_{k}", f"rib_right_{k}")
-            for a, b in (pair, pair[::-1]):
-                if reasons.get(a) and not reasons.get(b):
-                    reasons[b] = f"its pair {a} is missing"
+        reasons = reference_rules(reasons)
     for s in SETS[args.set]:
         cap = args.max_bone_triangles if s.system == "skeletal" else args.max_triangles
         path = seg_dir / f"{s.label}.nii.gz"
@@ -734,13 +781,21 @@ def main() -> None:
             # meshed into the landmarks file for their joint centres.
             dropped.append({"label": s.label, "reason": reason})
             if s.label in LANDMARK_BONES and not reason.startswith(("absent", "not segmented")):
-                landmarks.append(s)
+                faces = cut_faces(path) if reason.startswith("cut by") else set()
+                if landmark_ok(s.label, reason, faces):
+                    landmarks.append(s)
+                else:
+                    # A head cut by the scan would fit a joint to the cut face.
+                    dropped[-1]["landmark"] = f"not used: cut at {''.join(sorted(faces))}"
             continue
         if s.label == "costal_cartilages" and args.set == "reference":
-            # The segmented cartilage is too lumpy and broken to show (see
-            # bridged_cartilage); the reference body carries modelled bridges.
+            # The segmented cartilage is too lumpy and broken to show; the
+            # reference body carries modelled cartilages instead.
             kept_ribs = [r for r in labels if r.startswith("rib_") and not reasons[r]]
-            ras, triangles = modelled_cartilage(seg_dir, kept_ribs)
+            ras, triangles, skipped = modelled_cartilage(seg_dir, kept_ribs)
+            dropped += [
+                {"label": f"costal_cartilages:{rib}", "reason": why} for rib, why in skipped
+            ]
             if len(triangles) == 0:
                 dropped.append({"label": s.label, "reason": "no rib ends to model from"})
                 continue
@@ -749,17 +804,19 @@ def main() -> None:
                 "voxel_ml": None, "modelled": True,
             })  # fmt: skip
             continue
+        knobless, trimmed_ml = None, 0.0
+        if s.label.startswith("rib_") and path.exists():
+            image = nib.load(path)
+            knobless, trimmed_ml = trim_knobs(
+                np.asanyarray(image.dataobj) > 0,
+                float(abs(np.linalg.det(image.affine[:3, :3]))) / 1000,
+            )
         try:
             ras, triangles, voxel_ml = surface(
                 path, cap, pieces=s.label in SETS_OF_PIECES,
                 along_slices=s.label.startswith(SLICE_SMOOTHED),
                 centreline=s.label.startswith("rib_"),
-                mask=(
-                    bridged_cartilage(
-                        seg_dir, [r for r in labels if r.startswith("rib_") and not reasons[r]]
-                    )
-                    if s.label == "costal_cartilages" else None
-                ),
+                mask=knobless if s.label.startswith("rib_") else None,
             )  # fmt: skip
         except ValueError:
             if args.set == "organs":
@@ -768,7 +825,7 @@ def main() -> None:
             continue
         parts.append({
             "structure": s, "vertices": ras @ RAS_TO_GLTF.T, "triangles": triangles,
-            "voxel_ml": voxel_ml,
+            "voxel_ml": voxel_ml, "trimmed_ml": round(trimmed_ml, 2),
         })  # fmt: skip
 
     everything = np.vstack([p["vertices"] for p in parts])
@@ -825,6 +882,7 @@ def main() -> None:
                 "modelled": bool(p.get("modelled")),
                 "pieces": "several" if p["structure"].label in SETS_OF_PIECES else "one",
                 "volume_drift": round(p["drift"], 4) if p["drift"] is not None else None,
+                **({"knobs_trimmed_ml": p["trimmed_ml"]} if p.get("trimmed_ml") else {}),
             }
             for p in parts
         ],
