@@ -8,6 +8,9 @@ Inputs (after `--`):
                       scripts/size_body.py)
   --ct <glb>          the CT structures from mesh.py --set reference
   --outline <glb>     the CT's trunk outline from the same run (measured, never exported)
+  [--landmarks <glb>] the femurs and humeri mesh.py kept only for their joint centres
+                      (cut by the scan at their far end, or dropped with their
+                      girdle); measured, never exported
   --out <glb>         ANNY's skin and skeleton, posed, plus the CT nodes
   --report <json>     joint residuals before and after, containment, notes
   --case <id>         the CT's case in sources.json; its record gives the sex for the
@@ -361,14 +364,40 @@ def main() -> None:
     names = {o.name: o for o in ct}
     outline = next(o for o in import_glb(outline_path) if o.type == "MESH")
     bake_world([outline])
+    # Femurs and humeri left out of the body still give their joint centres.
+    marks = []
+    landmarks_path = option(args, "--landmarks")
+    if landmarks_path:
+        marks = [o for o in import_glb(landmarks_path) if o.type == "MESH"]
+        bake_world(marks)
+        for o in marks:
+            o.name = "landmark:" + o.get("term", o.name).replace(":", "_")
+    bones = dict(names)
+    bones.update({o.name.removeprefix("landmark:"): o for o in marks})
+    notes = []
 
     # CT joints (true size; the anatomy never moves).
-    midline = float(np.mean([coords(names[n])[:, 0].mean() for n in FEMUR]))
+    femurs = [n for n in FEMUR if n in bones]
+    if not femurs:
+        sys.exit("fit_body.py: neither femur is in the CT or its landmarks file")
+    midline = float(np.mean([coords(bones[n])[:, 0].mean() for n in femurs]))
     targets = {}
-    for name, side in FEMUR.items():
-        targets[f"upperleg01.{side}"] = femoral_head(coords(names[name]), midline)
-    for name, side in HUMERUS.items():
-        targets[f"upperarm01.{side}"] = humeral_head(coords(names[name]), midline)
+    for table, bone, centre in ((FEMUR, "upperleg01", femoral_head),
+                                (HUMERUS, "upperarm01", humeral_head)):  # fmt: skip
+        for name, side in table.items():
+            if name in bones:
+                targets[f"{bone}.{side}"] = centre(coords(bones[name]), midline)
+        for name, side in table.items():
+            other = f"{bone}.{'R' if side == 'L' else 'L'}"
+            if f"{bone}.{side}" in targets:
+                continue
+            if other not in targets:
+                sys.exit(f"fit_body.py: no {name} on either side for the {bone} joints")
+            # Mirror the other side's joint across the midline (CT x is left-right).
+            mirrored = targets[other].copy()
+            mirrored[0] = 2 * midline - mirrored[0]
+            targets[f"{bone}.{side}"] = mirrored
+            notes.append(f"{bone}.{side}: {name} not usable, joint mirrored from {other}")
     curve = curve_points(names)
 
     # 1. Scale, place and turn ANNY.
@@ -436,8 +465,8 @@ def main() -> None:
             head = pose_head(armature, bone)
             length = (pose_tail(armature, bone) - head).length
             aim(armature, bone, head + Vector(wanted[bone]) * length)
-    notes = [f"spine bones the scan does not cover were not posed: "
-             f"{', '.join(b for b in SPINE_BONES if b not in wanted) or 'none'}"]  # fmt: skip
+    notes.append(f"spine bones the scan does not cover were not posed: "
+                 f"{', '.join(b for b in SPINE_BONES if b not in wanted) or 'none'}")  # fmt: skip
 
     # 3. Shoulders by cyclic coordinate descent over clavicle and shoulder01.
     for side in "LR":
@@ -473,7 +502,10 @@ def main() -> None:
     # 4. Upper arms along the humerus, where enough of it is in the scan.
     posed_arms = []
     for name, side in HUMERUS.items():
-        h = coords(names[name])
+        if name not in bones:
+            notes.append(f"upperarm01.{side} not posed: no {name} in the scan")
+            continue
+        h = coords(bones[name])
         _, _, vt = np.linalg.svd(h - h.mean(0), full_matrices=False)
         axis = vt[0] if vt[0][2] < 0 else -vt[0]  # pointing down, shoulder to elbow
         length = float(np.ptp((h - h.mean(0)) @ vt[0]))
@@ -503,6 +535,8 @@ def main() -> None:
     bpy.context.view_layer.update()
 
     bpy.data.objects.remove(outline)  # measured only; never exported or rendered
+    for o in marks:
+        bpy.data.objects.remove(o)  # landmarks only; never exported or rendered
     tree = skin_tree(skin)
     followed = {}
     for o in ct:
