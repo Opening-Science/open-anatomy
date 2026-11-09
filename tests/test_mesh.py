@@ -15,7 +15,7 @@ import numpy.typing as npt
 import pytest
 
 import mesh
-from structures import ORGANS, REFERENCE, node_name
+from structures import ORGANS, REFERENCE, SETS, node_name
 
 Mask = npt.NDArray[np.bool_]
 FloatArray = npt.NDArray[np.float64]
@@ -364,6 +364,40 @@ def test_the_organ_set_ignores_cuts(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     )
     assert manifest["dropped"] == []
     assert [n["name"] for n in manifest["nodes"]] == [node_name(s.term) for s in ORGANS]
+
+
+def test_the_body_set_builds_the_skeleton_and_every_system(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest = run_main(tmp_path, monkeypatch, {}, "body")
+    assert manifest["set"] == "body"
+    assert manifest["dropped"] == []
+    assert [n["name"] for n in manifest["nodes"]] == [node_name(s.term) for s in SETS["body"]]
+    assert {n["system"] for n in manifest["nodes"]} >= {"skeletal", "digestive", "cardiovascular"}
+
+
+@pytest.mark.parametrize("which", ["digestive", "body"])
+def test_an_atlas_set_lists_a_cut_organ_instead_of_stopping(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, which: str
+) -> None:
+    cut = {"liver": "cut by the scan's edge (axis 2)", "gallbladder": "absent or a stray label"}
+    manifest = run_main(tmp_path, monkeypatch, cut, which)
+    assert dropped(manifest) == cut
+    kept = {n["label"] for n in manifest["nodes"]}
+    assert "stomach" in kept and not kept & {"liver", "gallbladder"}
+
+
+def test_the_reference_set_needs_every_organ_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with pytest.raises(SystemExit, match="liver: cut by the scan's edge .* organs must be whole"):
+        run_main(tmp_path, monkeypatch, {"liver": "cut by the scan's edge (axis 2)"})
+
+
+def test_an_empty_set_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(mesh.SETS, "nothing", ())
+    with pytest.raises(SystemExit, match='the "nothing" set has no structures yet'):
+        run_main(tmp_path, monkeypatch, {}, "nothing")
 
 
 def test_a_split_organ_stops_the_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

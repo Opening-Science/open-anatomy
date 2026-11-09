@@ -20,7 +20,11 @@ thin bone, in line and within BRIDGE_GAP_MM: that gap is bridged and noted.
 --set organs (the default) needs every organ; --set reference adds the trunk
 skeleton and lists, rather than meshes, a bone the scan misses or cuts (the
 femurs and humeri may be cut). An organ that is absent or cut by the scan
-stops the run. With body_trunc.nii.gz in the masks it also
+stops a reference build. The atlas sets (--set skeleton, one set per body
+system, and --set body for the skeleton with every system; see
+structures.py) follow the same cut and symmetry rules and list a cut or
+absent organ with its reason instead of stopping, as a thorax scan cuts the
+belly. With body_trunc.nii.gz in the masks a ruled set also
 writes <case>.outline.glb, the trunk outline in the same frame, which
 assemble.py measures and never releases.
 
@@ -61,6 +65,7 @@ from structures import RULED_SETS, SETS, Structure, node_name  # noqa: E402
 MIN_ML = 0.3  # a mask smaller than this is a stray label, not a bone (volume, not voxels)
 PADDING_HU = -1020  # at or below: a scanner's fill beyond what it scanned, never tissue
 SETS_OF_PIECES = {"costal_cartilages"}  # one node, several separate pieces
+ORGANS_WHOLE = {"reference"}  # the reference bodies need every organ; the atlas sets list a cut one
 MIN_PIECE_VOXELS = 150  # a piece smaller than this (0.5 ml) in a set is a loose blob
 LEVEL_STEPS = 12
 SLICE_SMOOTHED = ("sternum", "rib_", "vertebrae_", "costal_cartilages", "sacrum")
@@ -1064,6 +1069,8 @@ def main() -> None:
     seg_dir = args.seg_dir or work / "seg"
     parts, missing, dropped, landmarks = [], [], [], []
     labels = [s.label for s in SETS[args.set]]
+    if not labels:
+        sys.exit(f'the "{args.set}" set has no structures yet')
     ct_path = args.ct or ROOT / "data" / "cases" / args.case / "ct.nii.gz"
     if not ct_path.exists() and not args.synthetic:
         sys.exit(f"{ct_path} is missing: the CT is needed to see where the scan ends")
@@ -1103,7 +1110,7 @@ def main() -> None:
             })  # fmt: skip
             continue
         reason = reasons[s.label] if args.set in RULED_SETS else None
-        if reason and not bone:
+        if reason and not bone and args.set in ORGANS_WHOLE:
             sys.exit(f"{s.label}: {reason} in {args.case}; organs must be whole")
         if reason:
             # Never exported, never capped. The femurs and humeri are still
