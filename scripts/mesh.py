@@ -57,9 +57,11 @@ MIN_PIECE_VOXELS = 150  # a piece smaller than this (0.5 ml) in a set is a loose
 LEVEL_STEPS = 12
 SLICE_SMOOTHED = ("sternum", "rib_", "vertebrae_", "costal_cartilages", "sacrum")
 SLICE_BLURS = ((0.5, 1.5), (0.5, 1.0), (0.25, 0.5))  # (in-plane, along slices), source voxels
-STERNUM_BLURS = ((0.5, 3.0), (0.5, 2.0), (0.5, 1.5))  # its ripples span several slices
+STERNUM_BLURS = ((1.0, 3.0), (0.75, 2.0), (0.5, 1.5))  # its ripples span several slices
 CARTILAGE_BLURS = ((1.0, 1.5), (0.75, 1.0), (0.5, 0.75))  # thin, lumpy segmentation
 CARTILAGE_MAX_MM = 120  # the 6th and 7th costal cartilages run 10-12 cm
+JOIN_OVERLAP_MM = 6.0  # a modelled cartilage starts this far inside its rib's end
+TANGENT_SHARE = 0.7  # of the rib-to-sternum span, for the cartilage curve's end tangents
 BRIDGE_MM = 5.0  # cartilage-to-rib gaps narrower than this are closed
 RIB_BIN_MM = 3.0
 RIB_SMOOTH_MM = 9.0
@@ -106,19 +108,43 @@ def decimate(poly: vtk.vtkPolyData, max_triangles: int) -> vtk.vtkPolyData:
     return poly
 
 
-def rib_end(path: Path) -> tuple[np.ndarray, np.ndarray, float] | None:
-    """A rib's front end in RAS mm, the unit direction it runs in there, and its
-    radius, from its centreline (the mask walked from its far end in 3 mm bins)."""
+def rib_end(path: Path) -> dict | None:
+    """rib_end_of the rib's mask, or of the mask after a small opening when that
+    takes a knob off its tip: the opened rib keeps at least 85% of its voxels,
+    its tip moves under 20 mm, and its tip is wider than the raw one's."""
+    image = nib.load(path)
+    mask = np.asanyarray(image.dataobj) > 0
+    raw = rib_end_of(mask, image.affine)
+    opened = ndimage.binary_opening(mask, structure=ndimage.generate_binary_structure(3, 1))
+    labels, count = ndimage.label(opened, structure=np.ones((3, 3, 3)))
+    if raw is None or count == 0:
+        return raw
+    largest = labels == int(np.argmax(np.bincount(labels.ravel())[1:])) + 1
+    cleaned = rib_end_of(largest, image.affine)
+    if (
+        cleaned is not None
+        and largest.sum() >= 0.85 * mask.sum()
+        and np.linalg.norm(cleaned["tip"] - raw["tip"]) < 20
+        and cleaned["halfWidth"] > raw["halfWidth"]
+    ):
+        return cleaned
+    return raw
+
+
+def rib_end_of(mask: np.ndarray, affine: np.ndarray) -> dict | None:
+    """A rib's front end in RAS mm: its tip, the unit direction it runs in
+    there, and its cross-section just behind the tip (3 to 10 mm back): the
+    direction across its width and its half-width and half-thickness. From
+    the rib's centreline (the mask walked from its far end in 3 mm bins)."""
     from scipy.sparse import coo_matrix
     from scipy.sparse.csgraph import dijkstra
     from scipy.spatial import cKDTree
 
-    image = nib.load(path)
-    voxels = np.argwhere(np.asanyarray(image.dataobj) > 0)
+    voxels = np.argwhere(mask)
     if len(voxels) < MIN_VOXELS:
         return None
-    ras = voxels @ image.affine[:3, :3].T + image.affine[:3, 3]
-    spacing = np.linalg.norm(image.affine[:3, :3], axis=0)
+    ras = voxels @ affine[:3, :3].T + affine[:3, 3]
+    spacing = np.linalg.norm(affine[:3, :3], axis=0)
     pairs = cKDTree(ras).query_pairs(r=float(np.sqrt(3) * spacing.max()) + 1e-3,
                                       output_type="ndarray")  # fmt: skip
     graph = coo_matrix(
@@ -139,94 +165,129 @@ def rib_end(path: Path) -> tuple[np.ndarray, np.ndarray, float] | None:
     line = ndimage.gaussian_filter1d(line, 1.5, axis=0, mode="nearest")
     if line[0, 1] > line[-1, 1]:  # RAS +A is the front: the front end is the last point
         line = line[::-1]
+    tip = line[-1]
     direction = line[-1] - line[-4]
-    near_end = np.linalg.norm(ras - line[-1], axis=1) < 6
-    radius = float(np.sqrt(near_end.sum() * np.prod(spacing) / (np.pi * 12)))  # over 12 mm
-    # The tip region is half a slab, so the estimate runs low; ribs are also flat
-    # (about 12 x 5 mm), and a round cartilage of similar section is a bit wider.
-    return line[-1], direction / np.linalg.norm(direction), max(2.0 * radius, 5.0)
+    direction /= np.linalg.norm(direction)
+    back = (ras - tip) @ direction
+    slab = ras[(back > -10) & (back < -3)]
+    if len(slab) < 10:
+        return None
+    flat = slab - np.outer((slab - tip) @ direction, direction)
+    flat -= flat.mean(0)
+    _, _, vt = np.linalg.svd(flat, full_matrices=False)
+    across = vt[0] - direction * (vt[0] @ direction)
+    across /= np.linalg.norm(across)
+    deep = np.cross(direction, across)
+    half_voxel = spacing.mean() / 2
+    width = float(np.ptp(np.percentile(flat @ across, [5, 95]))) / 2 + half_voxel
+    depth = float(np.ptp(np.percentile(flat @ deep, [5, 95]))) / 2 + half_voxel
+    return {"tip": tip, "direction": direction, "across": across,
+            "halfWidth": max(width, 3.0), "halfDepth": max(depth, 2.0)}  # fmt: skip
+
+
+def sweep(curve: np.ndarray, start_across: np.ndarray, half_w: np.ndarray, half_d: np.ndarray,
+          sides: int = 24) -> tuple[np.ndarray, np.ndarray]:  # fmt: skip
+    """A closed tube of elliptical section along a curve: a rotation-minimising
+    frame (double reflection) carries the section's width direction from the
+    start, and both ends are capped."""
+    tangents = np.gradient(curve, axis=0)
+    tangents /= np.linalg.norm(tangents, axis=1, keepdims=True)
+    across = [start_across - tangents[0] * (start_across @ tangents[0])]
+    across[0] /= np.linalg.norm(across[0])
+    for i in range(len(curve) - 1):
+        v1 = curve[i + 1] - curve[i]
+        c1 = v1 @ v1
+        r = across[i] - (2 / c1) * (v1 @ across[i]) * v1
+        t = tangents[i] - (2 / c1) * (v1 @ tangents[i]) * v1
+        v2 = tangents[i + 1] - t
+        c2 = v2 @ v2
+        r = r - (2 / c2) * (v2 @ r) * v2 if c2 > 1e-12 else r
+        across.append(r / np.linalg.norm(r))
+    across = np.array(across)
+    deep = np.cross(tangents, across)
+    angle = np.linspace(0, 2 * np.pi, sides, endpoint=False)
+    rings = (curve[:, None, :]
+             + (half_w[:, None] * np.cos(angle))[..., None] * across[:, None, :]
+             + (half_d[:, None] * np.sin(angle))[..., None] * deep[:, None, :])  # fmt: skip
+    vertices = np.vstack([rings.reshape(-1, 3), curve[0], curve[-1]])
+    n, triangles = len(curve), []
+    for i in range(n - 1):
+        for k in range(sides):
+            a, b = i * sides + k, i * sides + (k + 1) % sides
+            c, d = a + sides, b + sides
+            triangles += [(a, c, b), (b, c, d)]
+    first, last = n * sides, n * sides + 1
+    for k in range(sides):
+        triangles.append((first, k, (k + 1) % sides))
+        a, b = (n - 1) * sides + k, (n - 1) * sides + (k + 1) % sides
+        triangles.append((last, b, a))
+    return vertices, np.array(triangles, dtype=np.uint32)
 
 
 def modelled_cartilage(seg_dir: Path, kept_ribs: list[str]) -> tuple[np.ndarray, np.ndarray]:
-    """Costal cartilages modelled, not segmented: a smooth tube from each kept
-    rib's front end (1 to 7) to the nearest point of the sternum, leaving the
-    rib between its own direction and the way to the sternum, as thick as the
-    rib and tapering to 80%, in left-right pairs only. Returns RAS mm
-    vertices and triangles; the manifest marks the node as modelled."""
+    """Costal cartilages modelled, not segmented, for ribs 2 to 7 in left-right
+    pairs. Each leaves its rib along the rib's own end direction with the rib's
+    own cross-section (no step at the join), turns medially and rises into the
+    sternum (more for lower ribs), flattens to about 1.5:1 and widens about 20%
+    where it meets the sternum. Returns RAS mm vertices and triangles; the
+    manifest marks the node as modelled."""
+    from scipy.spatial import cKDTree
+
     sternum_image = nib.load(seg_dir / "sternum.nii.gz")
     sternum = np.argwhere(np.asanyarray(sternum_image.dataobj) > 0)
     sternum = sternum @ sternum_image.affine[:3, :3].T + sternum_image.affine[:3, 3]
-    from scipy.spatial import cKDTree
-
     tree = cKDTree(sternum)
-    append = vtk.vtkAppendPolyData()
+    midline = float(np.median(sternum[:, 0]))
     ends = {}
     for rib in kept_ribs:
         if int(rib.rsplit("_", 1)[1]) > 7:
             continue  # ribs 8 to 10 reach the sternum through the arch, 11 and 12 not at all
         end = rib_end(seg_dir / f"{rib}.nii.gz")
-        if end is not None and np.linalg.norm(sternum[tree.query(end[0])[1]] - end[0]) <= (
-            CARTILAGE_MAX_MM
-        ):
+        if end is not None and tree.query(end["tip"])[0] <= CARTILAGE_MAX_MM:
             ends[rib] = end
-    # Modelled in pairs only, so the ribcage stays symmetric.
-    paired = [
-        r for r in ends if r.replace("left", "right") in ends and r.replace("right", "left") in ends
-    ]
+
+    def has_pair(r: str) -> bool:
+        return r.replace("left", "right") in ends and r.replace("right", "left") in ends
+
+    paired = [r for r in ends if has_pair(r)]
+    vertices, triangles = [], []
     for rib in sorted(paired):
-        p0, along_rib, radius = ends[rib]
-        p1 = sternum[tree.query(p0)[1]]
+        e = ends[rib]
+        number = int(rib.rsplit("_", 1)[1])
+        p0 = e["tip"] - e["direction"] * JOIN_OVERLAP_MM  # start well inside the rib's end
+        # Aim at the sternum's border on the rib's own side, so the lowest
+        # pairs meet it side by side instead of crossing at the xiphoid.
+        side = np.sign(p0[0] - midline)
+        own = sternum[(sternum[:, 0] - midline) * side >= 0]
+        p1 = own[cKDTree(own).query(e["tip"])[1]]
+        medial = np.array([-side, 0.0, 0.0])
+        rise = 0.15 + 0.2 * (number - 2)  # lower cartilages rise more steeply (about 10 to 50 deg)
+        t1 = medial + np.array([0.0, 0.0, rise])
+        t1 /= np.linalg.norm(t1)
+        p1 = p1 + t1 * 2.0  # end just inside the sternum
         span = np.linalg.norm(p1 - p0)
-        t1 = (p1 - p0) / span
-        # Leave the rib halfway between its own direction and the way to the sternum:
-        # cartilage sweeps inward rather than carrying on past the rib's end.
-        t0 = along_rib + t1
-        t0 /= np.linalg.norm(t0)
-        # Start a radius back inside the rib and end inside the sternum, so the
-        # tube's flat caps are hidden and the joins read as continuous.
-        p0 = p0 - along_rib * radius
-        p1 = p1 + t1 * radius * 0.8
-        span = np.linalg.norm(p1 - p0)
-        s = np.linspace(0, 1, 24)[:, None]
-        h00, h10, h01, h11 = (
-            2 * s**3 - 3 * s**2 + 1,
-            s**3 - 2 * s**2 + s,
-            -2 * s**3 + 3 * s**2,
-            s**3 - s**2,
-        )
-        curve = h00 * p0 + h10 * t0 * span + h01 * p1 + h11 * t1 * span
-        points = vtk.vtkPoints()
-        points.SetData(numpy_to_vtk(curve, deep=True))
-        line = vtk.vtkPolyLine()
-        line.GetPointIds().SetNumberOfIds(len(curve))
-        for i in range(len(curve)):
-            line.GetPointIds().SetId(i, i)
-        cells = vtk.vtkCellArray()
-        cells.InsertNextCell(line)
-        poly = vtk.vtkPolyData()
-        poly.SetPoints(points)
-        poly.SetLines(cells)
-        radii = numpy_to_vtk(radius * (1 - 0.2 * s[:, 0]), deep=True)
-        radii.SetName("radius")
-        poly.GetPointData().AddArray(radii)
-        poly.GetPointData().SetActiveScalars("radius")
-        tube = vtk.vtkTubeFilter()
-        tube.SetInputData(poly)
-        tube.SetNumberOfSides(20)
-        tube.SetVaryRadiusToVaryRadiusByAbsoluteScalar()
-        tube.CappingOn()
-        triangles = vtk.vtkTriangleFilter()
-        triangles.SetInputConnection(tube.GetOutputPort())
-        clean = vtk.vtkCleanPolyData()
-        clean.SetInputConnection(triangles.GetOutputPort())
-        clean.Update()
-        piece = vtk.vtkPolyData()
-        piece.DeepCopy(clean.GetOutput())
-        append.AddInputData(piece)
-    append.Update()
-    out = append.GetOutput()
-    return (vtk_to_numpy(out.GetPoints().GetData()).astype(np.float64),
-            triangles_of(out).astype(np.uint32))  # fmt: skip
+        s = np.linspace(0, 1, 32)[:, None]
+        h00, h10 = 2 * s**3 - 3 * s**2 + 1, s**3 - 2 * s**2 + s
+        h01, h11 = -2 * s**3 + 3 * s**2, s**3 - s**2
+        reach = TANGENT_SHARE * span  # longer tangents overshoot into a hook on short spans
+        curve = h00 * p0 + h10 * e["direction"] * reach + h01 * p1 + h11 * t1 * reach
+        f = s[:, 0]
+        blend = np.clip(f / 0.35, 0, 1)  # from the rib's own section to cartilage's within a third
+        # Start with this rib's own section (no step at the join), then take the
+        # pair's mean, so left and right cartilages match.
+        partner = ends[
+            rib.replace("left", "right") if "left" in rib else rib.replace("right", "left")
+        ]
+        w_pair = (e["halfWidth"] + partner["halfWidth"]) / 2
+        w0, d0 = e["halfWidth"], e["halfDepth"]
+        half_w = ((1 - blend) * w0 + blend * w_pair) * (1 + 0.2 * f**2)
+        half_d = (1 - blend) * d0 + blend * (w_pair / 1.5)
+        v, t = sweep(curve, e["across"], half_w, half_d)
+        triangles.append(t + sum(len(x) for x in vertices))
+        vertices.append(v)
+    if not vertices:
+        return np.zeros((0, 3)), np.zeros((0, 3), dtype=np.uint32)
+    return np.vstack(vertices), np.vstack(triangles).astype(np.uint32)
 
 
 def bridged_cartilage(seg_dir: Path, kept_ribs: list[str]) -> np.ndarray:
