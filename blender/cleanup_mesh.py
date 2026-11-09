@@ -214,6 +214,8 @@ def run_one(
     # The cleaned surface's distance from the input itself: the measure that the
     # person stays the person, for a real scan with no undamaged original.
     as_input = bvh_of(obj)
+    # The input as the cleanup saw it, for per-region shape-change measures.
+    export_glb([obj], str(Path(out_dir) / f"{name}.input.glb"), meshopt=False)
     clean(obj, smooth, voxel)
     after = measure(obj)
     outputs = []
@@ -242,6 +244,8 @@ def run_one(
         "voxelM": voxel,
         "smoothIterations": smooth,
         "inputToOutputMm": surface_error(obj, as_input),
+        # No face region is protected yet: scan_quality.py --real refuses until it is.
+        "faceProtected": False,
     }
     if reference:
         result["surfaceErrorBefore"] = before_error

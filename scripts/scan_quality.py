@@ -9,8 +9,9 @@ each run it reports:
 - validity before and after: holes, open and non-manifold edges, edges whose
   faces disagree on their winding (from the report);
 - shape change: the cleaned surface against the input, mean and 95th
-  percentile in mm, which must stay under SHAPE_TOLERANCE_MM (the person must
-  stay the person); on a demo body, also the error against the undamaged body;
+  percentile in mm, per region (trunk, head, hands, feet), each under its
+  REGION_TOLERANCE_MM (the person must stay the person); on a demo body, also
+  the error against the undamaged body;
 - body measures: stature and hip breadth on the cleaned surface (chest breadth
   is not taken where the arms touch the chest),
   each placed among the ANSUR II percentiles for the sex.
@@ -21,7 +22,9 @@ error against the scanner's camera images needs the export format (see
 docs/scan-enhancement.md) and is reported as not measured until then.
 
 It reads only local files and writes only --out: no network, no logging of
-anything from the scan beyond these numbers.
+anything from the scan beyond these numbers, which stay on the machine too.
+With --real it refuses any run whose cleanup did not protect a face region.
+ANSUR II outside the 1st to 99th percentile is a flag, never a reject.
 """
 
 from __future__ import annotations
@@ -39,7 +42,11 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from size_body import accessor, read_glb  # noqa: E402
 
-SHAPE_TOLERANCE_MM = {"mean": 2.0, "p95": 5.0}
+# Per region: (mean, 95th percentile) shape change allowed, mm.
+REGION_TOLERANCE_MM = {"trunk": (2.0, 5.0), "head": (1.0, 3.0), "hands": (1.0, 3.0),
+                       "feet": (1.5, 4.0)}  # fmt: skip
+HEAD_ABOVE, FEET_BELOW = 0.87, 0.05  # fractions of stature
+NEAREST = 8  # triangles checked exactly per vertex
 REPEAT_TOLERANCE_MM = 10.0
 HIP_AT = 0.52  # fraction of stature where hip breadth is taken (ANSUR-like)
 GAP_MM = 15  # a side-to-side gap this wide separates an arm from the trunk
@@ -98,17 +105,90 @@ def ansur(sex: str) -> dict[str, list[float]]:
     }
 
 
+def regions(points: np.ndarray) -> dict[str, np.ndarray]:
+    """Masks for head, feet, hands and trunk on a standing body (+Y up), by height
+    and by distance from the midline (hands hang beside the hips)."""
+    y = points[:, 1]
+    floor, stature = y.min(), np.ptp(y)
+    h = (y - floor) / stature
+    head, feet = h > HEAD_ABOVE, h < FEET_BELOW
+    side = np.abs(points[:, 0] - np.median(points[:, 0]))
+    hip_half = np.percentile(side[(h > 0.48) & (h < 0.56)], 60)
+    hands = (h > 0.3) & (h < 0.5) & (side > hip_half + 30)
+    trunk = ~(head | feet | hands)
+    return {"trunk": trunk, "head": head, "hands": hands, "feet": feet}
+
+
+def closest_on_triangles(p: np.ndarray, a: np.ndarray, b: np.ndarray, c: np.ndarray) -> np.ndarray:
+    """Closest points on triangles (a, b, c) to points p, all (n, 3) (Ericson, RTCD 5.1.5)."""
+    ab, ac, ap = b - a, c - a, p - a
+    d1, d2 = (ab * ap).sum(1), (ac * ap).sum(1)
+    bp = p - b
+    d3, d4 = (ab * bp).sum(1), (ac * bp).sum(1)
+    cp = p - c
+    d5, d6 = (ab * cp).sum(1), (ac * cp).sum(1)
+    va, vb, vc = d3 * d6 - d5 * d4, d5 * d2 - d1 * d6, d1 * d4 - d3 * d2
+    denom = np.where(va + vb + vc == 0, 1e-30, va + vb + vc)
+    v, w = vb / denom, vc / denom
+    out = a + ab * v[:, None] + ac * w[:, None]  # inside the face
+    with np.errstate(divide="ignore", invalid="ignore"):
+        edge_ab = (vc <= 0) & (d1 >= 0) & (d3 <= 0)
+        out[edge_ab] = (a + ab * (d1 / (d1 - d3))[:, None])[edge_ab]
+        edge_ac = (vb <= 0) & (d2 >= 0) & (d6 <= 0)
+        out[edge_ac] = (a + ac * (d2 / (d2 - d6))[:, None])[edge_ac]
+        t = (d4 - d3) / ((d4 - d3) + (d5 - d6))
+        edge_bc = (va <= 0) & (d4 - d3 >= 0) & (d5 - d6 >= 0)
+        out[edge_bc] = (b + (c - b) * t[:, None])[edge_bc]
+    out[(d1 <= 0) & (d2 <= 0)] = a[(d1 <= 0) & (d2 <= 0)]
+    out[(d3 >= 0) & (d4 <= d3)] = b[(d3 >= 0) & (d4 <= d3)]
+    out[(d6 >= 0) & (d5 <= d6)] = c[(d6 >= 0) & (d5 <= d6)]
+    return out
+
+
+def shape_change(output: tuple, source: tuple) -> dict[str, dict[str, float]]:
+    """Exact distance from each output vertex to the input surface, per region (mm):
+    the nearest NEAREST triangles by centroid are checked point to triangle."""
+    from scipy.spatial import cKDTree
+
+    points, triangles = source
+    corners = points[triangles]
+    _, near = cKDTree(corners.mean(1)).query(output[0], k=NEAREST)
+    best = np.full(len(output[0]), np.inf)
+    for k in range(NEAREST):
+        tri = corners[near[:, k]]
+        q = closest_on_triangles(output[0], tri[:, 0], tri[:, 1], tri[:, 2])
+        best = np.minimum(best, np.linalg.norm(output[0] - q, axis=1))
+    out = {}
+    for name, mask in regions(output[0]).items():
+        d = best[mask]
+        mean_lim, p95_lim = REGION_TOLERANCE_MM[name]
+        out[name] = {
+            "meanMm": round(float(d.mean()), 3), "p95Mm": round(float(np.percentile(d, 95)), 3),
+            "within": bool(d.mean() <= mean_lim and np.percentile(d, 95) <= p95_lim),
+        }  # fmt: skip
+    return out
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--sex", choices=ANSUR, required=True)
     parser.add_argument("--runs", type=Path, nargs="+", required=True)
     parser.add_argument("--out", type=Path)
+    parser.add_argument(
+        "--real", action="store_true",
+        help="a real person's scan: refused unless the cleanup protected the face",
+    )  # fmt: skip
     args = parser.parse_args()
     ranges = ansur(args.sex)
     runs, per_measure = [], {}
     for run in args.runs:
         report = json.loads((run / "report.json").read_text())
-        body = measures(*surface(run / "demo.lod0.glb"))
+        if args.real and not report.get("faceProtected"):
+            sys.exit(f"{run.name}: refused: the cleanup did not protect a face region, which a "
+                     "real scan requires (docs/scan-enhancement.md)")  # fmt: skip
+        output = surface(run / "demo.lod0.glb")
+        source = surface(run / "demo.input.glb") if (run / "demo.input.glb").exists() else None
+        body = measures(*output)
         keys = ("holes", "openEdges", "nonManifoldEdges", "inconsistentEdges")
         entry = {
             "run": run.name,
@@ -117,6 +197,7 @@ def main() -> None:
                 "after": {k: report["after"][k] for k in keys},
             },
             "shapeChangeMm": report.get("inputToOutputMm"),
+            "shapeChangeByRegionMm": shape_change(output, source) if source else None,
             "errorAgainstUndamagedMm": {
                 "before": report.get("surfaceErrorBefore"),
                 "after": report.get("surfaceErrorAfter"),
@@ -130,7 +211,7 @@ def main() -> None:
                 }
                 for k, v in body.items()
             },  # fmt: skip
-            "reprojection": "not measured: needs the scanner's camera images and calibration",
+            "reprojection": "not available from this scanner's export (no photos)",
         }
         for k, v in body.items():
             per_measure.setdefault(k, []).append(v)
@@ -140,7 +221,7 @@ def main() -> None:
         "runs": runs,
         "repeatabilitySpreadMm": repeat,
         "repeatable": bool(all(v <= REPEAT_TOLERANCE_MM for v in repeat.values())),
-        "tolerances": {"shapeChangeMm": SHAPE_TOLERANCE_MM, "repeatSpreadMm": REPEAT_TOLERANCE_MM},
+        "tolerances": {"shapeChangeMm": REGION_TOLERANCE_MM, "repeatSpreadMm": REPEAT_TOLERANCE_MM},
     }
     text = json.dumps(summary, indent=2)
     if args.out:
@@ -157,6 +238,9 @@ def main() -> None:
             for k, m in r["bodyMeasuresMm"].items()
         )
         print(f"{r['run']}: {holes}, {flips}, {error}; {body}")
+        for region, m in (r["shapeChangeByRegionMm"] or {}).items():
+            ok = "ok " if m["within"] else "OVER"
+            print(f"    {ok} {region}: mean {m['meanMm']} / p95 {m['p95Mm']} mm")
     ok = summary["repeatable"]
     print(f"repeatability spread (mm): {repeat}; within {REPEAT_TOLERANCE_MM} mm: {ok}")
 

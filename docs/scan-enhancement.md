@@ -6,6 +6,11 @@ purpose; nothing here has touched a real scan.
 
 ## Where it runs, and what never leaves the machine
 
+Peter decided this on 9 Nov 2026: real scans are processed only on his own
+Mac, and the repository holds code only. "Never a real person's scan" means
+never in the repository, the tests, a render or any shared place: a real scan,
+anything derived from it, and its measures stay on that machine.
+
 - **GitHub holds the code** (the Python and Blender scripts) and nothing else.
   A real scan never goes into the repository, CI, a release, an issue, a log
   or any server.
@@ -13,8 +18,12 @@ purpose; nothing here has touched a real scan.
 - **Credentials** for a scanner account come from the macOS Keychain (or an
   environment variable) at run time. They are never written to a file in the
   repository and never logged.
-- **Outputs stay local**, in a folder the person chooses. The pipeline prints
-  only the measures below, never the scan's contents.
+- **Outputs stay local**, in a folder the person chooses. The measures below
+  stay local too: they are never pasted into an issue, a pull request, a chat
+  or any other shared place, because body measures identify a person.
+- **No face render ever leaves the machine**, and a protected face region (no
+  smoothing, no filling) is required before any real scan is processed;
+  `scripts/scan_quality.py --real` refuses to run without it.
 
 ## Disk budget
 
@@ -30,26 +39,37 @@ finishes or fails.
 
 The synthetic demo (13.7k vertices, no photos) uses 0.6 MB per run.
 
-## Input: an adapter, not a guess
+## Input
 
-A scan reaches the pipeline through an adapter that returns one thing: a
-surface (vertices and triangles, in metres, +Y up), plus, if the export has
-them, the camera photos and their calibration.
+A scan arrives as two local files, given at run time:
 
-- **Local file adapter:** a mesh file the person already has.
-- **Scanner API adapter:** downloads one scan with the person's credentials
-  from the Keychain, into the temporary folder.
+- **The body scan:** a glTF binary (`.glb`, 25–60 MB), synced to the Mac by
+  open-twin's `@open-twin/provider-vitronic`. It is skinned: one skin with
+  34–36 joints and 2–4 meshes, with `POSITION`, `NORMAL`, `JOINTS_0`,
+  `WEIGHTS_0`, usually `TEXCOORD_0` and a texture, and three per-vertex
+  attributes of the scanner's own: `_DepthMap`, `_GaussianCurvature` and
+  `_MeanCurvature`. The scan settings record the mesh detail (High, Normal or
+  Preview), the pose (A-Pose or FreeScan) and the clothing (Tight or Loose).
+- **The scanner's measurements:** a JSON file in the shape the scanner's API
+  returns, with its markers (each a position and a normal) and its measured
+  heights, distances, cross-sections, angles and axes.
 
-The scanner's export format is not known yet: which mesh format, which JSON
-keys, whether the roughly 27 camera photos and their calibration are included.
-The adapters are written once that is known, and no field name is guessed
-before then.
+The pipeline writes no scanner client: open-twin's provider already handles
+the API, its TLS pinning and the credentials, which stay in TwinLLM's
+existing connection. The export has no camera photos and no calibration
+(neither an endpoint nor files), so reprojection cannot be measured.
+
+The pipeline never reads the folder where real scans are synced. Everything in
+this repository is tested on a synthetic ANNY body exported in the same shape
+(skinned, with joints, weights and normals).
 
 ## What the cleanup does
 
 `blender/cleanup_mesh.py`: merge duplicate vertices, fill holes, make the
 normals consistent and outward, smooth lightly (Taubin, which keeps volume),
-and export the cleaned mesh plus levels of detail.
+and export the cleaned mesh plus levels of detail. For the scanner's export it
+must also keep the rig: the same skin and joints, and weights for every vertex
+(carried over, or re-transferred from the input after any remeshing).
 
 ## How we know a scan got better, without ground truth
 
@@ -59,13 +79,25 @@ below works from the scan itself.
 | Measure | What it shows | Passes when |
 | --- | --- | --- |
 | **Mesh validity** | holes, open and non-manifold edges, edges whose faces disagree on their winding | none after, and fewer than before |
-| **Shape change** | distance from the cleaned surface to the input surface | mean under 2 mm, 95th percentile under 5 mm: the person stays the person |
+| **Shape change** | distance from the cleaned surface to the input surface, per region | mean / 95th percentile under: trunk 2 / 5 mm, head 1 / 3 mm, hands 1 / 3 mm, feet 1.5 / 4 mm: the person stays the person |
 | **Repeatability** | stature and hip breadth measured on repeat scans of the same body | spread under 10 mm |
-| **Plausibility** | the same measures against ANSUR II for the sex | between the 1st and 99th percentiles |
-| **Reprojection** | the cleaned surface against the scanner's own camera photos | not measured yet: needs the photos and calibration from the export |
+| **Plausibility** | the same measures against ANSUR II for the sex | between the 1st and 99th percentiles. Outside is a flag to look at, never a reason to reject or reshape the scan: real people fall outside a military survey |
+| **Scanner landmarks** | the scanner's own markers and measurements (heights, distances, cross-sections) re-measured on the cleaned mesh | each marker moves under 2 mm along its normal, each measurement drifts under 1% |
+| **Rig preserved** | the skin's joints, every vertex's weights, the UVs and texture | same joints, every vertex weighted, weights summing to 1 |
 
-`scripts/scan_quality.py` computes all but the last from cleanup_mesh.py's
-report and output.
+`scripts/scan_quality.py` computes these from cleanup_mesh.py's report and
+output. The scanner-landmark measure needs a measurements file; on the
+synthetic demo it is skipped, since ANNY has no scanner markers.
+
+Reprojection against camera photos is not available from this scanner's
+export.
+
+## Using the scanner's depth map
+
+`_DepthMap` may say, per vertex, how well the cameras saw that part of the
+body. If it does, smoothing should be lighter where the data is good and
+stronger where it is poor. That is to be tested on the synthetic demo (where
+the "depth" can be simulated) before it is relied on.
 
 ## Demo results (synthetic ANNY female, three damaged repeats)
 
@@ -78,8 +110,17 @@ flipped, 2 mm of noise), then cleans it.
 | seed 8 | 8 → 0 | 68 → 0 | 1.52 → 0.77 mm | 0.68 / 2.01 mm | 1774 mm | 301 mm |
 | seed 9 | 8 → 1 | 62 → 0 | 1.54 → 0.78 mm | 0.68 / 2.03 mm | 1771 mm | 302 mm |
 
+Shape change by region (mean / 95th percentile, all three repeats): trunk
+0.82–0.83 / 2.3 mm, head 0.52–0.53 / 1.6 mm, hands 0.65–0.73 / 1.6–1.9 mm,
+feet 0.59–0.62 / 1.7–1.8 mm, all inside their limits. The head passes on
+distance while the close-up shows the inner eye and mouth surfaces crumpled:
+a mean distance does not see damage to fine detail, which is why face
+protection is required rather than measured.
+
 Repeatability spread: stature 4.2 mm, hip breadth 1.0 mm. Both measures are
-inside ANSUR II's range for women.
+inside ANSUR II's range for women. These repeats damage one synthetic body
+three ways; they test that the cleanup and the measures are stable, not how
+repeatable a real scanner is, which needs repeat scans of one person.
 
 ## What is not good enough yet
 
@@ -90,4 +131,6 @@ inside ANSUR II's range for women.
   smoothing in a face region) before any real scan is processed.
 - **Chest breadth is not measured.** Where the arms rest against the chest
   there is no gap to tell them from the trunk.
-- **Reprojection waits for the export format.**
+- **The rig is not kept yet.** cleanup_mesh.py works on one static mesh; the
+  scan's skin weights must be carried over (or re-transferred after remeshing)
+  before it can run on the real export.
