@@ -7,9 +7,11 @@ Inputs (after `--`):
   --out-dir <dir>      tiles/<node>.<view>.png and qa.json
   [--size 320]         tile size in pixels
   [--only <node,...>]  check only these nodes
+  --self-check         runs on synthetic faulty meshes and checks each fault is flagged
 
 For each structure it measures:
 - holes: edges used by one face (the surface must be closed);
+- non-manifold edges: edges used by three or more faces, or by none;
 - fragments: separate connected pieces, and the smallest one's vertex count;
 - self-intersections: pairs of faces that cross and share no vertex;
 - spikes: vertices whose distance from their neighbours' mean, relative to
@@ -17,13 +19,16 @@ For each structure it measures:
   absolute deviations above the mesh's median) and above SPIKE_FLOOR;
 - roughness: the angle between neighbouring faces (mean and 95th
   percentile), which voxel terraces push up and an outlier test misses;
-- volume drift: the mesh's volume against the mask's voxel volume.
+- volume drift: the mesh's volume against the mask's voxel volume, as
+  mesh.py measured it before rounding (the manifest's volume_drift).
 
 It renders six tiles with Workbench (studio light, cavity on, so small
 surface faults stand out): four turntable views at 0, 90, 180 and 270
 degrees, a close-up on the worst spike (or the sharpest vertex, if none)
 and one on the vertex farthest from the centre, where a rib or process
-ends. scripts/qa_sheet.py lays the tiles out as contact sheets.
+ends. A close-up clips away everything in front of its target, so the rest
+of a ring-shaped or concave structure cannot hide it. scripts/qa_sheet.py
+lays the tiles out as contact sheets.
 """
 
 from __future__ import annotations
@@ -38,7 +43,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import bmesh  # noqa: E402
 import bpy  # noqa: E402
 import numpy as np  # noqa: E402
-from mathutils import Vector  # noqa: E402
+from mathutils import Matrix, Vector  # noqa: E402
 from mathutils.bvhtree import BVHTree  # noqa: E402
 from twinblend.blender_env import (  # noqa: E402
     empty_scene,
@@ -62,8 +67,14 @@ def measure(obj: bpy.types.Object) -> dict:
     bm.from_mesh(obj.data)
     bm.transform(obj.matrix_world)
     bm.verts.ensure_lookup_table()
+    if not bm.faces:
+        # Nothing to measure or render; flags() reports it as empty.
+        vertices = len(bm.verts)
+        bm.free()
+        return {"vertices": vertices, "empty": True}
     holes = sum(1 for e in bm.edges if e.is_boundary)
-    non_manifold = sum(1 for e in bm.edges if not e.is_manifold)
+    # A boundary edge is not manifold either; count it only as a hole.
+    non_manifold = sum(1 for e in bm.edges if not e.is_manifold and not e.is_boundary)
 
     # Connected pieces.
     seen, pieces = set(), []
@@ -114,6 +125,8 @@ def measure(obj: bpy.types.Object) -> dict:
     # Roughness: the angle between neighbouring faces. Voxel terraces fold the
     # surface at every step, which a spike test (an outlier test) cannot see.
     bends = np.degrees([e.calc_face_angle(0.0) for e in bm.edges if e.is_manifold])
+    if not bends.size:
+        bends = np.zeros(1)
     volume = bm.calc_volume(signed=True)
     bm.free()
     return {
@@ -137,9 +150,13 @@ def measure(obj: bpy.types.Object) -> dict:
 
 
 def flags(m: dict) -> list[str]:
+    if m.get("empty"):
+        return ["empty"]
     out = []
-    if m["holes"] or m["nonManifoldEdges"]:
-        out.append(f"holes {m['holes']}")
+    if m["holes"]:
+        out.append(f"holes ({m['holes']} open edges)")
+    if m["nonManifoldEdges"]:
+        out.append(f"non-manifold {m['nonManifoldEdges']}")
     small = m["smallestFragment"] < MIN_FRAGMENT_VERTICES
     if m["fragments"] > 1 and (small or m.get("pieces") != "several"):
         out.append(f"{m['fragments']} pieces" + (" (tiny)" if small else ""))
@@ -181,11 +198,27 @@ def setup(size: int) -> bpy.types.Object:
     return camera
 
 
-def shoot(camera, target: Vector, span: float, azimuth: float, elevation: float, path: Path):
+CAMERA_DISTANCE = 2.0
+
+
+def shoot(
+    camera,
+    target: Vector,
+    span: float,
+    azimuth: float,
+    elevation: float,
+    path: Path,
+    clip_in_front: float | None = None,
+):
+    """Render from CAMERA_DISTANCE away; with clip_in_front, only what lies at most
+    that far in front of the target is drawn, so nearer parts cannot block it."""
     camera.data.ortho_scale = span
     a, e = math.radians(azimuth), math.radians(elevation)
     direction = Vector((math.sin(a) * math.cos(e), -math.cos(a) * math.cos(e), math.sin(e)))
-    camera.location = target + direction * 2.0
+    camera.location = target + direction * CAMERA_DISTANCE
+    camera.data.clip_start = (
+        0.0005 if clip_in_front is None else max(CAMERA_DISTANCE - clip_in_front, 0.0005)
+    )
     camera.rotation_euler = (-direction).to_track_quat("-Z", "Y").to_euler()
     bpy.context.scene.render.filepath = str(path)
     bpy.ops.render.render(write_still=True)
@@ -223,8 +256,17 @@ def main() -> None:
         node = nodes.get(obj.name, {})
         m = measure(obj)
         m["pieces"] = node.get("pieces", "one")
-        if node.get("voxel_volume_ml"):
-            m["volumeDrift"] = round(m["volumeMl"] / node["voxel_volume_ml"] - 1, 4)
+        # The manifest's voxel_volume_ml is rounded to 0.1 ml, which alone is several
+        # per cent on a small structure; mesh.py's volume_drift is taken unrounded.
+        if node.get("volume_drift") is not None:
+            m["volumeDrift"] = node["volume_drift"]
+        entry = {k: v for k, v in m.items() if not k.startswith("_")}
+        entry.update({"name": obj.name, "label": node.get("label", obj.name),
+                      "system": node.get("system"), "flags": flags(m)})  # fmt: skip
+        report["structures"].append(entry)
+        print(f"{obj.name:16} {entry['label'][:28]:28} {', '.join(entry['flags']) or 'ok'}")
+        if m.get("empty"):
+            continue
         for other in objects:
             other.hide_render = other is not obj
         centre, span = Vector(m["_centre"]), m["_size"] * 1.1
@@ -236,17 +278,80 @@ def main() -> None:
             look = (p - centre).normalized() if (p - centre).length > 1e-6 else Vector((0, -1, 0))
             azimuth = math.degrees(math.atan2(look.x, -look.y))
             elevation = math.degrees(math.asin(max(-1, min(1, look.z)))) * 0.6
-            shoot(camera, p, close, azimuth, elevation, tiles / f"{obj.name}.{view}.png")
-        entry = {k: v for k, v in m.items() if not k.startswith("_")}
-        entry.update({"name": obj.name, "label": node.get("label", obj.name),
-                      "system": node.get("system"), "flags": flags(m)})  # fmt: skip
-        report["structures"].append(entry)
-        print(f"{obj.name:16} {entry['label'][:28]:28} {', '.join(entry['flags']) or 'ok'}")
+            tile = tiles / f"{obj.name}.{view}.png"
+            shoot(camera, p, close, azimuth, elevation, tile, clip_in_front=close / 2)
     flagged = [s["name"] for s in report["structures"] if s["flags"]]
     report["flagged"] = flagged
     write_json(str(out_dir / "qa.json"), report)
     print(f"{len(report['structures'])} structures, {len(flagged)} flagged")
 
 
+def faulty(name: str, fault: str) -> bpy.types.Object:
+    """A smooth sphere of 5 cm radius with one fault made on purpose."""
+    bm = bmesh.new()
+    bmesh.ops.create_icosphere(bm, subdivisions=4, radius=0.05)
+    bm.verts.ensure_lookup_table()
+    bm.edges.ensure_lookup_table()
+    bm.faces.ensure_lookup_table()
+    if fault == "hole":
+        bmesh.ops.delete(bm, geom=[bm.faces[0]], context="FACES_ONLY")
+    elif fault == "spike":
+        v = bm.verts[0]
+        v.co += v.co.normalized() * 0.02
+    elif fault == "fragment":
+        bmesh.ops.create_icosphere(
+            bm, subdivisions=1, radius=0.005, matrix=Matrix.Translation((0.1, 0, 0))
+        )
+    elif fault == "non-manifold":
+        # A closed tetrahedron on one edge: four faces share it, no edge is open.
+        a, b = bm.edges[0].verts
+        mid, side = (a.co + b.co) / 2, (a.co - b.co).cross(a.co).normalized() * 0.003
+        c, d = bm.verts.new(mid * 1.15 + side), bm.verts.new(mid * 1.15 - side)
+        for face in ((a, b, c), (b, a, d), (a, d, c), (b, c, d)):
+            bm.faces.new(face)
+    elif fault == "empty":
+        bm.clear()
+    mesh = bpy.data.meshes.new(name)
+    bm.to_mesh(mesh)
+    bm.free()
+    obj = bpy.data.objects.new(name, mesh)
+    bpy.context.scene.collection.objects.link(obj)
+    return obj
+
+
+def self_check() -> int:
+    empty_scene()
+    expected = {
+        "clean": None,
+        "hole": "holes",
+        "spike": "spikes",
+        "fragment": "pieces",
+        "non-manifold": "non-manifold",
+        "empty": "empty",
+    }
+    failures = []
+    for fault, flag in expected.items():
+        m = measure(faulty(fault, fault))
+        m["pieces"] = "one"
+        found = flags(m)
+        print(f"{fault:14} {', '.join(found) or 'ok'}")
+        if flag is None and found:
+            failures.append(f"the clean sphere is flagged: {found}")
+        elif flag is not None and not any(flag in f for f in found):
+            failures.append(f"{fault} is not flagged as {flag}: {found}")
+        # A hole is not reported as non-manifold, nor a closed non-manifold mesh as a hole.
+        if fault == "hole" and any("non-manifold" in f for f in found):
+            failures.append(f"the hole is also reported as non-manifold: {found}")
+        if fault == "non-manifold" and any("holes" in f for f in found):
+            failures.append(f"the closed non-manifold mesh is reported as a hole: {found}")
+    for line in failures:
+        print(f"SELF-CHECK FAIL {line}")
+    print("qa self-check: " + ("ok" if not failures else f"{len(failures)} failed"))
+    return 1 if failures else 0
+
+
 if __name__ == "__main__":
+    if "--self-check" in script_args():
+        require_blender()
+        sys.exit(self_check())
     main()
