@@ -52,7 +52,9 @@ the image layout.
 
 Every slice is cropped to the trunk outline (TotalSegmentator's
 `body_trunc`), from 5 cm below the top of the femoral heads to the top of the
-scan. The scans start at the neck, so no face is ever in a slice. The source
+scan. Both scans used here start at the neck (s0903 at C6, s0859 at T2), so
+no face is in any slice; the code does not yet stop a head scan from being
+sliced, and a case with the head in view needs a crop at C7 first. The source
 is an open, de-identified research dataset; no scan of any identified person
 is used.
 
