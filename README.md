@@ -85,14 +85,22 @@ scripts/self-check.sh   # Blender's; skips without Blender
 
 [NOTICE](NOTICE) has every credit line in full. In short:
 
-- **TotalSegmentator dataset (CC BY 4.0): credit required.** Every mesh,
-  slice and reference body here is derived from its CT scans, and attribution
-  is the licence's condition, not a courtesy. Anything you share that is
-  built from them must carry the credit: *TotalSegmentator dataset, Jakob
-  Wasserthal, Zenodo, CC BY 4.0* (DOI
-  [10.5281/zenodo.10047292](https://doi.org/10.5281/zenodo.10047292), small
-  subset [10.5281/zenodo.10047263](https://doi.org/10.5281/zenodo.10047263)),
-  and please cite Wasserthal et al., *Radiology: Artificial Intelligence*
+- **TotalSegmentator dataset (CC BY 4.0): credit required.** Every mesh and
+  slice here, and the CT-derived layers of every reference body, are derived
+  from its CT scans; the skin and the body shape come from ANNY's CC0 shapes,
+  not from a scan. Attribution is the licence's condition, not a courtesy.
+  Cases s1086, s0903 and s0859 come from the small subset, s0667 from the
+  full dataset. Anything you share that is built from them must carry a
+  credit such as this one, ready to paste:
+
+  > Contains material derived from the TotalSegmentator dataset v2.0.1 by
+  > Jakob Wasserthal (https://doi.org/10.5281/zenodo.10047292 and small subset
+  > https://doi.org/10.5281/zenodo.10047263), licensed under CC BY 4.0
+  > (https://creativecommons.org/licenses/by/4.0/). Changes: the CT scans were
+  > segmented, meshed, smoothed and, for the reference bodies, fitted into a
+  > synthetic ANNY body.
+
+  Please also cite Wasserthal et al., *Radiology: Artificial Intelligence*
   2023 ([10.1148/ryai.230024](https://doi.org/10.1148/ryai.230024)).
 - **TotalSegmentator (Apache-2.0):** the segmentation code and the weights of
   the Apache-2.0 tasks we run. It is installed from PyPI, not redistributed
