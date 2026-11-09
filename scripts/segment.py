@@ -46,7 +46,10 @@ def main() -> None:
     parser.add_argument("--fast", action="store_true", help="3 mm model, quicker and coarser")
     args = parser.parse_args()
     if TASK not in ALLOWED_TASKS:
-        sys.exit(f'TotalSegmentator task "{TASK}" is not Apache-2.0; see structures.ALLOWED_TASKS')
+        sys.exit(
+            f'TotalSegmentator task "{TASK}" is not Apache-2.0; only these tasks may run: '
+            + ", ".join(sorted(ALLOWED_TASKS))
+        )
 
     from totalsegmentator.python_api import totalsegmentator
 

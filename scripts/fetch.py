@@ -6,7 +6,8 @@ it against sources.json, and unpacks one CT case into data/cases/<case>/.
   python scripts/fetch.py --pick   # list cases that contain every v0 structure
 
 A source is only used when its MD5 (from the record) and SHA-256 (ours) both
-match sources.json. A partial download is resumed. The case's ct.nii.gz and its
+match sources.json, and a case only when its CT matches the ct_sha256 pinned
+there; a case with no pin is refused. A partial download is resumed. The case's ct.nii.gz and its
 reference segmentations of the v0 structures are extracted; nothing else is.
 """
 
@@ -72,7 +73,13 @@ def extract_case(zip_path: Path, case: str) -> Path:
             target.write_bytes(archive.read(name))
     pinned = SOURCES["cases"].get(case, {}).get("ct_sha256")
     found = digest(out / "ct.nii.gz", "sha256")
-    if pinned and found != pinned:
+    if not pinned:
+        # Every case we build from is pinned; an unpinned one is refused, not waved through.
+        sys.exit(
+            f"{case} has no ct_sha256 in sources.json; its ct.nii.gz has sha256 {found}. "
+            "Check the case and pin it there before using it."
+        )
+    if found != pinned:
         sys.exit(f"{case}/ct.nii.gz: sha256 {found} does not match {pinned}")
     print(f"{case}: extracted to {out.relative_to(ROOT)} (ct sha256 {found})")
     return out
