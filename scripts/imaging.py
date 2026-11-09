@@ -21,10 +21,12 @@ writes, in data/imaging/<body>/:
 
 The slices are cut at kidney level (axial), through the kidneys (coronal) and
 on the spine's midline (sagittal), and cropped to the trunk, from 5 cm below
-the hip joints to the scan top. A head guard (face_free_top) refuses a case
-whose skull and brain were not segmented, and stops every slice at the top of
-C7 when the scan reaches the head, so no face is ever included. This is CT, not
-MRI: "MRI layer" is the product name for an imaging-style view. Pure numpy;
+the femurs' top to the scan top. A head guard (face_free_top) refuses a case
+whose skull and brain were not segmented, and when the scan reaches the head
+stops every slice at the lowest of the C7 and skull/brain cuts (the top of C7,
+2 cm below the lowest skull or brain voxel), so no face is ever included; a
+case whose head comes within 2 cm of the scan's bottom is refused. This is CT,
+not MRI: "MRI layer" is the product name for an imaging-style view. Pure numpy;
 the same inputs give the same bytes.
 """
 
@@ -50,26 +52,34 @@ from structures import HEAD_GUARD, REFERENCE  # noqa: E402
 WINDOWS = {"soft": (400, 40), "bone": (1800, 400)}
 TINT = 0.38  # share of a structure's colour mixed into its voxels
 SOURCE_LICENCE = "CC-BY-4.0"
-GUARD_MARGIN_SLICES = 14  # about 2 cm at 1.5 mm
+GUARD_MARGIN_MM = 20.0  # how far below the head or neck the guard cuts
 DISPLAY_FACTOR = 2  # the GLB textures are upsampled by this for display
 LANCZOS_TAPS = 3
 EDGE_SOFTNESS = 0.7  # display pixels of Gaussian on the body mask's edge (display only)
 EDGE_BLEED = 5  # display pixels of colour bled across the edge band and the soft fringe
+WEIGHT_ONE = 4096  # Lanczos weights are fixed point, in steps of 1/4096
 
 
 NECK = [f"vertebrae_C{i}" for i in range(1, 7)]
 
 
-def face_free_top(masks: dict[str, np.ndarray | None]) -> int | None:
+def guard_margin(spacing_mm: float) -> int:
+    """GUARD_MARGIN_MM in axial slices, rounded up so it is never less than 2 cm."""
+    return int(np.ceil(GUARD_MARGIN_MM / spacing_mm - 1e-9))
+
+
+def face_free_top(masks: dict[str, np.ndarray | None], margin: int) -> int | None:
     """The highest axial index (canonical, superior = higher) a slice may show.
 
-    masks maps HEAD_GUARD labels and C1-C6 to their masks, plus vertebrae_C7.
+    masks maps HEAD_GUARD labels and C1-C6 to their masks, plus vertebrae_C7;
+    margin is 2 cm in slices (guard_margin).
     With none of the skull, brain or C1-C6 in the scan, the scan starts below
     the head and nothing is cropped (None). Otherwise the cut is the lowest of:
     2 cm below the lowest skull or brain voxel (a bowed head brings the jaw down
     beside the neck, level with C7), the top of C7, and, without C7, 2 cm below
     the lowest of C1-C6. A guard label that was never segmented (None) is an
-    error: absence must be shown, not assumed.
+    error: absence must be shown, not assumed. The result can be negative when
+    the head reaches the scan's bottom; apply_head_guard refuses that case.
     """
     for label in HEAD_GUARD:
         if masks.get(label) is None:
@@ -86,13 +96,45 @@ def face_free_top(masks: dict[str, np.ndarray | None]) -> int | None:
         return None
     cuts = []
     if head:
-        cuts.append(lowest(head) - GUARD_MARGIN_SLICES)
+        cuts.append(lowest(head) - margin)
     c7 = masks.get("vertebrae_C7")
     if c7 is not None and c7.any():
         cuts.append(int(np.flatnonzero(c7.any((0, 1)))[-1]))
     elif neck:
-        cuts.append(lowest(neck) - GUARD_MARGIN_SLICES)
+        cuts.append(lowest(neck) - margin)
     return min(cuts)
+
+
+def apply_head_guard(
+    body: np.ndarray, masks: dict[str, np.ndarray | None], spacing_mm: float
+) -> tuple[np.ndarray, int | None]:
+    """The body mask with nothing above face_free_top, and that top (None: no cut).
+
+    Raises ValueError when a guard mask is missing, when the head comes within
+    the margin of the scan's bottom slice (a negative top, which as an index
+    would wrap round and blank only the top slices), or when nothing of the
+    body is left below the cut.
+    """
+    top = face_free_top(masks, guard_margin(spacing_mm))
+    if top is None:
+        return body, None
+    if top < 0:
+        raise ValueError(
+            f"the head reaches within {GUARD_MARGIN_MM:.0f} mm of the scan's bottom slice "
+            f"(cut at {top}); refusing the case"
+        )
+    body = body.copy()
+    body[:, :, top + 1 :] = False  # top + 1 >= 1, so this never wraps
+    if not body.any():
+        raise ValueError("nothing of the trunk is left below the head")
+    return body, top
+
+
+def srgb(linear) -> np.ndarray:
+    """Linear RGB (structures.py's colours) to sRGB, the space of a PNG and of a
+    glTF baseColorTexture, so a tint matches the same structure's mesh."""
+    c = np.clip(np.asarray(linear, dtype=np.float64), 0, 1)
+    return np.where(c <= 0.0031308, 12.92 * c, 1.055 * c ** (1 / 2.4) - 0.055)
 
 
 def canonical(path: Path) -> nib.Nifti1Image:
@@ -118,28 +160,68 @@ def lanczos_weights(size: int, factor: int, taps: int = LANCZOS_TAPS) -> np.ndar
     return matrix / matrix.sum(1, keepdims=True)
 
 
+def fixed_point(matrix: np.ndarray) -> np.ndarray:
+    """Resampling weights as integers in steps of 1/WEIGHT_ONE, each row summing
+    to exactly WEIGHT_ONE (the rounding error goes onto the row's largest weight)."""
+    weights = np.round(matrix * WEIGHT_ONE).astype(np.int64)
+    weights[np.arange(len(weights)), np.abs(weights).argmax(1)] += WEIGHT_ONE - weights.sum(1)
+    return weights
+
+
 def upsample(rgba: np.ndarray, factor: int = 2) -> np.ndarray:
-    """Lanczos upsample for display: premultiplied, so clear pixels add no dark fringe."""
-    image = rgba.astype(np.float64) / 255
-    alpha = image[..., 3:]
-    premultiplied = np.dstack([image[..., :3] * alpha, alpha])
-    rows = lanczos_weights(image.shape[0], factor)
-    cols = lanczos_weights(image.shape[1], factor)
+    """Lanczos upsample of the colour for display; the mask is the native one.
+
+    Colour is filtered premultiplied by the native mask, so clear pixels add no
+    dark fringe: a flat colour stays exactly flat up to any edge. The display
+    mask is the native mask with each pixel repeated factor x factor times, so
+    it stays binary and exactly in place at corners, diagonals and one-voxel
+    features. The filter runs in integers (fixed-point weights, integer
+    products and sums), so the result does not depend on the BLAS build or the
+    thread count; the one float step before that, computing the weights,
+    would have to land within a rounding error of a 1/8192 boundary to change
+    a byte.
+    """
+    inside = rgba[..., 3] >= 128
+    premultiplied = np.dstack([rgba[..., :3] * inside[..., None], inside * 255]).astype(np.int64)
+    rows = fixed_point(lanczos_weights(rgba.shape[0], factor))
+    cols = fixed_point(lanczos_weights(rgba.shape[1], factor))
     big = np.stack([rows @ premultiplied[..., c] @ cols.T for c in range(4)], -1)
-    big = np.clip(big, 0, 1)
-    a = big[..., 3:]
-    rgb = np.where(a > 1e-6, big[..., :3] / np.maximum(a, 1e-6), 0)
-    # The edge is anti-aliased: the crisp mask (where the Lanczos alpha passes
-    # one half) is blurred slightly, and colour is bled outwards under the soft
-    # fringe so it shows the slice's own edge colour, not black.
-    # The trunk mask's outermost voxel is often air at the skin (a dark rim), so
-    # the display edge is pulled in by one source voxel before it is softened.
-    inside = shrink(a[..., 0] >= 0.5, factor).astype(np.float64)
-    soft = np.clip(blur(inside, EDGE_SOFTNESS), 0, 1)
-    # Colour comes only from pixels well inside (Lanczos rings darken the band
-    # right at the edge) and is bled across the edge band and the soft fringe.
-    rgb = bleed(np.clip(rgb, 0, 1), a[..., 0] >= 0.98, steps=EDGE_BLEED)
+    weight = big[..., 3:].astype(np.float64)  # Lanczos alpha, times 255 * WEIGHT_ONE**2
+    nearest = np.repeat(np.repeat(rgba[..., :3], factor, 0), factor, 1) / 255
+    # Where the filtered alpha is small (a one-voxel feature, a sharp corner), the
+    # ratio is ill-conditioned: take the source voxel's own colour instead.
+    solid = weight > 0.25 * 255 * WEIGHT_ONE**2
+    rgb = np.where(solid, big[..., :3] / np.maximum(weight, 1), nearest)
+    # Lanczos rings beside a sharp change in colour (a tinted structure at the
+    # body's edge); keep each pixel within the range of the body voxels around
+    # its source voxel, so no ring can overshoot or darken the edge.
+    low, high = neighbourhood_range(rgba[..., :3] / 255, inside)
+    low, high = (np.repeat(np.repeat(v, factor, 0), factor, 1) for v in (low, high))
+    rgb = np.clip(rgb, np.minimum(low, nearest), np.maximum(high, nearest))
+    mask = np.repeat(np.repeat(inside, factor, 0), factor, 1)
+    # The edge is anti-aliased: the native mask is pulled in by one source voxel
+    # (the trunk mask's outermost voxel is often air at the skin, a dark rim)
+    # and blurred slightly, and colour from inside that is bled outwards under
+    # the soft fringe, so the edge shows the slice's own edge colour, not black.
+    core = shrink(mask, factor)
+    soft = np.clip(blur(core.astype(np.float64), EDGE_SOFTNESS), 0, 1)
+    rgb = bleed(np.clip(rgb, 0, 1), core, steps=EDGE_BLEED)
     return np.round(np.dstack([rgb, soft]) * 255).astype(np.uint8)
+
+
+def neighbourhood_range(rgb: np.ndarray, inside: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Per-channel min and max over each pixel's 3 x 3 neighbours inside the body
+    (padded, not wrapped, at the image's border; +inf/-inf where none is inside)."""
+    height, width = inside.shape
+    low = np.pad(np.where(inside[..., None], rgb, np.inf), ((1, 1), (1, 1), (0, 0)),
+                 constant_values=np.inf)  # fmt: skip
+    high = np.pad(np.where(inside[..., None], rgb, -np.inf), ((1, 1), (1, 1), (0, 0)),
+                  constant_values=-np.inf)  # fmt: skip
+    shifts = [(dy, dx) for dy in range(3) for dx in range(3)]
+    return (
+        np.min([low[dy : dy + height, dx : dx + width] for dy, dx in shifts], 0),
+        np.max([high[dy : dy + height, dx : dx + width] for dy, dx in shifts], 0),
+    )
 
 
 def shrink(mask: np.ndarray, steps: int) -> np.ndarray:
@@ -213,7 +295,7 @@ def slice_image(ct, labels, body, axis: int, index: int, window) -> tuple[np.nda
     rgb = np.repeat(grey[..., None], 3, -1)
     for i, s in enumerate(REFERENCE, start=1):
         hit = lab == i
-        rgb[hit] = (1 - TINT) * rgb[hit] + TINT * np.array(s.colour)
+        rgb[hit] = (1 - TINT) * rgb[hit] + TINT * srgb(s.colour)
     alpha = inside.astype(np.float64)
     image = np.dstack([rgb, alpha])
     # The 2D array's axes are the two remaining voxel axes, in order. Rows run
@@ -335,34 +417,38 @@ def main() -> None:
             labels[np.asanyarray(canonical(path).dataobj) > 0] = i
     body = np.asanyarray(canonical(work / "seg" / "body_trunc.nii.gz").dataobj) > 0
 
-    def centroid(label: str) -> np.ndarray:
-        i = [s.label for s in REFERENCE].index(label) + 1
-        return np.argwhere(labels == i).mean(0)
+    def voxels(label: str) -> np.ndarray:
+        found = np.argwhere(labels == [s.label for s in REFERENCE].index(label) + 1)
+        if not len(found):
+            sys.exit(f"{case}: {label} is empty or missing in {work / 'seg'}; "
+                     "imaging.py needs it to place the slices")  # fmt: skip
+        return found
 
-    kidneys = (centroid("kidney_left") + centroid("kidney_right")) / 2
+    kidneys = (voxels("kidney_left").mean(0) + voxels("kidney_right").mean(0)) / 2
     spine = np.argwhere(np.isin(labels, [
         i for i, s in enumerate(REFERENCE, 1) if s.label.startswith("vertebrae_")
     ])).mean(0)  # fmt: skip
-    femurs = [np.argwhere(labels == [s.label for s in REFERENCE].index(f) + 1)
-              for f in ("femur_left", "femur_right")]  # fmt: skip
-    hip_k = max(int(f[:, 2].max()) for f in femurs)  # the femoral heads' top
+    # The femurs' top: the head or the greater trochanter, whichever is higher.
+    # Both femurs are needed, so the crop's bottom does not depend on which one
+    # the scan happened to keep.
+    femur_top = max(int(voxels(f)[:, 2].max()) for f in ("femur_left", "femur_right"))
     guard = {}
     for label in (*HEAD_GUARD, *NECK, "vertebrae_C7"):
         path = work / "seg" / f"{label}.nii.gz"
         guard[label] = np.asanyarray(canonical(path).dataobj) > 0 if path.exists() else None
+    spacing = float(np.linalg.norm(affine[:3, 2]))
     try:
-        top = face_free_top(guard)
+        body, top = apply_head_guard(body, guard, spacing)
     except ValueError as error:
-        sys.exit(f"head guard: {error}")
+        sys.exit(f"head guard: {case}: {error}")
     if top is not None:
-        body[:, :, top + 1 :] = False  # nothing above the guard reaches an image
         print(f"head guard: the scan reaches the head; slices stop at axial index {top}")
-    if not body.any():
-        sys.exit("head guard: nothing of the trunk is left below the head")
     inside = np.argwhere(body)
     lo = inside.min(0)
     hi = inside.max(0)
-    lo[2] = max(int(lo[2]), hip_k - int(round(50 / np.linalg.norm(affine[:3, 2]))))
+    lo[2] = max(int(lo[2]), femur_top - int(round(50 / spacing)))
+    if lo[2] > hi[2]:
+        sys.exit(f"head guard: {case}: nothing is left between the femurs and the head cut")
     crop = tuple(slice(int(a), int(b) + 1) for a, b in zip(lo, hi, strict=True))
     ct, labels, body = ct[crop], labels[crop], body[crop]
     offset = lo

@@ -22,10 +22,16 @@ body cuts the same liver, kidneys and bones that the 3D layers show.
 
 | File | Content |
 | --- | --- |
-| `axial.png`, `coronal.png`, `sagittal.png` | one slice each, windowed for soft tissue (W400/L40) or bone (W1800/L400); each segmented structure is tinted 38% towards its display colour; air outside the body is transparent |
-| `axial@2x.png`, `coronal@2x.png`, `sagittal@2x.png` | the same slices at twice the size, for display only: Lanczos-3 on premultiplied alpha, with an anti-aliased edge: the body mask is pulled in by one source voxel (its outer voxel is often air at the skin) and softened by a small Gaussian, and colour is taken from the interior, so the edge shows no staircase and no dark rim; the native PNGs stay the ones to measure on |
+| `axial.png`, `coronal.png`, `sagittal.png` | one slice each, windowed for soft tissue (W400/L40) or bone (W1800/L400); each segmented structure is tinted 38% towards its display colour (converted from linear to sRGB first, so tints match the meshes); air outside the body is transparent |
+| `axial@2x.png`, `coronal@2x.png`, `sagittal@2x.png` | the same slices at twice the size, for display only: the colour is Lanczos-3 upsampled on premultiplied alpha and clamped to the range of the body voxels around each source voxel, so it has no dark fringe and no ringing; the edge is anti-aliased: the native mask is pulled in by one source voxel (its outer voxel is often air at the skin) and softened by a small Gaussian, and colour is taken from inside that, so the edge shows no staircase and no dark rim; the native PNGs stay the ones to measure on |
 | `<body>.imaging.glb` | three double-sided, unlit quads (`KHR_materials_unlit`) carrying the 2x PNGs, with `alphaMode` BLEND |
 | `imaging.json` | each slice's plane, voxel index, pixel size, SHA-256 (native and display), the structures it cuts (by UBERON or FMA ID) and its corners in metres |
+
+The display PNGs are filtered in integer arithmetic, with the Lanczos weights
+in fixed point (steps of 1/4096), so their SHA-256 does not depend on the BLAS
+build or the thread count. The weights themselves are computed in floating
+point once; a machine whose `sin` differs in the last bit could only change a
+byte if a weight sat within that bit of a rounding boundary.
 
 The GLB loads together with `<body>.reference.glb`: the quads sit where their
 slices lie in the fitted body. They use the trunk fit from
@@ -47,12 +53,16 @@ The textures follow radiology's usual layout: the body's right is on the
 image's left, superior is at the top, and in the axial slice anterior is at
 the top. The quads' corners are computed from the CT's affine with the same
 row and column order, so the texture lands the right way round in 3D whatever
-the image layout.
+the image layout. `scripts/imaging_check.py` checks this on a synthetic
+phantom stored in a non-canonical voxel order: markers on the left, front and
+top must land on the expected side of each image, and each marker's pixel must
+map through the quad back to the marker's position.
 
 ### Crop and privacy
 
 Every slice is cropped to the trunk outline (TotalSegmentator's
-`body_trunc`), from 5 cm below the top of the femoral heads up.
+`body_trunc`), from 5 cm below the femurs' top (the head or the greater
+trochanter, whichever is higher; a case without both femurs is refused) up.
 
 A head guard (`face_free_top`) keeps faces out:
 
@@ -64,15 +74,19 @@ A head guard (`face_free_top`) keeps faces out:
   the top of C7 alone is not a safe cut.
 - If any of C1–C6 is in the scan, nothing above the top of C7 reaches an
   image. Without C7, the cut is 2 cm below the lowest of them.
+- The slices stop at the lowest of these cuts. 2 cm is turned into slices
+  from the scan's own slice spacing (14 at 1.5 mm, 25 at 0.8 mm, 7 at 3 mm),
+  rounded up.
+- A case whose head comes within 2 cm of the scan's bottom slice is refused:
+  there would be no trunk below the cut to show.
 - `scripts/imaging_check.py` tests these rules on synthetic masks in CI.
 
 The male case s0903 shows why the skull rule matters. His head is bowed, and
 TotalSegmentator finds jaw and skull voxels anteriorly at C7's height, so his
 slices stop at axial index 379, about 2 cm below them. The female case s0859
 has 64 skull voxels, a likely false positive in a scan that starts at T2, and
-the guard cuts below them anyway. The source
-is an open, de-identified research dataset; no scan of any identified person
-is used.
+the guard cuts below them anyway. The source is an open, de-identified
+research dataset; no scan of any identified person is used.
 
 ## Licence
 
