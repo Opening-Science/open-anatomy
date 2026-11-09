@@ -13,8 +13,9 @@ Inputs (after `--`):
   [--render-dir <dir> --render-name <stem>]   front, three-quarter and trunk renders
 
 Steps:
-1. Scale ANNY uniformly so its hip-to-shoulder rise is the CT's (sphere
-   centres fitted to the femoral and humeral heads), turn it about the vertical
+1. Scale ANNY uniformly by the geometric mean of three ratios to the CT: the
+   hip-to-shoulder rise (sphere centres fitted to the femoral and humeral
+   heads) and the trunk's width and depth halfway up it; turn it about the vertical
    so the hip axes agree, put its hip midpoint at the CT's height, and centre
    its trunk on the CT's trunk outline side to side and front to back. This
    placed, unposed body gives the "before" residuals.
@@ -183,6 +184,117 @@ def follow(name: str, centroid: np.ndarray, armature) -> str:
     return below[-1] if below else "root"
 
 
+ROOT = Path(__file__).resolve().parent.parent
+ANSUR = {"male": "ANSUR_II_MALE_Public.csv", "female": "ANSUR_II_FEMALE_Public.csv"}
+ANSUR_MEASURES = ("stature", "biacromialbreadth", "bicristalbreadth", "chestbreadth",
+                  "chestdepth", "hipbreadth")  # fmt: skip
+SCAPULA_RIBS = (2, 7)  # a scapula lies over the back of ribs 2 to 7
+
+
+def ansur_ranges(sex: str) -> dict[str, list[float]]:
+    """1st, 50th and 99th percentiles (mm) of the ANSUR II measures for one sex."""
+    import csv
+
+    path = ROOT / "data" / "sources" / ANSUR[sex]
+    with path.open(encoding="latin-1") as handle:
+        rows = list(csv.DictReader(handle))
+    return {
+        k: [float(np.percentile([float(r[k]) for r in rows], q)) for q in (1, 50, 99)]
+        for k in ANSUR_MEASURES
+    }
+
+
+def proportions(skin, names: dict, sex: str) -> dict:
+    """Body measures (mm) against ANSUR II, and where the shoulder girdle sits.
+
+    Skin (ANNY, fitted): stature; chest breadth and depth at the sternum's
+    middle height; hip breadth at the hip joints' height (trunk vertices only).
+    Bone (the CT, true size): biacromial breadth between the acromions (each
+    scapula's most lateral point in its top fifth) and bicristal breadth across
+    the iliac crests (the hip bones' top 3 cm). Each is placed among the ANSUR
+    II percentiles for the sex and flagged outside the 1st to 99th.
+    """
+    skin_pts = trunk_points(skin)
+    body_pts = coords_world(skin)
+    out: dict = {}
+    out["stature"] = float(np.ptp(body_pts[:, 2]))
+    if "FMA_7485" in names:
+        z = coords(names["FMA_7485"])[:, 2].mean()
+        width, depth, _ = section(skin_pts, z, 0.01)
+        out["chestbreadth"], out["chestdepth"] = width, depth
+    hips = [coords(names[n]) for n in FEMUR if n in names]
+    if hips:
+        z = float(np.mean([femoral_head(h, 0.0)[2] for h in hips]))
+        out["hipbreadth"] = section(skin_pts, z, 0.02)[0]
+    if all(n in names for n in SCAPULA):
+        tips = []
+        for n, side in SCAPULA.items():  # Blender +X is the body's left
+            sc = coords(names[n])
+            top = sc[sc[:, 2] >= sc[:, 2].max() - 0.2 * np.ptp(sc[:, 2])]
+            tips.append(top[np.argmax(top[:, 0]) if side == "L" else np.argmin(top[:, 0])])
+        out["biacromialbreadth"] = float(abs(tips[0][0] - tips[1][0]))
+    hip_bones = [coords(names[n]) for n in ("FMA_16587", "FMA_16586") if n in names]
+    if len(hip_bones) == 2:
+        crest = np.vstack([h[h[:, 2] >= h[:, 2].max() - 0.03] for h in hip_bones])
+        out["bicristalbreadth"] = float(np.ptp(crest[:, 0]))
+    ranges = ansur_ranges(sex)
+    table = {}
+    for k, metres in out.items():
+        mm = metres * 1000
+        lo, mid, hi = ranges[k]
+        table[k] = {"mm": round(mm), "ansur1": round(lo), "ansur50": round(mid),
+                    "ansur99": round(hi), "inRange": bool(lo <= mm <= hi)}  # fmt: skip
+    girdle = {}
+    for side, (scap, clav) in {
+        "L": ("FMA_13396", "FMA_13323"),
+        "R": ("FMA_13395", "FMA_13322"),
+    }.items():
+        if scap in names:
+            sc = coords(names[scap])
+            ribs = {}
+            for k in SCAPULA_RIBS:
+                rib = next(
+                    (
+                        s
+                        for s in SKELETON
+                        if s.label == f"rib_{'left' if side == 'L' else 'right'}_{k}"
+                    ),
+                    None,
+                )
+                if rib and node(rib.term) in names:
+                    r = coords(names[node(rib.term)])
+                    back = r[
+                        r[:, 1] >= np.percentile(r[:, 1], 80)
+                    ]  # posterior part (Blender +Y is back)
+                    ribs[k] = float(back[:, 2].mean())
+            entry = {"scapulaTopM": round(float(sc[:, 2].max()), 3),
+                     "scapulaBottomM": round(float(sc[:, 2].min()), 3)}  # fmt: skip
+            if len(ribs) == 2:
+                entry["rib2BackM"], entry["rib7BackM"] = round(ribs[2], 3), round(ribs[7], 3)
+                entry["spansRibs2To7"] = bool(sc[:, 2].max() >= ribs[2] - 0.03
+                                              and sc[:, 2].min() <= ribs[7] + 0.03)  # fmt: skip
+            girdle[f"scapula.{side}"] = entry
+        if clav in names:
+            c = coords(names[clav])
+            medial = c[np.argmin(np.abs(c[:, 0]))]
+            lateral = c[np.argmax(np.abs(c[:, 0]))]
+            rise = lateral[2] - medial[2]
+            run = abs(lateral[0] - medial[0])
+            girdle[f"clavicle.{side}"] = {
+                "angleFromHorizontalDeg": round(math.degrees(math.atan2(rise, run)), 1)
+            }
+    return {"vsAnsurII": table, "girdle": girdle}
+
+
+def coords_world(obj) -> np.ndarray:
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    evaluated = obj.evaluated_get(depsgraph)
+    mesh = evaluated.to_mesh()
+    pts = np.array([obj.matrix_world @ v.co for v in mesh.vertices])
+    evaluated.to_mesh_clear()
+    return pts
+
+
 def main() -> None:
     require_blender()
     args = script_args()
@@ -225,7 +337,16 @@ def main() -> None:
         - mid("upperleg01", lambda b: pose_head(armature, b))[2]
     )
     ct_rise = mid("upperarm01", targets.get)[2] - mid("upperleg01", targets.get)[2]
-    scale = float(ct_rise / rest_rise)
+    # One uniform scale for ANNY: the geometric mean of the rise, trunk width and
+    # trunk depth ratios (the trunk measured halfway up the rise). Scaling by the
+    # rise alone let an unusually long trunk make ANNY over two metres tall; the
+    # pose takes up what the scale leaves at the shoulders.
+    hips_rest = mid("upperleg01", lambda b: pose_head(armature, b))[2]
+    hips_ct = mid("upperleg01", targets.get)[2]
+    cw, cd, _ = section(coords(outline), hips_ct + ct_rise / 2, SLAB)
+    aw, ad, _ = section(trunk_points(skin), hips_rest + rest_rise / 2, SLAB)
+    ratios = {"rise": ct_rise / rest_rise, "width": cw / aw, "depth": cd / ad}
+    scale = float(np.exp(np.mean(np.log(list(ratios.values())))))
     armature.scale = (scale, scale, scale)
     bpy.context.view_layer.update()
     hip_ct = targets["upperleg01.L"] - targets["upperleg01.R"]
@@ -348,6 +469,12 @@ def main() -> None:
         o.matrix_world = world
         followed[o.name] = bone
     inside = {o.name: round(inside_share(coords(o)[::4], tree), 3) for o in ct}
+    sex = option(
+        args,
+        "--sex",
+        "female" if "female" in Path(body_path).name or "-f" in Path(body_path).stem else "male",
+    )
+    measured = proportions(skin, names, sex)
 
     mat = skin_material()
     skin.data.materials.clear()
@@ -371,6 +498,7 @@ def main() -> None:
         "output": Path(out).name, "outputSha256": sha256(out),
         "blender": bpy.app.version_string,
         "annyScale": round(scale, 4), "annyTurnDeg": round(math.degrees(turn), 2),
+        "scaleRatios": {k: round(float(v), 4) for k, v in ratios.items()},
         "outlineOffsetM": rounded(offset),
         "jointResidualM": {
             k: {"before": before[k], "after": after[k]} for k in sorted(targets)
@@ -379,6 +507,7 @@ def main() -> None:
         "posedArms": posed_arms,
         "notes": notes,
         "meanInsideSkin": round(float(np.mean(list(inside.values()))), 3),
+        "proportions": measured,
         "nodes": {n: {"bone": followed[n], "insideSkin": inside[n]} for n in sorted(followed)},
     }  # fmt: skip
     write_json(report_path, report)
@@ -387,6 +516,12 @@ def main() -> None:
         print(f"  {k}: {before[k] * 100:.1f} -> {after[k] * 100:.1f} cm")
     print(f"  spine direction: {spine_before:.1f} -> {spine_after:.1f} deg (mean per bone)")
     print(f"  inside skin: {report['meanInsideSkin']:.1%}")
+    for k, v in measured["vsAnsurII"].items():
+        mark = "ok " if v["inRange"] else "OUT"
+        spread = f"{v['ansur1']}/{v['ansur50']}/{v['ansur99']}"
+        print(f"  {mark} {k}: {v['mm']} mm (ANSUR II 1st/50th/99th {spread})")
+    for k, v in measured["girdle"].items():
+        print(f"  {k}: {v}")
     for n in notes:
         print(f"  {n}")
 
