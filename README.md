@@ -1,65 +1,80 @@
 # open-anatomy
 
-Open, imaging-based human anatomy models that anyone can rebuild from scripts.
-
-The models are built from openly licensed CT scans and open body models, not
-from a single donor. Every step, from segmentation to the released glTF, is a
-script in this repository, so the same inputs give the same files. TwinLLM and
-OpenTwin load the releases as their inner anatomy layers.
+Human anatomy models built from openly licensed CT scans by scripts anyone can
+run. Each structure (organ, bone, cartilage) is segmented from a real CT,
+meshed, named by its [UBERON](https://obophenotype.github.io/uberon/) or
+[FMA](https://bioportal.bioontology.org/ontologies/FMA) ID, and placed inside
+an open, rigged ANNY body. The same inputs give the same files.
 
 **These models are for research, education and software. They are not
 clinically validated and must not guide care.**
 
-## Layers
+## What a build gives you
 
-| Layer    | What it shows                                                                    |
-| -------- | -------------------------------------------------------------------------------- |
-| skin     | the body surface, from an open parametric body (ANNY or MakeHuman)               |
-| muscle   | the muscles                                                                      |
-| skeleton | bones and joints, rigged to the ANNY skeleton                                    |
-| organs   | organs and vessels, segmented from CT                                            |
-| imaging  | the "MRI layer": the same segmented structures shown as slice planes or a volume |
+For each reference body, in the gitignored `data/` folder:
 
-Every mesh is named by its [UBERON](https://obophenotype.github.io/uberon/) or
-[FMA](https://bioportal.bioontology.org/ontologies/FMA) ID.
+- `data/reference/<body>.reference.glb`: the ANNY body (skin and its 104-bone
+  skeleton) with 59 to 65 CT structures, each its own node, parented to the
+  ANNY bone it follows;
+- `data/reference/<body>.report.json`: the fit (joint residuals, the share of
+  each structure inside the skin) and the case's record (sex, age, recorded
+  pathology, whether it shows typical anatomy);
+- `data/work/<case>/<case>.reference.manifest.json`: every structure's ID,
+  name, system, licence, triangles, volume and its drift from the voxel volume.
 
-## Pipeline
+| Reference | CT case | Recorded pathology | Typical anatomy |
+| --- | --- | --- | --- |
+| anny-adult-m | s0903, male, 88 | none | yes |
+| anny-adult-f | s0859, female, 74 | inflammation (thorax) | yes |
+| anny-adult-m-w0.9-h0.5.s0667 | s0667, male, 65 | none | yes |
+| anny-adult-m-w0.9-h0.9.s1086 | s1086, male, 45 | tumour (thorax, abdomen) | **no: a pathological reference** |
 
-1. **Inputs:** only CC BY or CC0 data (see [Sources](#sources)).
-2. **Segmentation:** [TotalSegmentator](https://github.com/wasserth/TotalSegmentator),
-   using its Apache-2.0 tasks only (`total`, `body` and similar).
-3. **Meshing:** per label, smooth, then surface nets or marching cubes (VTK).
-4. **Blender, headless:** clean up the meshes, build a reference body for each
-   sex and several body types, rig them, and export glTF levels of detail.
-5. **Release:** versioned GLBs pinned by SHA-256, with a manifest listing each
-   node's ID, body system and licence.
+The structures are the liver, gallbladder, stomach, pancreas, spleen, both
+kidneys, heart, aorta and inferior vena cava, and the trunk skeleton: the
+vertebrae the scan covers, sacrum, ribs, sternum, costal cartilages,
+clavicles, scapulae, the upper humeri and femurs, and the hip bones. The CTs
+were taken lying down and the ANNY bodies stand, so organs sit as they do
+supine.
 
-Large inputs and outputs (CT volumes, meshes) never go into git. They live in
-the gitignored `data/` folder and are pinned by SHA-256.
+Large inputs and outputs never go into git; [sources.json](sources.json) pins
+every download and every build by SHA-256.
 
-## Sources
+## How to build
 
-Only sources under CC BY or CC0 are used:
+Needs Python 3.12, [uv](https://docs.astral.sh/uv/), Blender 5.2.x LTS, and a
+GPU for segmentation (a CPU works, slowly).
 
-- TotalSegmentator CT dataset v2.0.1 (CC BY 4.0,
-  [Zenodo 10047292](https://zenodo.org/records/10047292))
-- AMOS (CC BY 4.0)
-- CT-ORG (CC BY 3.0)
-- HRA organs (CC BY 4.0)
-- ANNY and MakeHuman body assets (CC0)
+```bash
+uv venv .venv -p 3.12 && uv pip install --python .venv/bin/python -e '.[pipeline]'
+.venv/bin/python scripts/reference.py --render --qa
+```
 
-Non-commercial datasets and models, and scans of real people outside these
-datasets, are never used. [NOTICE](NOTICE) carries the credit line for every
-source.
+`reference.py` runs, for each reference body:
+
+1. `scripts/fetch.py`: downloads the TotalSegmentator dataset from Zenodo,
+   checks it against its pins, and unpacks the case;
+2. `scripts/segment.py`: TotalSegmentator's Apache-2.0 tasks only, scored
+   against the dataset's own reference masks;
+3. `scripts/mesh.py`: smooth, closed surfaces that keep each mask's volume;
+4. `scripts/bake_anny.py`: the ANNY body, sized to the case;
+5. `blender/assemble.py`: the CT structures placed in the body and attached to
+   its skeleton; with `--render`, front, three-quarter and trunk views;
+6. with `--qa`, `blender/qa.py`: a close-up check of every mesh and contact
+   sheets in `data/qa/`.
+
+Self-checks, also run in CI:
+
+```bash
+.venv/bin/python scripts/mesh_check.py
+scripts/self-check.sh   # Blender's; skips without Blender
+```
 
 ## Licences
 
 - **Code** is under the [Apache License 2.0](LICENSE).
-- **Assets** derived from CC BY sources are in [`assets/cc-by/`](assets/cc-by/),
-  under CC BY.
-- **Assets** derived from CC BY-SA sources are in
-  [`assets/cc-by-sa/`](assets/cc-by-sa/), under CC BY-SA. Share-alike material
-  never mixes into the CC BY folder.
+- **Assets** derived from CC BY sources go in [`assets/cc-by/`](assets/cc-by/),
+  under CC BY; from CC BY-SA sources in [`assets/cc-by-sa/`](assets/cc-by-sa/).
+  Share-alike material never mixes into the CC BY folder.
 
 ## Credits
 
@@ -85,86 +100,5 @@ source.
   outputs, so no credit is needed. `blender/fit_atlas.py` can fit them; if
   you use it, credit them, and put BodyParts3D results (CC BY-SA) under
   `assets/cc-by-sa/`.
-
-## Personalisation (planned)
-
-A person's clinician-verified facts will adjust the layers at load time. For
-example, after a nephrectomy the model shows one kidney. A small rule map from
-FHIR Condition and Procedure codes to anatomy edits will drive this, applied
-on the person's own machine. The released base models stay generic. This is a
-design only for now.
-
-## Build one case
-
-Needs Python 3.11+ (3.12 recommended), Blender 5.2+ for the render, and a GPU
-for a quick segmentation (a CPU works, slowly).
-
-```bash
-uv venv .venv -p 3.12 && uv pip install --python .venv/bin/python -e '.[pipeline]'
-.venv/bin/python scripts/fetch.py               # 3.2 GB subset, checked, then case s1086
-.venv/bin/python scripts/segment.py --case s1086
-.venv/bin/python scripts/mesh.py --case s1086   # data/work/s1086/s1086.organs.glb and its manifest
-blender --background --factory-startup --python scripts/render.py -- \
-  --in data/work/s1086/s1086.organs.glb --out data/renders/s1086-organs-front.png
-```
-
-`fetch.py` downloads the pinned source from its official record, checks its
-MD5 and SHA-256 against [sources.json](sources.json), and unpacks one case.
-`segment.py` runs TotalSegmentator's `total` task for ten structures and scores
-each against the dataset's own reference segmentation. `mesh.py` writes one GLB
-with a closed mesh per structure, named by UBERON ID, and a manifest; the same
-masks always give the same bytes.
-
-## Reference bodies
-
-The bodies are ANNY (CC0 shapes): an adult male and an adult female, each
-rigged with ANNY's own 104-bone skeleton. They are synthetic: no scan of any
-person is used.
-
-```bash
-uv run --script scripts/bake_anny.py male data/bodies/anny-adult-m.rigged.glb
-uv run --script scripts/bake_anny.py female data/bodies/anny-adult-f.rigged.glb
-```
-
-The bake is pinned by SHA-256 in [sources.json](sources.json).
-
-Each reference body puts one CT's organs and trunk skeleton inside an ANNY
-body and attaches every structure to ANNY's skeleton. The male uses case s0903,
-the female s0859, both from the TotalSegmentator dataset (CC BY 4.0):
-
-```bash
-.venv/bin/python scripts/reference.py --render   # data/reference/, data/renders/
-```
-
-| Reference | Case | Recorded pathology | Typical anatomy |
-| --- | --- | --- | --- |
-| anny-adult-m | s0903, male, 88 | none | yes |
-| anny-adult-f | s0859, female, 74 | inflammation (thorax) | yes |
-| anny-adult-m-w0.9-h0.5.s0667 | s0667, male, 65 | none | yes |
-| anny-adult-m-w0.9-h0.9.s1086 | s1086, male, 45 | tumour (thorax, abdomen) | **no: a pathological reference** |
-
-The s1086 body shows tumour anatomy: the tumour may displace or change organs,
-so it must not stand in for typical anatomy. Its report says so in `case`.
-
-More bodies come from the full dataset. `scripts/select_cases.py` lists the
-cases that qualify (every organ whole, no head, the hip and shoulder joints in
-the scan, arms hanging, no trauma), and `scripts/size_body.py` picks the ANNY
-weight and height whose trunk matches the case's, which `bake_anny.py` then
-bakes with `--weight` and `--height`.
-
-[`blender/assemble.py`](blender/assemble.py) fits the CT to the body: height
-from the hip and shoulder joints, width and depth from the trunk outlines, then
-the shoulder girdle and upper thorax onto ANNY's shoulders. It reports each joint's residual and the share of every structure inside the
-skin. The CT was taken lying down and ANNY stands, so the organs sit as they do
-supine. Other headless Blender 5.2.x scripts in [`blender/`](blender/) clean
-meshes up and fit an atlas to a body limb by limb; `scripts/blender.py` runs
-them all.
-
-## Self-checks
-
-```bash
-.venv/bin/python scripts/mesh_check.py   # meshes synthetic ellipsoids; no download
-scripts/self-check.sh                     # every Blender self-check; skips without Blender
-```
 
 See [CONTRIBUTING](CONTRIBUTING.md) to take part.
