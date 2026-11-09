@@ -8,7 +8,8 @@ Inputs (after `--`):
   --ct <glb>          the CT structures from mesh.py --set reference
   --outline <glb>     the CT's trunk outline from the same run (measured, never exported)
   [--landmarks <glb>] the cut femurs and humeri from the same run, for their heads
-                      (measured, never exported)
+                      (measured, never exported); a bone whose head the scan cut
+                      is in neither file, and its level uses the other side alone
   --out <glb>         the reference body: ANNY's skin and skeleton plus the CT nodes
   --report <json>     landmarks, the fit, the bone each node follows, containment
   [--render-dir <dir> --render-name <stem>]   front and three-quarter renders
@@ -18,11 +19,13 @@ The fit has two parts. Height comes from four joints that both have: each
 hip's centre (a sphere fitted to the femoral head) and each shoulder's (a
 sphere fitted to the humeral head), against ANNY's upperleg01 and upperarm01
 joints; the vertical scale makes the hip-to-shoulder rise match and the
-landmarks' mean height land on ANNY's. Width and depth come from the trunk
-outline (TotalSegmentator's body_trunc, --outline) against ANNY's skin
-vertices that follow the trunk, measured at four fractions of that rise: the
-median ratios set the scales and the outlines' centres the shift. The joints
-are not used for width because ANNY's sit wider than anatomical joint centres.
+landmarks' mean height land on ANNY's. A joint whose head the scan cut is
+left out on both sides, and its level uses the other side alone. Width and
+depth come from the trunk outline (TotalSegmentator's body_trunc, --outline)
+against ANNY's skin vertices that follow the trunk, measured at four fractions
+of that rise: the median ratios set the scales and the outlines' centres the
+shift. The joints are not used for width because ANNY's sit wider than
+anatomical joint centres.
 A second step then fits the shoulder girdle (fit_girdle): clavicles, scapulae
 and humeri, with the upper thorax following by height, so that a girdle a
 supine or stooped scan holds low or forward lands on ANNY's shoulders. The
@@ -448,21 +451,38 @@ def main() -> None:
     bones.update({o.name.removeprefix("landmark:"): o for o in marks})
 
     # Landmarks: CT bone ends against ANNY's joints, in Blender's frame (+Z up).
-    ct_marks, anny_marks = {}, {}
-    midline = float(np.mean([coords(bones[n])[:, 0].mean() for n in FEMUR]))
+    # A femur or humerus whose head the scan cut is in neither file (mesh.py
+    # leaves it out of the landmarks); its level then uses the other side alone.
+    ct_marks, anny_marks, missing = {}, {}, []
+    femurs = [n for n in FEMUR if n in bones]
+    if not femurs:
+        sys.stderr.write(f"Case {case}: no femur in the body or the landmarks file.\n")
+        sys.exit(1)
+    midline = float(np.mean([coords(bones[n])[:, 0].mean() for n in femurs]))
     for table, finder, bone in (
         (FEMUR, femoral_head, "upperleg01"),
         (HUMERUS, humeral_head, "upperarm01"),
     ):
         for name, side in table.items():
             key = f"{bone}.{side}"
+            if name not in bones:
+                missing.append(key)
+                continue
             ct_marks[key] = finder(coords(bones[name]), midline)
             anny_marks[key] = joint(armature, key)
+        if not any(k.startswith(bone) for k in ct_marks):
+            sys.stderr.write(
+                f"Case {case}: neither {bone} landmark is in the body or the landmarks "
+                "file, so the hip-to-shoulder rise cannot be measured.\n"
+            )
+            sys.exit(1)
+    if missing:
+        print(f"landmarks not in the body or the landmarks file: {missing}")
     c = {k: ct_marks[k] for k in sorted(ct_marks)}
     a = {k: anny_marks[k] for k in sorted(anny_marks)}
 
     def mid(m, bone):
-        return (m[f"{bone}.L"] + m[f"{bone}.R"]) / 2
+        return np.mean([m[k] for k in sorted(m) if k.startswith(bone)], axis=0)
 
     # Height: the hip-to-shoulder rise. Width and depth: the trunk outlines at
     # the same fractions of that rise (ANNY's joints sit wider than anatomical
@@ -603,6 +623,7 @@ def main() -> None:
             }
             for k in c
         },
+        "landmarksMissing": missing,
         "nodes": {
             o.name: {"bone": followed[o.name], "insideSkin": inside[o.name]}
             for o in sorted(ct, key=lambda o: o.name)
