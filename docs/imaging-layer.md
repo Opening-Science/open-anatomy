@@ -23,8 +23,9 @@ body cuts the same liver, kidneys and bones that the 3D layers show.
 | File | Content |
 | --- | --- |
 | `axial.png`, `coronal.png`, `sagittal.png` | one slice each, windowed for soft tissue (W400/L40) or bone (W1800/L400); each segmented structure is tinted 38% towards its display colour; air outside the body is transparent |
-| `<body>.imaging.glb` | three double-sided, unlit quads (`KHR_materials_unlit`) carrying those PNGs, with `alphaMode` MASK |
-| `imaging.json` | each slice's plane, voxel index, pixel size, SHA-256, the structures it cuts (by UBERON or FMA ID) and its corners in metres |
+| `axial@2x.png`, `coronal@2x.png`, `sagittal@2x.png` | the same slices at twice the size, for display only: Lanczos-3 on premultiplied alpha, the body mask kept binary and in place, so the edge gets no dark fringe; the native PNGs stay the ones to measure on |
+| `<body>.imaging.glb` | three double-sided, unlit quads (`KHR_materials_unlit`) carrying the 2x PNGs, with `alphaMode` MASK |
+| `imaging.json` | each slice's plane, voxel index, pixel size, SHA-256 (native and display), the structures it cuts (by UBERON or FMA ID) and its corners in metres |
 
 The GLB loads together with `<body>.reference.glb`: the quads sit where their
 slices lie in the fitted body. They use the trunk fit from

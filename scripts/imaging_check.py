@@ -9,7 +9,9 @@ Checks that face_free_top
 - stops 2 cm below the skull when a bowed head brings the jaw level with C7;
 - stops 2 cm below the lowest head or neck structure when C7 is not;
 - refuses a case whose skull or brain was never segmented;
-and that a body mask cut at the guard keeps no voxel of a synthetic face.
+and that a body mask cut at the guard keeps no voxel of a synthetic face; and
+that the 2x display upsample keeps flat regions flat, the mask binary and in
+place, and adds no dark fringe at the body's edge.
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from imaging import GUARD_MARGIN_SLICES, NECK, face_free_top  # noqa: E402
+from imaging import GUARD_MARGIN_SLICES, NECK, face_free_top, upsample  # noqa: E402
 from structures import HEAD_GUARD  # noqa: E402
 
 SHAPE = (32, 32, 120)  # canonical: the third axis runs inferior to superior
@@ -82,6 +84,20 @@ def main() -> int:
     top = face_free_top(head)
     body[:, :, top + 1 :] = False
     check(not (body & face).any(), "no face voxel survives the guard")
+
+    # The display upsample: twice the size, flat stays flat, no dark fringe at a
+    # transparent edge, and the body's edge stays where it was.
+    image = np.zeros((20, 30, 4), dtype=np.uint8)
+    image[:, 10:, :3] = 180
+    image[:, 10:, 3] = 255
+    big = upsample(image, 2)
+    check(big.shape == (40, 60, 4), "the display image is twice the size")
+    check(set(np.unique(big[..., 3])) <= {0, 255}, "the display mask stays binary")
+    # Lanczos-3 rings for up to 6 display pixels beside an edge; beyond that, flat.
+    check(bool((big[:, 27:, :3] == 180).all()), "a flat region stays flat")
+    check(int(big[:, 20:22, :3].min()) >= 170, "no dark fringe where the body meets the air")
+    check(bool((big[:, :20, 3] == 0).all() and (big[:, 20:, 3] == 255).all()),
+          "the body's edge stays at the same place")  # fmt: skip
 
     print("imaging check passed" if not failures else f"imaging check failed: {len(failures)}")
     return 1 if failures else 0

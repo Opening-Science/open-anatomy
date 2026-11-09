@@ -10,7 +10,10 @@ used) and the body's report from blender/assemble.py (for the trunk fit). It
 writes, in data/imaging/<body>/:
 - axial.png, coronal.png, sagittal.png: the CT in a soft-tissue (W400/L40) or
   bone (W1800/L400) window, the segmented structures tinted in their display
-  colours, and the air outside the body transparent;
+  colours, and the air outside the body transparent, one pixel per voxel, for
+  measurement;
+- the same at twice the size (axial@2x.png and so on), Lanczos-3 upsampled, for
+  display only: the GLB's textures;
 - <body>.imaging.glb: three double-sided, unlit quads carrying those textures,
   each where its slice lies in the reference body (the trunk fit, not the
   girdle step), so the GLB can be loaded together with <body>.reference.glb;
@@ -48,6 +51,8 @@ WINDOWS = {"soft": (400, 40), "bone": (1800, 400)}
 TINT = 0.38  # share of a structure's colour mixed into its voxels
 SOURCE_LICENCE = "CC-BY-4.0"
 GUARD_MARGIN_SLICES = 14  # about 2 cm at 1.5 mm
+DISPLAY_FACTOR = 2  # the GLB textures are upsampled by this for display
+LANCZOS_TAPS = 3
 
 
 NECK = [f"vertebrae_C{i}" for i in range(1, 7)]
@@ -90,6 +95,41 @@ def face_free_top(masks: dict[str, np.ndarray | None]) -> int | None:
 
 def canonical(path: Path) -> nib.Nifti1Image:
     return nib.as_closest_canonical(nib.load(path))  # voxel axes along R, A, S
+
+
+def lanczos_weights(size: int, factor: int, taps: int = LANCZOS_TAPS) -> np.ndarray:
+    """(size * factor, size) resampling matrix for a Lanczos-`taps` upsample.
+
+    Output pixel x samples the input at (x + 0.5) / factor - 0.5, so pixel
+    centres line up and the image's edges stay where they were; taps that fall
+    outside the image are clamped to its edge.
+    """
+    out = np.arange(size * factor)
+    centre = (out + 0.5) / factor - 0.5
+    base = np.floor(centre).astype(int)
+    matrix = np.zeros((size * factor, size))
+    for offset in range(-taps + 1, taps + 1):
+        source = base + offset
+        distance = centre - source
+        weight = np.sinc(distance) * np.sinc(distance / taps)
+        np.add.at(matrix, (out, np.clip(source, 0, size - 1)), weight)
+    return matrix / matrix.sum(1, keepdims=True)
+
+
+def upsample(rgba: np.ndarray, factor: int = 2) -> np.ndarray:
+    """Lanczos upsample for display: premultiplied, so clear pixels add no dark fringe."""
+    image = rgba.astype(np.float64) / 255
+    alpha = image[..., 3:]
+    premultiplied = np.dstack([image[..., :3] * alpha, alpha])
+    rows = lanczos_weights(image.shape[0], factor)
+    cols = lanczos_weights(image.shape[1], factor)
+    big = np.stack([rows @ premultiplied[..., c] @ cols.T for c in range(4)], -1)
+    big = np.clip(big, 0, 1)
+    a = big[..., 3:]
+    rgb = np.where(a > 1e-6, big[..., :3] / np.maximum(a, 1e-6), 0)
+    # Keep the mask crisp: a display pixel is opaque where the slice is inside the body.
+    a = (a >= 0.5).astype(np.float64)
+    return np.round(np.dstack([np.clip(rgb, 0, 1), a]) * 255).astype(np.uint8)
 
 
 def png(rgba: np.ndarray) -> bytes:
@@ -297,15 +337,23 @@ def main() -> None:
         image, shown = slice_image(ct, labels, body, axis, index, WINDOWS[args.window])
         data = png(image)
         (out / f"{plane}.png").write_bytes(data)
+        display = png(upsample(image, DISPLAY_FACTOR))
+        (out / f"{plane}@{DISPLAY_FACTOR}x.png").write_bytes(display)
         ras = quad_corners(origin, axis, index, zero, top)
         corners = to_reference(ras, centre, scale, shift)
-        planes.append({"plane": plane, "png": data, "corners": corners})
+        planes.append({"plane": plane, "png": display, "corners": corners})
         record.append({
             "plane": plane,
             "voxelIndex": int(index + offset[axis]),
             "image": f"{plane}.png",
             "pixels": [int(image.shape[1]), int(image.shape[0])],
             "sha256": hashlib.sha256(data).hexdigest(),
+            "display": {
+                "image": f"{plane}@{DISPLAY_FACTOR}x.png",
+                "pixels": [int(v) * DISPLAY_FACTOR for v in image.shape[1::-1]],
+                "resampling": f"Lanczos-{LANCZOS_TAPS}, premultiplied alpha, mask kept binary",
+                "sha256": hashlib.sha256(display).hexdigest(),
+            },
             "structures": [REFERENCE[i - 1].term for i in shown],
             "cornersM": np.round(corners, 4).tolist(),
         })  # fmt: skip
