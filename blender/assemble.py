@@ -27,8 +27,9 @@ supine or stooped scan holds low or forward lands on ANNY's shoulders. The
 report gives the inside-skin share of the moved bones before and after, how
 many grid settings tied and whether the winner is on the grid's edge, how far
 neighbouring bones are pulled apart at their joints, how much of each moved
-bone ends up inside an organ, and each landmark's residual both after the trunk
-fit alone and after the girdle step.
+bone ends up inside an organ, whether the hard limit of no bone inside the
+heart could be met, and each landmark's residual both after the trunk fit
+alone and after the girdle step.
 No rotation:
 the CT is axial and ANNY stands upright in the same frame. Each node is then
 parented rigidly to one ANNY bone: femur to upperleg01, humerus to upperarm01,
@@ -85,7 +86,7 @@ GIRDLE_DY = np.round(np.arange(-0.08, 0.0801, 0.01), 3)  # front-to-back shifts 
 GIRDLE_SX = np.round(np.arange(0.95, 1.2001, 0.025), 3)  # side-to-side scales tried
 SHARE_TIE = 0.001  # settings this close to the best score count as tied
 OVERLAP_WEIGHT = 2.0  # a share of bone inside an organ costs this many shares outside the skin
-HEART = "UBERON_0000948"  # no bone may end up inside it: the limit is 0
+HEART = "UBERON_0000948"  # no moved bone may end up inside it: a hard limit of 0 on the grid
 NEIGHBOUR_M = 0.005  # bones closer than this before the girdle step meet at a joint
 HEAD_DEPTH = 0.045  # metres of bone end used for a joint's sphere fit
 SKIN_RGBA = (0.80, 0.62, 0.52, 0.16)
@@ -208,16 +209,21 @@ def fit_girdle(ct, names, anny: dict, tree: BVHTree, midline: float) -> dict:
     the spine and ribs bend smoothly below it. Organs do not move. The vertical
     shift puts the humeral heads' mean height on ANNY's shoulder joints'; the
     front-to-back shift and a side-to-side scale about the midline are chosen
-    on a grid by a score: the share of the moved bones inside the skin, less
-    OVERLAP_WEIGHT times their share inside the organs, which do not move (a
-    sternum pushed into the heart is worse than a rib tip outside the skin).
-    Many settings tie; among those within SHARE_TIE of the best, the smallest
-    move wins, and a winner on the grid's edge is reported.
+    on a grid. The heart (HEART) is a hard limit: every setting that puts any
+    point of a moved bone inside it is dropped, tested on every fourth vertex,
+    the points organ_overlap reports on, so a setting that passes leaves
+    nothing in the heart to report. If no setting is free of the heart, the
+    ones with the smallest maximum per-bone share inside it stay, and the
+    report says the limit could not be met. The settings left are scored: the
+    share of the moved bones inside the skin, less OVERLAP_WEIGHT times their
+    mean share inside the organs, which do not move (a rib pushed into the
+    liver is worse than a rib tip outside the skin). Many settings tie; among
+    those within SHARE_TIE of the best, the smallest move wins, and a winner on
+    the grid's edge is reported.
 
     Also measured, for the report: how far neighbouring bones are pulled apart
     at their joints (joint_shifts), how much of each moved bone ends up inside
-    an organ (organ_overlap), and any bone left inside the heart, whose limit
-    is 0 (bonesInHeart).
+    an organ (organ_overlap), and any bone left inside the heart (bonesInHeart).
     """
     heads = [humeral_head(coords(names[n]), midline) for n in HUMERUS]
     top = float(np.mean([h[2] for h in heads]))
@@ -251,23 +257,40 @@ def fit_girdle(ct, names, anny: dict, tree: BVHTree, midline: float) -> dict:
         near = [t for t, olo, ohi in organs.values() if not (np.any(hi < olo) or np.any(ohi < lo))]
         return max((inside_share(points, t) for t in near), default=0.0)
 
+    heart = organs.get(HEART)
+
+    def heart_share(points: np.ndarray) -> float:
+        if heart is None:
+            return 0.0
+        heart_tree, hlo, hhi = heart
+        if np.any(points.max(0) < hlo) or np.any(hhi < points.min(0)):
+            return 0.0
+        return inside_share(points, heart_tree)
+
     scores = []
     for dy in GIRDLE_DY:
         for sx in GIRDLE_SX:
             placed = [place(p[::20], w, dy, sx) for p, w in moving.values()]
             inside = float(np.mean([inside_share(p, tree) for p in placed]))
             overlap = float(np.mean([in_organs(p) for p in placed]))
-            scores.append(
-                (inside - OVERLAP_WEIGHT * overlap, inside, overlap, float(dy), float(sx))
-            )
-    top = max(s[0] for s in scores)
-    tied = [s for s in scores if s[0] >= top - SHARE_TIE]
+            in_heart_most = max(heart_share(place(p[::4], w, dy, sx)) for p, w in moving.values())
+            scores.append((
+                inside - OVERLAP_WEIGHT * overlap, inside, overlap, in_heart_most,
+                float(dy), float(sx),
+            ))  # fmt: skip
+    # The hard limit: only settings with nothing in the heart, or, failing
+    # that, the ones that put the least of a bone there.
+    least_in_heart = min(s[3] for s in scores)
+    allowed = [s for s in scores if s[3] <= least_in_heart]
+    top = max(s[0] for s in allowed)
+    tied = [s for s in allowed if s[0] >= top - SHARE_TIE]
 
     def size(s):
-        reach = abs(s[3]) / GIRDLE_DY.max() + abs(s[4] - 1) / (GIRDLE_SX.max() - 1)
-        return (reach, abs(s[3]), abs(s[4] - 1), s[3], s[4])
+        *_, dy, sx = s
+        reach = abs(dy) / GIRDLE_DY.max() + abs(sx - 1) / (GIRDLE_SX.max() - 1)
+        return (reach, abs(dy), abs(sx - 1), dy, sx)
 
-    score, share, overlap, dy, sx = min(tied, key=size)
+    score, share, overlap, in_heart_most, dy, sx = min(tied, key=size)
     edge = [k for k, v, grid in (("dy", dy, GIRDLE_DY), ("sx", sx, GIRDLE_SX))
             if v in (float(grid[0]), float(grid[-1]))]  # fmt: skip
     overlap_before = organ_overlap({n: p for n, (p, _) in moving.items()}, organs)
@@ -278,6 +301,7 @@ def fit_girdle(ct, names, anny: dict, tree: BVHTree, midline: float) -> dict:
     return {
         "dz": dz, "dy": dy, "sx": sx, "weights": weights, "midline": midline,
         "share": share, "score": score, "overlap": overlap, "tied": len(tied), "edge": edge,
+        "heart": in_heart_most, "heartMet": least_in_heart == 0,
         "joints": joint_shifts(bones, weights, (dy, sx, dz), midline),
         "overlapBefore": overlap_before, "overlapAfter": overlap_after, "inHeart": in_heart,
     }  # fmt: skip
@@ -523,6 +547,8 @@ def main() -> None:
         "score": round(girdle["score"], 4),
         "overlapWeight": OVERLAP_WEIGHT,
         "meanBoneShareInOrgans": round(girdle["overlap"], 4),
+        "heartLimitMet": girdle["heartMet"],
+        "maxBoneShareInHeart": round(girdle["heart"], 4),
         "bonesInHeart": girdle["inHeart"],
         "residualNote": (
             "trunkFitResidualM is the trunk fit's alone. residualM is after the girdle "
@@ -594,8 +620,10 @@ def main() -> None:
           f"{np.mean(list(inside.values())):.1%}")  # fmt: skip
     if g["onGridEdge"]:
         print(f"warning: the girdle's best setting is on the grid's edge ({g['onGridEdge']})")
-    if g["bonesInHeart"]:
-        print(f"warning: inside the heart after the girdle step (limit 0): {g['bonesInHeart']}")
+    if not g["heartLimitMet"]:
+        print(f"warning: no grid setting keeps every moved bone out of the heart (limit 0); "
+              f"the least leaves {g['maxBoneShareInHeart']:.1%} of a bone in it: "
+              f"{g['bonesInHeart'] or 'under 1% each'}")  # fmt: skip
     print(f"girdle: {g['gridSettingsTied']} grid settings tied; largest joint shift "
           f"{g['largestJointShiftM'] * 100:.1f} cm; bones in organs after: "
           f"{g['bonesInOrgansAfter'] or 'none'}")  # fmt: skip
