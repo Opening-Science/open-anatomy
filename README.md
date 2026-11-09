@@ -20,7 +20,8 @@ For each reference body, in the gitignored `data/` folder:
   each structure inside the skin) and the case's record (sex, age, recorded
   pathology, whether it shows typical anatomy);
 - `data/work/<case>/<case>.reference.manifest.json`: every structure's ID,
-  name, system, licence, triangles, volume and its drift from the voxel volume.
+  name, system, licence, triangles, volume, its drift from the voxel volume
+  and the share of its voxels outside its largest piece, which is dropped.
 
 | Reference | CT case | Recorded pathology | Typical anatomy |
 | --- | --- | --- | --- |
@@ -41,7 +42,9 @@ too broken to show, so each is a smooth bridge from a rib's front end to the
 sternum (ribs up to the seventh whose end lies near the sternum, in left-right
 pairs). Their node and manifest entry say `modelled: true`. Everything else is
 segmented from the CT. The CTs were taken lying down and the ANNY bodies
-stand, so organs sit as they do supine.
+stand, so organs sit as they do supine. The ages do not match either: the
+ANNY bodies are young adults, while the people scanned were 45 to 88, so the
+organs and bones are an older person's inside a young adult's shape.
 
 Large inputs and outputs never go into git; [sources.json](sources.json) pins
 every download and every build by SHA-256.
@@ -65,7 +68,9 @@ uv venv .venv -p 3.12 && uv pip install --python .venv/bin/python -e '.[pipeline
 2. `scripts/segment.py`: TotalSegmentator's Apache-2.0 tasks only, scored
    against the dataset's own reference masks;
 3. `scripts/mesh.py`: smooth, closed surfaces that keep each mask's volume;
-4. `scripts/bake_anny.py`: the ANNY body, sized to the case;
+4. `scripts/bake_anny.py`: the ANNY body, sized to the case by
+   `scripts/size_body.py` (the two w0.9 bodies were sized on an older grid
+   that stopped at 0.9 and will be re-sized when the bodies are rebuilt);
 5. `blender/assemble.py`: the CT structures placed in the body and attached to
    its skeleton; with `--render`, front, three-quarter and trunk views.
 
@@ -73,7 +78,8 @@ Self-checks, also run in CI:
 
 ```bash
 .venv/bin/python scripts/mesh_check.py
-scripts/self-check.sh   # Blender's; skips without Blender
+scripts/self-check.sh         # Blender's; skips without Blender
+python3 scripts/bake_check.py # the ANNY bake's lock; --bake bakes again and compares
 ```
 
 ## Licences
@@ -103,6 +109,9 @@ scripts/self-check.sh   # Blender's; skips without Blender
   > segmented, meshed, smoothed and, for the reference bodies, fitted into a
   > synthetic ANNY body.
 
+  Every GLB built here carries this attribution in its asset copyright
+  (creator, DOI and case), and a reference body's also credits ANNY.
+
   Please also cite Wasserthal et al., *Radiology: Artificial Intelligence*
   2023 ([10.1148/ryai.230024](https://doi.org/10.1148/ryai.230024)).
 - **TotalSegmentator (Apache-2.0):** the segmentation code and the weights of
@@ -117,7 +126,8 @@ scripts/self-check.sh   # Blender's; skips without Blender
 - **BodyParts3D and HRA:** nothing from them is used in this repository's
   outputs, so no credit is needed. `blender/fit_atlas.py` can fit them; if
   you use it, credit them, and put BodyParts3D results (CC BY-SA) under
-  `assets/cc-by-sa/`.
+  `assets/cc-by-sa/`. It refuses BodyParts3D unless `--allow-share-alike` is
+  given.
 
 Non-commercial datasets and models, and scans of real people outside the
 TotalSegmentator dataset's open CTs, are never used.
