@@ -55,6 +55,11 @@ MIN_VOXELS = 100  # a mask smaller than this (0.3 ml at 1.5 mm) is a stray label
 SETS_OF_PIECES = {"costal_cartilages"}  # one node, several separate pieces
 MIN_PIECE_VOXELS = 30  # a piece smaller than this in a set is a stray label
 LEVEL_STEPS = 12
+SLICE_SMOOTHED = ("sternum", "rib_", "vertebrae_", "costal_cartilages", "sacrum")
+SLICE_BLURS = ((0.5, 1.5), (0.5, 1.0), (0.25, 0.5))  # (in-plane, along slices), source voxels
+STERNUM_BLURS = ((0.5, 3.0), (0.5, 2.0), (0.5, 1.5))  # its ripples span several slices
+RIB_BIN_MM = 3.0
+RIB_SMOOTH_MM = 9.0
 PAD = 2  # empty voxels around a crop, so the surface closes
 UPSAMPLE = 2
 BLUR_VOXELS = (1.0, 0.5, 0.25)  # Gaussian sigmas to try, in source voxels
@@ -178,12 +183,62 @@ def enclosed_volume(poly: vtk.vtkPolyData) -> float:
     return mass.GetVolume()
 
 
+def straighten(fine: np.ndarray, voxels_mm: np.ndarray, spacing: np.ndarray) -> np.ndarray:
+    """Removes steps along a long, thin bone (a rib) from its upsampled mask.
+
+    The centreline is found by walking the mask's voxels from one end (graph
+    distance over 26 neighbours) and averaging them in RIB_BIN_MM bins, then
+    smoothed along its length (Gaussian, RIB_SMOOTH_MM). The mask is warped by
+    that smoothing's shift, interpolated along the walk distance of each fine
+    sample's nearest voxel, before it is blurred and contoured, so a sideways
+    step between scan slices (often breathing) becomes a gentle bend and the
+    surface is never sheared.
+    """
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import dijkstra
+    from scipy.spatial import cKDTree
+
+    tree = cKDTree(voxels_mm)
+    reach = float(np.sqrt(3) * spacing.max()) + 1e-3  # the 26-neighbourhood
+    pairs = tree.query_pairs(r=reach, output_type="ndarray")
+    if len(pairs) == 0:
+        return fine
+    lengths = np.linalg.norm(voxels_mm[pairs[:, 0]] - voxels_mm[pairs[:, 1]], axis=1)
+    n = len(voxels_mm)
+    graph = coo_matrix((lengths, (pairs[:, 0], pairs[:, 1])), shape=(n, n)).tocsr()
+    end = int(np.argmax(np.linalg.norm(voxels_mm - voxels_mm.mean(0), axis=1)))
+    along = dijkstra(graph, directed=False, indices=end)
+    reached = np.isfinite(along)
+    bins = (along[reached] // RIB_BIN_MM).astype(int)
+    count = np.bincount(bins)
+    used = count > 0
+    raw = np.stack([np.bincount(bins, voxels_mm[reached][:, d]) for d in range(3)], 1)
+    raw = raw[used] / count[used, None]
+    if len(raw) < 4:
+        return fine
+    shift = ndimage.gaussian_filter1d(raw, RIB_SMOOTH_MM / RIB_BIN_MM, axis=0, mode="nearest") - raw
+    stations = (np.flatnonzero(used) + 0.5) * RIB_BIN_MM
+
+    # Fine sample j sits at source index (j + 0.5) / UPSAMPLE - 0.5, i.e. in mm:
+    grid = np.indices(fine.shape).reshape(3, -1).T
+    mm = ((grid + 0.5) / UPSAMPLE - 0.5) * spacing
+    nearest = tree.query(mm)[1]
+    t = np.where(reached[nearest], along[nearest], stations[-1])
+    move = np.stack([np.interp(t, stations, shift[:, d]) for d in range(3)], 1)
+    # A sample at x takes the value from x - move: the shape moves by +move.
+    source = (mm - move) / spacing
+    source = (source + 0.5) * UPSAMPLE - 0.5
+    warped = ndimage.map_coordinates(fine, source.T, order=1, mode="constant")
+    return warped.reshape(fine.shape).astype(np.float32)
+
+
 def smoothest(
-    fine: np.ndarray, spacing: np.ndarray, blur: float, target: float, pieces: bool
+    fine: np.ndarray, spacing: np.ndarray, blur, target: float, pieces: bool, post=None
 ) -> vtk.vtkPolyData:
-    """The finished surface of the upsampled mask blurred by `blur` source voxels,
-    at the contour level whose finished volume is the target (bisection)."""
-    field = ndimage.gaussian_filter(fine, blur * UPSAMPLE)
+    """The finished surface of the upsampled mask blurred by `blur` source voxels
+    (one value, or one per axis), at the contour level whose finished volume is
+    the target (bisection)."""
+    field = ndimage.gaussian_filter(fine, np.asarray(blur, dtype=float) * UPSAMPLE)
     image = vtk.vtkImageData()
     image.SetDimensions(*field.shape)
     image.SetSpacing(*(spacing / UPSAMPLE))
@@ -194,15 +249,21 @@ def smoothest(
     low, high = 0.05, 0.95
     for _ in range(LEVEL_STEPS):
         level = (low + high) / 2
-        if enclosed_volume(finished(image, level, pieces)) > target:
+        candidate = finished(image, level, pieces)
+        if enclosed_volume(post(candidate) if post else candidate) > target:
             low = level
         else:
             high = level
-    return finished(image, (low + high) / 2, pieces)
+    result = finished(image, (low + high) / 2, pieces)
+    return post(result) if post else result
 
 
 def surface(
-    path: Path, max_triangles: int, pieces: bool = False
+    path: Path,
+    max_triangles: int,
+    pieces: bool = False,
+    along_slices: bool = False,
+    centreline: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     """Returns (vertices in RAS mm, triangles, voxel volume in ml) for the mask at path.
 
@@ -233,7 +294,19 @@ def surface(
 
     # grid_mode keeps voxel centres aligned: fine sample j sits at (j + 0.5) / 2 - 0.5.
     fine = ndimage.zoom(crop, UPSAMPLE, order=1, grid_mode=True, mode="nearest")
-    for blur in BLUR_VOXELS:
+    if along_slices:
+        # Flat and long bones (sternum, ribs, vertebrae) show the segmentation's
+        # slice-to-slice wobble as ripples, so they are blurred more along the
+        # slice axis than in-plane.
+        axis = int(np.argmax(np.abs(image.affine[2, :3])))
+        label = path.name.removesuffix(".nii.gz")
+        ladder = STERNUM_BLURS if label == "sternum" else SLICE_BLURS
+        blurs = [tuple(z if a == axis else xy for a in range(3)) for xy, z in ladder]
+    else:
+        blurs = list(BLUR_VOXELS)
+    if centreline:
+        fine = straighten(fine, np.argwhere(crop > 0) * spacing, spacing)
+    for blur in blurs:
         poly = smoothest(fine, spacing, blur, target, pieces)
         if abs(enclosed_volume(poly) / target - 1) <= BLUR_TOLERANCE:
             break  # a thin, lobed organ (the pancreas) can need a lighter blur
@@ -399,7 +472,11 @@ def main() -> None:
             missing.append(s.label)
             continue
         try:
-            ras, triangles, voxel_ml = surface(path, cap, pieces=s.label in SETS_OF_PIECES)
+            ras, triangles, voxel_ml = surface(
+                path, cap, pieces=s.label in SETS_OF_PIECES,
+                along_slices=s.label.startswith(SLICE_SMOOTHED),
+                centreline=s.label.startswith("rib_"),
+            )  # fmt: skip
         except ValueError:
             if args.set == "organs":
                 raise
