@@ -8,13 +8,18 @@ Measures the CT, from segment.py's masks:
   the femoral and humeral heads);
 - the trunk's width and depth (body_trunc) halfway up that rise.
 
-It then bakes ANNY on a grid of weight and height phenotypes (0.1 to 0.9),
-caching each body in data/bodies/grid/, measures each the same way (its
-upperleg01 and upperarm01 joints; skin vertices that follow the trunk), and
-prints the weight and height whose rise, width and depth differ least from the
-CT's, summed as squared relative errors; with --scale-free, whose width and
-depth do once ANNY is scaled to the CT's rise, as fit_body.py scales it.
-sources.json then records the choice.
+It then bakes ANNY on a grid of weight and height phenotypes (0.1 to 1.0,
+ANNY's top), caching each body in data/bodies/grid/, measures each the same
+way (its upperleg01 and upperarm01 joints; skin vertices that follow the
+trunk), and takes the weight and height whose rise, width and depth differ
+least from the CT's, summed as squared relative errors. With --scale-free the
+same errors are taken after ANNY is scaled uniformly by uniform_scale(), the
+geometric mean of the rise, width and depth ratios, which is the scale
+blender/fit_body.py applies; so the body chosen is the one whose shape fits
+best at that scale. It then refines around that best in steps of 0.05, and
+warns when the best lies on the edge of what was searched: at ANNY's limit (0
+or 1), the CT may be bigger or smaller than ANNY can be. sources.json then
+records the choice.
 """
 
 from __future__ import annotations
@@ -25,14 +30,26 @@ import struct
 import subprocess
 from pathlib import Path
 
-import nibabel as nib
 import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
-GRID = (0.1, 0.3, 0.5, 0.7, 0.9)
+GRID = (0.1, 0.3, 0.5, 0.7, 0.9, 1.0)
+LIMITS = (0.0, 1.0)  # ANNY's phenotype range
+FINE_STEP = 0.05  # the refinement's step around the grid's best
 LIMBS = ("upperarm", "lowerarm", "wrist", "metacarpal", "finger", "upperleg", "lowerleg",
          "foot", "toe")  # fmt: skip
 SLAB_MM = 10
+SCALE_MEASURES = ("rise", "width", "depth")
+
+
+def uniform_scale(ct: dict, anny: dict) -> tuple[float, dict[str, float]]:
+    """The one scale fit_body.py gives ANNY: the geometric mean of the CT-to-ANNY
+    ratios of the rise, trunk width and trunk depth, and the ratios themselves.
+
+    Imported by blender/fit_body.py, so --scale-free here and the fit there agree.
+    """
+    ratios = {k: float(ct[k] / anny[k]) for k in SCALE_MEASURES}
+    return float(np.exp(np.mean(np.log(list(ratios.values()))))), ratios
 
 
 def fit_sphere(points: np.ndarray) -> np.ndarray:
@@ -43,6 +60,10 @@ def fit_sphere(points: np.ndarray) -> np.ndarray:
 
 def surface_points(path: Path) -> np.ndarray:
     """RAS millimetres of a mask's boundary voxels (canonical orientation)."""
+    # Imported here so blender/fit_body.py can import uniform_scale in Blender's
+    # Python, which has no nibabel.
+    import nibabel as nib
+
     image = nib.as_closest_canonical(nib.load(path))
     mask = np.asanyarray(image.dataobj) > 0
     inner = mask.copy()
@@ -135,14 +156,31 @@ def measure_anny(path: Path) -> dict:
             "depth": float((hi[2] - lo[2]) * 1000)}  # fmt: skip
 
 
+def around(value: float) -> list[float]:
+    """The refinement's values: two fine steps either side of value, within ANNY's range."""
+    return sorted({round(min(max(value + k * FINE_STEP, LIMITS[0]), LIMITS[1]), 2)
+                   for k in range(-2, 3)})  # fmt: skip
+
+
+def edge_warnings(weight: float, height: float, searched: dict[str, list[float]]) -> list[str]:
+    """Where the best weight or height sits on the edge of what was searched."""
+    warnings = []
+    for name, value in (("weight", weight), ("height", height)):
+        if value in LIMITS:
+            warnings.append(f"{name} {value} is at ANNY's limit; the CT may lie beyond it")
+        elif value in (min(searched[name]), max(searched[name])):
+            warnings.append(f"{name} {value} is on the edge of the search; widen it")
+    return warnings
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--case", required=True)
     parser.add_argument("--sex", choices=("male", "female"), required=True)
     parser.add_argument(
         "--scale-free", action="store_true",
-        help="match shape only (width and depth per unit of rise), for fit_body.py, "
-        "which scales ANNY uniformly to the CT's rise",
+        help="match shape only, after the uniform scale fit_body.py applies "
+        "(the geometric mean of the rise, width and depth ratios)",
     )  # fmt: skip
     args = parser.parse_args()
     target = measure_ct(args.case)
@@ -150,31 +188,45 @@ def main() -> None:
           f"{target['depth']:.0f} mm")  # fmt: skip
     grid_dir = ROOT / "data" / "bodies" / "grid"
     grid_dir.mkdir(parents=True, exist_ok=True)
-    results = []
-    for weight in GRID:
-        for height in GRID:
-            path = grid_dir / f"anny-{args.sex}-w{weight}-h{height}.rigged.glb"
-            if not path.exists():
-                subprocess.run(
-                    ["uv", "run", "-q", "--script", str(ROOT / "scripts" / "bake_anny.py"),
-                     args.sex, str(path), "--weight", str(weight), "--height", str(height)],
-                    check=True, capture_output=True,
-                )  # fmt: skip
-            got = measure_anny(path)
-            if args.scale_free:
-                k = target["rise"] / got["rise"]
-                error = sum(((got[m] * k - target[m]) / target[m]) ** 2 for m in ("width", "depth"))
-            else:
-                error = sum(((got[k] - target[k]) / target[k]) ** 2 for k in target)
-            results.append((error, weight, height, got))
-    results.sort(key=lambda r: r[0])
+    scored: dict[tuple[float, float], tuple] = {}
+
+    def score(weights: list[float], heights: list[float]) -> tuple:
+        for weight in weights:
+            for height in heights:
+                if (weight, height) in scored:
+                    continue
+                path = grid_dir / f"anny-{args.sex}-w{weight}-h{height}.rigged.glb"
+                if not path.exists():
+                    subprocess.run(
+                        ["uv", "run", "-q", "--script", str(ROOT / "scripts" / "bake_anny.py"),
+                         args.sex, str(path), "--weight", str(weight), "--height", str(height)],
+                        check=True, capture_output=True,
+                    )  # fmt: skip
+                got = measure_anny(path)
+                k = uniform_scale(target, got)[0] if args.scale_free else 1.0
+                error = sum(((got[m] * k - target[m]) / target[m]) ** 2 for m in SCALE_MEASURES)
+                scored[(weight, height)] = (error, weight, height, got)
+        return min(scored.values(), key=lambda r: r[0])
+
+    coarse = score(list(GRID), list(GRID))
+    fine = {"weight": around(coarse[1]), "height": around(coarse[2])}
+    score(fine["weight"], fine["height"])
+    results = sorted(scored.values(), key=lambda r: r[0])
+    searched = {
+        "weight": sorted({w for w, _ in scored}),
+        "height": sorted({h for _, h in scored}),
+    }
     for error, weight, height, got in results[:5]:
         print(f"  weight {weight} height {height}: rise {got['rise']:.0f}, trunk "
               f"{got['width']:.0f} x {got['depth']:.0f} mm, error {error:.4f}")  # fmt: skip
     best = results[0]
+    warnings = edge_warnings(best[1], best[2], searched)
+    for warning in warnings:
+        print(f"warning: {warning}")
     print(json.dumps({"case": args.case, "sex": args.sex, "weight": best[1], "height": best[2],
                       "ct": {k: round(v) for k, v in target.items()},
-                      "anny": {k: round(v) for k, v in best[3].items()}}))  # fmt: skip
+                      "anny": {k: round(v) for k, v in best[3].items()},
+                      "edge": warnings}))  # fmt: skip
 
 
 if __name__ == "__main__":

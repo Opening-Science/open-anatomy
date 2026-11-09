@@ -22,6 +22,7 @@ jobs:
       - run: pipx run ruff==0.17.4 check scripts blender
       - run: pipx run ruff==0.17.4 format --check scripts blender
       - run: shellcheck scripts/*.sh
+      - run: python3 scripts/bake_check.py
       # No Blender on the runner, so this reports a skip. Run it locally with Blender.
       - run: scripts/self-check.sh
       - run: pipx run uv venv .venv -p 3.12
