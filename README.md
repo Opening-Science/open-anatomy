@@ -88,7 +88,8 @@ MD5 and SHA-256 against [sources.json](sources.json), and unpacks one case.
 `segment.py` runs TotalSegmentator's `total` task for ten structures and scores
 each against the dataset's own reference segmentation. `mesh.py` writes one GLB
 with a closed mesh per structure, named by UBERON ID, and a manifest; the same
-masks always give the same bytes.
+masks always give the same bytes. The GLB credits the dataset's creator, DOI
+and case in its asset copyright, so the attribution travels with the file.
 
 ## Self-checks
 

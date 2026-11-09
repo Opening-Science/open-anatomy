@@ -8,12 +8,17 @@ structure, named by its UBERON ID, plus a manifest.
 For each structure: crop the mask, extract a closed surface with discrete
 flying edges and smooth it (windowed sinc, VTK), keep the largest connected
 piece, decimate to at most
---max-triangles, and orient the normals outward. Coordinates go from the CT's
+--max-triangles, and orient the normals outward. The share of the volume in
+the other pieces goes into the manifest, and above MAX_DROPPED_SHARE the run
+stops: a structure in two pieces is a segmentation problem, not noise. Coordinates go from the CT's
 RAS millimetres to glTF metres (+Y up, +Z anterior, +X the body's left), and
 the whole set is moved so its bounding box is centred on the origin.
 
 Writes data/work/<case>/<case>.organs.glb and manifest.json with each node's
-UBERON ID, system, licence, triangle count and volume, and the GLB's SHA-256.
+UBERON ID, system, licence, triangle count, volume and dropped share, and the
+GLB's SHA-256. The GLB's asset.copyright and asset.extras credit the source
+dataset's creator, DOI and case, so a GLB copied on its own keeps its
+attribution.
 It stops if any surface is open, non-manifold or inside out. VTK runs on
 one thread so the same masks give the same bytes.
 """
@@ -43,10 +48,27 @@ from structures import STRUCTURES, Structure, node_name  # noqa: E402
 # RAS millimetres to glTF metres: X = -R (the body's left), Y = S, Z = A.
 RAS_TO_GLTF = np.array([[-1, 0, 0], [0, 0, 1], [0, 1, 0]], dtype=np.float64) * 0.001
 SOURCE_LICENCE = "CC-BY-4.0"
+SOURCES = json.loads((ROOT / "sources.json").read_text())
+# Pieces other than the largest may hold at most this share of a structure's
+# volume: stray voxels are dropped, a split organ stops the run.
+MAX_DROPPED_SHARE = 0.02
 
 
-def surface(path: Path, max_triangles: int) -> tuple[np.ndarray, np.ndarray]:
-    """Returns (vertices in RAS mm, triangles) for the mask at path."""
+def triangles_of(poly: vtk.vtkPolyData) -> np.ndarray:
+    return vtk_to_numpy(poly.GetPolys().GetConnectivityArray()).reshape(-1, 3)
+
+
+def enclosed_volume(poly: vtk.vtkPolyData) -> float:
+    """Volume enclosed by a closed surface, in its own units cubed."""
+    return abs(signed_volume(vtk_to_numpy(poly.GetPoints().GetData()), triangles_of(poly)))
+
+
+def surface(path: Path, max_triangles: int) -> tuple[np.ndarray, np.ndarray, float]:
+    """Returns (vertices in RAS mm, triangles, dropped share) for the mask at path.
+
+    The dropped share is the part of the smoothed surface's volume that lies
+    in pieces other than the largest one, which is the only one kept.
+    """
     image = nib.load(path)
     data = np.asanyarray(image.dataobj) > 0
     if not data.any():
@@ -85,6 +107,9 @@ def surface(path: Path, max_triangles: int) -> tuple[np.ndarray, np.ndarray]:
     clean.SetInputConnection(largest.GetOutputPort())
     clean.Update()
     poly = clean.GetOutput()
+    smooth.Update()
+    whole = enclosed_volume(smooth.GetOutput())
+    dropped = 1 - enclosed_volume(poly) / whole if whole else 0.0
 
     if poly.GetNumberOfCells() > max_triangles:
         # DecimatePro with topology preserved keeps the surface closed.
@@ -98,11 +123,11 @@ def surface(path: Path, max_triangles: int) -> tuple[np.ndarray, np.ndarray]:
         poly = decimate.GetOutput()
 
     points = vtk_to_numpy(poly.GetPoints().GetData()).astype(np.float64)
-    triangles = vtk_to_numpy(poly.GetPolys().GetConnectivityArray()).reshape(-1, 3)
+    triangles = triangles_of(poly)
     # The padded crop's first voxel sits at the origin.
     ijk = points / spacing + lo - 1
     ras = ijk @ image.affine[:3, :3].T + image.affine[:3, 3]
-    return ras, triangles.astype(np.uint32)
+    return ras, triangles.astype(np.uint32), max(dropped, 0.0)
 
 
 def outward(vertices: np.ndarray, triangles: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -144,10 +169,33 @@ def signed_volume(vertices: np.ndarray, triangles: np.ndarray) -> float:
     return float(np.einsum("ij,ij->i", a, np.cross(b, c)).sum() / 6)
 
 
-def write_glb(path: Path, parts: list[dict]) -> None:
-    """Writes one node and mesh per part, each with its own material."""
+def credit(case: str) -> dict:
+    """The attribution a GLB built from case carries: creator, DOI, licence, case."""
+    if case not in SOURCES["cases"]:
+        sys.exit(f"{case} is not in sources.json, so its source cannot be credited")
+    source = SOURCES["sources"][SOURCES["cases"][case]["source"]]
+    return {
+        "copyright": (
+            f"Derived from case {case} of the {source['title']} by {source['creator']}, "
+            f"doi:{source['doi']}, licensed {source['licence']}"
+        ),
+        "extras": {
+            "source": source["title"],
+            "creator": source["creator"],
+            "doi": source["doi"],
+            "licence": source["licence"],
+            "case": case,
+        },
+    }
+
+
+def write_glb(path: Path, parts: list[dict], attribution: dict | None = None) -> None:
+    """Writes one node and mesh per part, each with its own material.
+
+    attribution (from credit()) goes into asset.copyright and asset.extras.
+    """
     gltf: dict = {
-        "asset": {"version": "2.0", "generator": "open-anatomy mesh.py"},
+        "asset": {"version": "2.0", "generator": "open-anatomy mesh.py", **(attribution or {})},
         "scene": 0,
         "scenes": [{"nodes": list(range(len(parts)))}],
         "nodes": [],
@@ -236,15 +284,31 @@ def main() -> None:
     parser.add_argument("--seg-dir", type=Path, help="default: data/work/<case>/seg")
     parser.add_argument("--out-dir", type=Path, help="default: data/work/<case>")
     parser.add_argument("--max-triangles", type=int, default=40000)
+    parser.add_argument(
+        "--synthetic", action="store_true", help="test masks with no source to credit"
+    )
     args = parser.parse_args()
+    attribution = (
+        {"copyright": "Synthetic test data", "extras": {"case": args.case}}
+        if args.synthetic
+        else credit(args.case)
+    )
 
     work = args.out_dir or ROOT / "data" / "work" / args.case
     work.mkdir(parents=True, exist_ok=True)
     seg_dir = args.seg_dir or work / "seg"
     parts = []
     for s in STRUCTURES:
-        ras, triangles = surface(seg_dir / f"{s.label}.nii.gz", args.max_triangles)
-        parts.append({"structure": s, "vertices": ras @ RAS_TO_GLTF.T, "triangles": triangles})
+        ras, triangles, dropped = surface(seg_dir / f"{s.label}.nii.gz", args.max_triangles)
+        if dropped > MAX_DROPPED_SHARE:
+            sys.exit(
+                f"{s.label}: {dropped:.1%} of its volume is outside its largest piece "
+                f"(at most {MAX_DROPPED_SHARE:.0%} may be dropped)"
+            )
+        parts.append({
+            "structure": s, "vertices": ras @ RAS_TO_GLTF.T, "triangles": triangles,
+            "dropped": dropped,
+        })  # fmt: skip
 
     everything = np.vstack([p["vertices"] for p in parts])
     centre = (everything.min(0) + everything.max(0)) / 2
@@ -258,11 +322,12 @@ def main() -> None:
             sys.exit(f"{name}: the normals point inward")
 
     glb = work / f"{args.case}.organs.glb"
-    write_glb(glb, parts)
+    write_glb(glb, parts, attribution)
     manifest = {
         "case": args.case,
         "file": glb.name,
         "sha256": hashlib.sha256(glb.read_bytes()).hexdigest(),
+        "attribution": attribution["copyright"],
         "units": "metres",
         "axes": "+Y superior, +Z anterior, +X the body's left",
         "centre_offset_m": [round(float(c), 6) for c in centre],
@@ -276,6 +341,7 @@ def main() -> None:
                 "licence": SOURCE_LICENCE,
                 "triangles": int(len(p["triangles"])),
                 "volume_ml": round(signed_volume(p["vertices"], p["triangles"]) * 1e6, 1),
+                "dropped_share": round(p["dropped"], 4),
             }
             for p in parts
         ],
