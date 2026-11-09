@@ -31,8 +31,15 @@ For each reference body, in the gitignored `data/` folder:
 
 The structures are the liver, gallbladder, stomach, pancreas, spleen, both
 kidneys, heart, aorta and inferior vena cava, and the trunk skeleton: the
-vertebrae the scan covers, sacrum, ribs, sternum, costal cartilages,
-clavicles, scapulae, the upper humeri and femurs, and the hip bones. The CTs
+vertebrae, sacrum, ribs, sternum, clavicles, scapulae and hip bones, where the
+scan covers them whole. A structure the scan cuts is left out, and a shoulder
+girdle cut on either side is left out on both, so every body is symmetric; each
+manifest lists what was left out and why.
+
+**Modelled, not from the scan:** the costal cartilages. Their segmentation is
+too broken to show, so each is a smooth bridge from a rib's front end to the
+sternum (ribs 2 to 7, in left-right pairs). Their node and manifest entry say
+`modelled: true`. Everything else is segmented from the CT. The CTs
 were taken lying down and the ANNY bodies stand, so organs sit as they do
 supine.
 
