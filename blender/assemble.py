@@ -83,7 +83,9 @@ MIN_BAND_POINTS = 20  # fewer outline points than this at a level: the outline m
 GIRDLE_RAMP = 0.15  # metres below the humeral heads where the girdle's pull fades out
 GIRDLE_DY = np.round(np.arange(-0.08, 0.0801, 0.01), 3)  # front-to-back shifts tried, metres
 GIRDLE_SX = np.round(np.arange(0.95, 1.2001, 0.025), 3)  # side-to-side scales tried
-SHARE_TIE = 0.001  # settings this close to the best inside share count as tied
+SHARE_TIE = 0.001  # settings this close to the best score count as tied
+OVERLAP_WEIGHT = 2.0  # a share of bone inside an organ costs this many shares outside the skin
+HEART = "UBERON_0000948"  # no bone may end up inside it: the limit is 0
 NEIGHBOUR_M = 0.005  # bones closer than this before the girdle step meet at a joint
 HEAD_DEPTH = 0.045  # metres of bone end used for a joint's sphere fit
 SKIN_RGBA = (0.80, 0.62, 0.52, 0.16)
@@ -206,13 +208,16 @@ def fit_girdle(ct, names, anny: dict, tree: BVHTree, midline: float) -> dict:
     the spine and ribs bend smoothly below it. Organs do not move. The vertical
     shift puts the humeral heads' mean height on ANNY's shoulder joints'; the
     front-to-back shift and a side-to-side scale about the midline are chosen
-    on a grid to keep the most of the moved bones inside the skin. Many settings
-    can keep nearly everything inside; among those within SHARE_TIE of the best,
-    the smallest move wins, and a winner on the grid's edge is reported.
+    on a grid by a score: the share of the moved bones inside the skin, less
+    OVERLAP_WEIGHT times their share inside the organs, which do not move (a
+    sternum pushed into the heart is worse than a rib tip outside the skin).
+    Many settings tie; among those within SHARE_TIE of the best, the smallest
+    move wins, and a winner on the grid's edge is reported.
 
     Also measured, for the report: how far neighbouring bones are pulled apart
-    at their joints (joint_shifts), and how much of each moved bone ends up
-    inside an organ, which does not move (organ_overlap).
+    at their joints (joint_shifts), how much of each moved bone ends up inside
+    an organ (organ_overlap), and any bone left inside the heart, whose limit
+    is 0 (bonesInHeart).
     """
     heads = [humeral_head(coords(names[n]), midline) for n in HUMERUS]
     top = float(np.mean([h[2] for h in heads]))
@@ -241,32 +246,40 @@ def fit_girdle(ct, names, anny: dict, tree: BVHTree, midline: float) -> dict:
         out[:, 2] += w * dz
         return out
 
+    def in_organs(points: np.ndarray) -> float:
+        lo, hi = points.min(0), points.max(0)
+        near = [t for t, olo, ohi in organs.values() if not (np.any(hi < olo) or np.any(ohi < lo))]
+        return max((inside_share(points, t) for t in near), default=0.0)
+
     scores = []
     for dy in GIRDLE_DY:
         for sx in GIRDLE_SX:
-            share = np.mean(
-                [inside_share(place(p[::20], w, dy, sx), tree) for p, w in moving.values()]
+            placed = [place(p[::20], w, dy, sx) for p, w in moving.values()]
+            inside = float(np.mean([inside_share(p, tree) for p in placed]))
+            overlap = float(np.mean([in_organs(p) for p in placed]))
+            scores.append(
+                (inside - OVERLAP_WEIGHT * overlap, inside, overlap, float(dy), float(sx))
             )
-            scores.append((float(share), float(dy), float(sx)))
     top = max(s[0] for s in scores)
     tied = [s for s in scores if s[0] >= top - SHARE_TIE]
 
     def size(s):
-        reach = abs(s[1]) / GIRDLE_DY.max() + abs(s[2] - 1) / (GIRDLE_SX.max() - 1)
-        return (reach, abs(s[1]), abs(s[2] - 1), s[1], s[2])
+        reach = abs(s[3]) / GIRDLE_DY.max() + abs(s[4] - 1) / (GIRDLE_SX.max() - 1)
+        return (reach, abs(s[3]), abs(s[4] - 1), s[3], s[4])
 
-    share, dy, sx = min(tied, key=size)
+    score, share, overlap, dy, sx = min(tied, key=size)
     edge = [k for k, v, grid in (("dy", dy, GIRDLE_DY), ("sx", sx, GIRDLE_SX))
             if v in (float(grid[0]), float(grid[-1]))]  # fmt: skip
     overlap_before = organ_overlap({n: p for n, (p, _) in moving.items()}, organs)
     for name, (points, w) in moving.items():
         set_coords(names[name], place(points, w, dy, sx))
     overlap_after = organ_overlap({n: coords(names[n]) for n in moving}, organs)
+    in_heart = sorted(k.split(" in ")[0] for k in overlap_after if k.endswith(f" in {HEART}"))
     return {
         "dz": dz, "dy": dy, "sx": sx, "weights": weights, "midline": midline,
-        "share": share, "tied": len(tied), "edge": edge,
+        "share": share, "score": score, "overlap": overlap, "tied": len(tied), "edge": edge,
         "joints": joint_shifts(bones, weights, (dy, sx, dz), midline),
-        "overlapBefore": overlap_before, "overlapAfter": overlap_after,
+        "overlapBefore": overlap_before, "overlapAfter": overlap_after, "inHeart": in_heart,
     }  # fmt: skip
 
 
@@ -507,6 +520,10 @@ def main() -> None:
         "jointShifts": girdle["joints"][:10],
         "bonesInOrgansBefore": girdle["overlapBefore"],
         "bonesInOrgansAfter": girdle["overlapAfter"],
+        "score": round(girdle["score"], 4),
+        "overlapWeight": OVERLAP_WEIGHT,
+        "meanBoneShareInOrgans": round(girdle["overlap"], 4),
+        "bonesInHeart": girdle["inHeart"],
         "residualNote": (
             "trunkFitResidualM is the trunk fit's alone. residualM is after the girdle "
             "step, whose vertical shift puts the humeral heads' mean height on ANNY's "
@@ -577,6 +594,8 @@ def main() -> None:
           f"{np.mean(list(inside.values())):.1%}")  # fmt: skip
     if g["onGridEdge"]:
         print(f"warning: the girdle's best setting is on the grid's edge ({g['onGridEdge']})")
+    if g["bonesInHeart"]:
+        print(f"warning: inside the heart after the girdle step (limit 0): {g['bonesInHeart']}")
     print(f"girdle: {g['gridSettingsTied']} grid settings tied; largest joint shift "
           f"{g['largestJointShiftM'] * 100:.1f} cm; bones in organs after: "
           f"{g['bonesInOrgansAfter'] or 'none'}")  # fmt: skip
