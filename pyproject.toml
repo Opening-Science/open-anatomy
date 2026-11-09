@@ -13,6 +13,7 @@ pipeline = ["open-anatomy[mesh]", "TotalSegmentator==2.18.0"]
 
 [tool.ruff]
 line-length = 100
+src = [".", "scripts"]  # imports from scripts/ sort as first-party
 target-version = "py311"
 
 [tool.ruff.lint]

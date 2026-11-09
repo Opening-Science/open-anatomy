@@ -84,6 +84,32 @@
         "location": null,
         "typical": true
       }
+    },
+    "s0197": {
+      "source": "totalsegmentator-v201",
+      "ct_sha256": "ea418c96bd7e4d7b554b5f7baf3b58fb2240f03e91354732bd30d105baff1186",
+      "why": "atlas woman: the one case among 1,228 with C7 to L1, all 24 ribs, sternum, both clavicles and scapulae whole and both humeral heads in the scan, no pathology, no metal, no fracture signs; 8% off the median ribcage of that group",
+      "record": {
+        "sex": "f",
+        "age": 54,
+        "pathology": "none recorded",
+        "location": null,
+        "typical": true,
+        "study": "ct thorax-neck"
+      }
+    },
+    "s0086": {
+      "source": "totalsegmentator-v201",
+      "ct_sha256": "e51725aa8c472998c6751a1825fc994520a78bf97bfde91490adef6934b238fe",
+      "why": "atlas man: the closest man to a complete thorax with no pathology, no metal and no fracture signs; the right clavicle's top is one slice below the scan's padding, and left rib 10 has a segmentation gap over thin bone",
+      "record": {
+        "sex": "m",
+        "age": 71,
+        "pathology": "none recorded",
+        "location": null,
+        "typical": true,
+        "study": "ct neck-thorax-abdomen-pelvis"
+      }
     }
   },
   "bodies": {

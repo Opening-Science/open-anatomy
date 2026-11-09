@@ -13,8 +13,9 @@ outward. Coordinates go from the CT's RAS millimetres to glTF metres (+Y up,
 +Z anterior, +X the body's left), and the whole set is moved so its bounding
 box is centred on the origin. The share of a single structure's voxels outside
 its largest piece goes into the manifest as dropped_share; above
-MAX_DROPPED_SHARE an organ stops the run (an organ in two pieces is a
-segmentation problem, not noise), while a bone only warns.
+MAX_DROPPED_SHARE the run stops (a structure in two pieces is a
+segmentation problem, not noise), unless the pieces are one bone split over
+thin bone, in line and within BRIDGE_GAP_MM: that gap is bridged and noted.
 
 --set organs (the default) needs every organ; --set reference adds the trunk
 skeleton and lists, rather than meshes, a bone the scan misses or cuts (the
@@ -68,6 +69,8 @@ STERNUM_BLURS = ((1.0, 3.0), (0.75, 2.0), (0.5, 1.5))  # its ripples span severa
 CARTILAGE_BLURS = ((1.0, 1.5), (0.75, 1.0), (0.5, 0.75))  # thin, lumpy segmentation
 CARTILAGE_MAX_MM = 120  # the 6th and 7th costal cartilages run 10-12 cm
 JOIN_OVERLAP_MM = 6.0  # a modelled cartilage starts this far inside its rib's end
+CARTILAGE_FLAT = 2.5  # a cartilage band is this many times wider than deep
+ARCH_JOIN = {8: 0.55, 9: 0.5, 10: 0.45}  # where along the cartilage above ribs 8-10 join it
 TANGENT_SHARE = 0.7  # of the rib-to-sternum span, for the cartilage curve's end tangents
 KNOB_MAX_ML = 1.0  # a lump the opening separates from a rib is taken off below this volume
 RIB_BIN_MM = 3.0
@@ -85,6 +88,10 @@ SOURCES = json.loads((ROOT / "sources.json").read_text())
 # Pieces other than the largest may hold at most this share of a single
 # structure's voxels: stray voxels are dropped, a split organ stops the run.
 MAX_DROPPED_SHARE = 0.02
+BRIDGE_GAP_MM = (
+    20.0  # a bone in two pieces this close, in line, is one bone with a segmentation gap
+)
+BRIDGE_END_MM = 15.0  # the length of bone whose direction the gap must follow
 
 
 def triangles_of(poly: vtk.vtkPolyData) -> np.ndarray:
@@ -238,11 +245,14 @@ def sweep(curve: np.ndarray, start_across: np.ndarray, half_w: np.ndarray, half_
 def modelled_cartilage(
     seg_dir: Path, kept_ribs: list[str]
 ) -> tuple[np.ndarray, np.ndarray, list[tuple[str, str]]]:
-    """Costal cartilages modelled, not segmented, for ribs 1 to 7 in left-right
-    pairs. Each leaves its rib along the rib's own end direction with the rib's
-    own cross-section (no step at the join), turns medially and rises into the
-    sternum (more for lower ribs), flattens to about 1.5:1 and widens about 20%
-    where it meets the sternum, ending at the sternum's edge on its own side.
+    """Costal cartilages modelled, not segmented, for ribs 1 to 10 in left-right
+    pairs, as flat bands (about CARTILAGE_FLAT times wider than deep). Each
+    leaves its rib along the rib's own end direction with the rib's own
+    cross-section (no step at the join), then takes the pair's mean section so
+    left and right match. Ribs 1 to 7 turn medially and rise into the sternum
+    (more for lower ribs), widening about 30% on the way, and end at the
+    sternum's edge on their own side. Ribs 8 to 10 rise to join the cartilage
+    above them (ARCH_JOIN says where along it), which makes the costal arch.
     Returns RAS mm vertices and triangles, and each kept rib that gets no
     cartilage with the reason; the manifest marks the node as modelled."""
     from scipy.spatial import cKDTree
@@ -254,52 +264,61 @@ def modelled_cartilage(
     midline = float(np.median(sternum[:, 0]))
     ends, skipped = {}, []
     for rib in kept_ribs:
-        if int(rib.rsplit("_", 1)[1]) > 7:
-            continue  # ribs 8 to 10 reach the sternum through the arch, 11 and 12 not at all
+        number = int(rib.rsplit("_", 1)[1])
+        if number > 10:
+            continue  # ribs 11 and 12 float: no cartilage reaches the arch
         end = rib_end(seg_dir / f"{rib}.nii.gz")
         if end is None:
             skipped.append((rib, "its front end could not be measured"))
-        elif tree.query(end["tip"])[0] > CARTILAGE_MAX_MM:
+        elif number <= 7 and tree.query(end["tip"])[0] > CARTILAGE_MAX_MM:
             skipped.append((rib, f"its end is over {CARTILAGE_MAX_MM} mm from the sternum"))
-        elif tree.query(end["tip"])[0] < 1.0:
+        elif number <= 7 and tree.query(end["tip"])[0] < 1.0:
             skipped.append((rib, "its end already touches the sternum"))
         else:
             ends[rib] = end
 
-    def has_pair(r: str) -> bool:
-        return r.replace("left", "right") in ends and r.replace("right", "left") in ends
+    def partner_of(r: str) -> str:
+        return r.replace("left", "right") if "left" in r else r.replace("right", "left")
 
-    paired = [r for r in ends if has_pair(r)]
-    skipped += [(r, "its pair has no cartilage") for r in ends if not has_pair(r)]
+    paired = [r for r in ends if partner_of(r) in ends]
+    skipped += [(r, "its pair has no cartilage") for r in ends if r not in paired]
+    bands: dict[str, dict] = {}  # curve, half widths and depths per rib, for the arch
     vertices, triangles = [], []
-    for rib in sorted(paired):
-        e = ends[rib]
+    for rib in sorted(paired, key=lambda r: (int(r.rsplit("_", 1)[1]), r)):
+        e, partner = ends[rib], ends[partner_of(rib)]
         number = int(rib.rsplit("_", 1)[1])
+        side = np.sign(e["tip"][0] - midline)
         p0 = e["tip"] - e["direction"] * JOIN_OVERLAP_MM  # start well inside the rib's end
-        # Aim at the sternum's border on the rib's own side, so the lowest
-        # pairs meet it side by side instead of crossing at the xiphoid.
-        side = np.sign(p0[0] - midline)
-        own = sternum[(sternum[:, 0] - midline) * side >= 0]
-        p1 = own[cKDTree(own).query(e["tip"])[1]]
-        medial = np.array([-side, 0.0, 0.0])
-        rise = 0.15 + 0.2 * (number - 2)  # lower cartilages rise more steeply (about 10 to 50 deg)
-        t1 = medial + np.array([0.0, 0.0, rise])
-        t1 /= np.linalg.norm(t1)
-        p1 = p1 + t1 * 2.0  # end just inside the sternum
-        # But no further in than the sternum's midline at that height less the
-        # cartilage's own radius, so a left and a right end never overlap.
-        partner = ends[
-            rib.replace("left", "right") if "left" in rib else rib.replace("right", "left")
-        ]
         w_pair = (e["halfWidth"] + partner["halfWidth"]) / 2
-        radius = w_pair * 1.2
-        level = np.abs(sternum[:, 2] - p1[2]) < 10
-        centre = float(np.median(sternum[level, 0])) if level.any() else midline
-        if (p1[0] - centre) * side < radius:
-            p1[0] = centre + side * radius
+        if number <= 7:
+            # Aim at the sternum's border on the rib's own side, so the lowest
+            # pairs meet it side by side instead of crossing at the xiphoid.
+            own = sternum[(sternum[:, 0] - midline) * side >= 0]
+            p1 = own[cKDTree(own).query(e["tip"])[1]]
+            rise = 0.15 + 0.2 * (number - 2)  # lower cartilages rise more steeply
+            t1 = np.array([-side, 0.0, rise])
+            t1 /= np.linalg.norm(t1)
+            p1 = p1 + t1 * 2.0  # end just inside the sternum
+            # But no further in than the sternum's midline at that height less the
+            # band's own half-width, so a left and a right end never overlap.
+            level = np.abs(sternum[:, 2] - p1[2]) < 10
+            centre = float(np.median(sternum[level, 0])) if level.any() else midline
+            if (p1[0] - centre) * side < w_pair * 1.3:
+                p1[0] = centre + side * w_pair * 1.3
+            end_w, end_d, widen = w_pair * 1.3, w_pair * 1.3 / CARTILAGE_FLAT, 0.3
+        else:
+            above = bands.get(rib.replace(f"_{number}", f"_{number - 1}"))
+            if above is None:
+                skipped.append((rib, "no cartilage above it to join"))
+                continue
+            k = int(round(ARCH_JOIN[number] * (len(above["curve"]) - 1)))
+            p1 = above["curve"][k]
+            t1 = above["curve"][min(k + 1, len(above["curve"]) - 1)] - above["curve"][k - 1]
+            t1 /= np.linalg.norm(t1)
+            end_w, end_d, widen = above["halfW"][k], above["halfD"][k], 0.1
         span = np.linalg.norm(p1 - p0)
         if span < 1.0 or abs(float(e["direction"] @ (p1 - p0))) < 1e-6 * span:
-            skipped.append((rib, "its end lies on the sternum"))
+            skipped.append((rib, "its end lies on its target"))
             continue
         s = np.linspace(0, 1, 32)[:, None]
         h00, h10 = 2 * s**3 - 3 * s**2 + 1, s**3 - 2 * s**2 + s
@@ -307,18 +326,20 @@ def modelled_cartilage(
         reach = TANGENT_SHARE * span  # longer tangents overshoot into a hook on short spans
         curve = h00 * p0 + h10 * e["direction"] * reach + h01 * p1 + h11 * t1 * reach
         f = s[:, 0]
-        blend = np.clip(f / 0.35, 0, 1)  # from the rib's own section to cartilage's within a third
-        # Start with this rib's own section (no step at the join), then take the
-        # pair's mean, so left and right cartilages match.
-        w0, d0 = e["halfWidth"], e["halfDepth"]
-        half_w = ((1 - blend) * w0 + blend * w_pair) * (1 + 0.2 * f**2)
-        half_d = (1 - blend) * d0 + blend * (w_pair / 1.5)
-        # Round the sternal end into a dome, so an end that shows beside the
-        # sternum (as at the xiphoid) is not a flat cut face.
+        blend = np.clip(f / 0.35, 0, 1)  # from the rib's own section to the pair's within a third
+        w_mid, d_mid = w_pair, w_pair / CARTILAGE_FLAT
+        half_w = (1 - blend) * e["halfWidth"] + blend * w_mid
+        half_d = (1 - blend) * e["halfDepth"] + blend * d_mid
+        half_w = half_w * (1 - f**2) + f**2 * end_w * (1 + widen - 0.3)
+        half_d = half_d * (1 - f**2) + f**2 * end_d
+        bands[rib] = {"curve": curve, "halfW": half_w, "halfD": half_d}
+        # Round the far end into a dome, so an end that shows beside the
+        # sternum (as at the xiphoid) is not a flat cut face. A band joining
+        # the cartilage above ends inside it, so its dome stays short.
         tip = curve[-1] - curve[-2]
         tip /= np.linalg.norm(tip)
         angle = np.linspace(0, 0.45 * np.pi, 7)[1:]
-        depth = min(half_w[-1], half_d[-1])
+        depth = min(half_w[-1], half_d[-1]) * (1.0 if number <= 7 else 0.6)
         curve = np.vstack([curve, curve[-1] + np.outer(depth * np.sin(angle), tip)])
         half_w = np.concatenate([half_w, half_w[-1] * np.cos(angle)])
         half_d = np.concatenate([half_d, half_d[-1] * np.cos(angle)])
@@ -410,6 +431,55 @@ def cut_faces(path: Path, outside: tuple[np.ndarray, np.ndarray] | None = None) 
             ras = int(np.argmax(np.abs(towards)))
             faces.add("RAS"[ras] if towards[ras] > 0 else "LPI"[ras])
     return faces
+
+
+def bridge_gap(mask: np.ndarray, spacing: np.ndarray) -> tuple[np.ndarray, float | None]:
+    """One bone split by the segmentation over thin bone (an osteopenic rib,
+    a vertebra's pedicle): when the second-largest piece lies in line with the
+    end of the largest, within BRIDGE_GAP_MM, the gap is filled with a tube of
+    the bone's local radius. Returns the mask and the gap bridged in mm, or
+    None when the pieces are not one bone (too far, or side by side)."""
+    from scipy.spatial import cKDTree
+
+    labels, count = ndimage.label(mask, structure=np.ones((3, 3, 3)))
+    if count < 2:
+        return mask, None
+    order = np.argsort(np.bincount(labels.ravel())[1:])[::-1]
+    a = np.argwhere(labels == order[0] + 1) * spacing
+    b = np.argwhere(labels == order[1] + 1) * spacing
+    distance, nearest = cKDTree(a).query(b)
+    gap = float(distance.min())
+    if gap > BRIDGE_GAP_MM:
+        return mask, None
+    # The facing ends: the points of each piece within a voxel of the gap.
+    close = distance <= gap + spacing.max()
+    pb = b[close].mean(0)
+    pa = a[np.unique(nearest[close])].mean(0)
+    end = a[np.linalg.norm(a - pa, axis=1) < BRIDGE_END_MM]
+    if len(end) < 10:
+        return mask, None
+    centred = end - end.mean(0)
+    axis = np.linalg.svd(centred, full_matrices=False)[2][0]
+    along = (pb - pa) / max(float(np.linalg.norm(pb - pa)), 1e-6)
+    if abs(float(axis @ along)) < np.cos(np.radians(35)):
+        return mask, None  # beside the bone, not along it: another structure's label
+    # The end's cross-section, as a covariance across the bone, sets the fill's
+    # shape: a flat rib gets a flat bridge.
+    perpendicular = centred - np.outer(centred @ axis, axis)
+    covariance = perpendicular.T @ perpendicular / len(perpendicular)
+    covariance += np.eye(3) * (0.5 * spacing.max()) ** 2  # never thinner than a voxel
+    shape = np.linalg.pinv(covariance)
+    reach = float(np.sqrt(np.linalg.eigvalsh(covariance).max())) * 2.0
+    lo = np.floor((np.minimum(pa, pb) - reach) / spacing).astype(int).clip(0)
+    hi = np.minimum(np.ceil((np.maximum(pa, pb) + reach) / spacing).astype(int) + 1, mask.shape)
+    grid = np.indices(hi - lo).reshape(3, -1).T + lo
+    points = grid * spacing
+    t = np.clip((points - pa) @ (pb - pa) / max(gap**2, 1e-12), 0, 1)
+    offset = points - (pa + t[:, None] * (pb - pa))
+    inside = np.einsum("ij,jk,ik->i", offset, shape, offset) <= 1.9**2
+    bridged = mask.copy()
+    bridged[tuple(grid[inside].T)] = True
+    return bridged, round(gap, 1)
 
 
 def trim_knobs(mask: np.ndarray, voxel_ml: float) -> tuple[np.ndarray, float]:
@@ -919,20 +989,29 @@ def main() -> None:
                 sys.exit(f"{s.label}: the mask is empty in {args.case}; organs must be whole")
             missing.append(s.label)
             continue
+        bridged_mm = None
+        if share > MAX_DROPPED_SHARE and bone and path.exists():
+            # A bone split by the segmentation over thin bone is one bone: the
+            # gap is bridged and the surface redone. Anything else in pieces
+            # (a mislabelled neighbour) stops the build, as a split organ does.
+            image = nib.load(path)
+            spacing = np.linalg.norm(image.affine[:3, :3], axis=0)
+            whole = knobless if knobless is not None else np.asanyarray(image.dataobj) > 0
+            whole, bridged_mm = bridge_gap(whole, spacing)
+            if bridged_mm is not None:
+                ras, triangles, voxel_ml, share = surface(
+                    path, cap, along_slices=s.label.startswith(SLICE_SMOOTHED),
+                    centreline=s.label.startswith("rib_"), mask=whole,
+                )  # fmt: skip
         if share > MAX_DROPPED_SHARE:
-            message = (
-                f"{s.label}: {share:.1%} of its volume is outside its largest piece "
-                f"(at most {MAX_DROPPED_SHARE:.0%} may be dropped from an organ)"
+            sys.exit(
+                f"{s.label}: {share:.1%} of its volume is outside its largest piece in "
+                f"{args.case} (at most {MAX_DROPPED_SHARE:.0%}); a split structure stops the build"
             )
-            if not bone:
-                sys.exit(message)
-            # A segmented bone often comes in pieces (a vertebra's processes, a
-            # humerus leaving and re-entering the scan); its share is recorded
-            # in the manifest and said here, not silently dropped.
-            print(f"warning: {message}", file=sys.stderr)
         parts.append({
             "structure": s, "vertices": ras @ RAS_TO_GLTF.T, "triangles": triangles,
             "voxel_ml": voxel_ml, "trimmed_ml": round(trimmed_ml, 2), "dropped_share": share,
+            "bridged_mm": bridged_mm,
         })  # fmt: skip
 
     everything = np.vstack([p["vertices"] for p in parts])
@@ -993,6 +1072,7 @@ def main() -> None:
                 "volume_drift": round(p["drift"], 4) if p["drift"] is not None else None,
                 **({"knobs_trimmed_ml": p["trimmed_ml"]} if p.get("trimmed_ml") else {}),
                 **({"dropped_share": round(p["dropped_share"], 4)} if "dropped_share" in p else {}),
+                **({"bridged_gap_mm": p["bridged_mm"]} if p.get("bridged_mm") else {}),
             }
             for p in parts
         ],

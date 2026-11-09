@@ -371,16 +371,50 @@ def test_a_split_organ_stops_the_run(tmp_path: Path, monkeypatch: pytest.MonkeyP
         run_main(tmp_path, monkeypatch, {}, shares={"aorta": 0.3})
 
 
-def test_a_bone_in_pieces_warns_and_records_its_share(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    manifest = run_main(tmp_path, monkeypatch, {}, shares={"vertebrae_L2": 0.6})
-    assert "warning: vertebrae_L2: 60.0%" in capsys.readouterr().err
-    l2 = next(n for n in manifest["nodes"] if n["term"] == next(
-        s.term for s in REFERENCE if s.label == "vertebrae_L2"
-    ))  # fmt: skip
-    assert l2["dropped_share"] == 0.6
-    assert isinstance(manifest["dropped"], list)  # the dropped structures, a separate thing
+def test_a_split_bone_stops_the_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(SystemExit, match="vertebrae_L2: 60.0% .* a split structure stops"):
+        run_main(tmp_path, monkeypatch, {}, shares={"vertebrae_L2": 0.6})
+
+
+def two_piece_rib(gap_voxels: int, sideways: bool = False) -> Mask:
+    """A straight rib 4 voxels across along x, in two pieces: the second in line
+    beyond a gap, or beside the first."""
+    mask = np.zeros((60, 30, 30), bool)
+    mask[5:30, 13:17, 13:17] = True
+    if sideways:
+        mask[10:25, 13 + 4 + gap_voxels : 17 + 4 + gap_voxels, 13:17] = True
+    else:
+        mask[30 + gap_voxels : 55, 13:17, 13:17] = True
+    return mask
+
+
+def test_bridge_gap_joins_two_pieces_of_one_bone_in_line() -> None:
+    mask = two_piece_rib(gap_voxels=5)  # 5 voxels at 0.8 mm: a 4 mm gap
+    bridged, gap = mesh.bridge_gap(mask, SPACING)
+    assert gap == pytest.approx(6 * SPACING[0], abs=0.1)  # voxel centres 6 apart
+    _, count = mesh.ndimage.label(bridged, structure=np.ones((3, 3, 3)))
+    assert count == 1
+    assert bridged[32, 15, 15] and not bridged[32, 25, 15]  # filled along the bone, not elsewhere
+
+
+@pytest.mark.parametrize("gap_voxels, sideways", [(30, False), (3, True)])
+def test_bridge_gap_leaves_pieces_that_are_not_one_bone(gap_voxels: int, sideways: bool) -> None:
+    mask = two_piece_rib(gap_voxels, sideways)  # too far, or beside the bone
+    bridged, gap = mesh.bridge_gap(mask, SPACING)
+    assert gap is None
+    assert (bridged == mask).all()
+
+
+def test_a_bridged_rib_is_whole_and_its_gap_is_recorded(tmp_path: Path) -> None:
+    mask = two_piece_rib(gap_voxels=5)
+    spacing = SPACING
+    bridged, gap = mesh.bridge_gap(mask, spacing)
+    path = save(tmp_path / "rib.nii.gz", mask)
+    _, _, _, share_before = mesh.surface(path, 5000, centreline=False)
+    _, _, _, share_after = mesh.surface(path, 5000, centreline=False, mask=bridged)
+    assert share_before > mesh.MAX_DROPPED_SHARE
+    assert share_after == 0.0
+    assert gap is not None and gap > 0
 
 
 def test_a_cut_organ_stops_the_reference_set(
