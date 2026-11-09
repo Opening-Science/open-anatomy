@@ -14,6 +14,7 @@ import nibabel as nib
 import numpy as np
 import numpy.typing as npt
 import pytest
+
 import size_body
 
 FloatArray = npt.NDArray[np.float64]
