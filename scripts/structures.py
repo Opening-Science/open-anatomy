@@ -36,6 +36,8 @@ STRUCTURES: tuple[Structure, ...] = (
 )  # fmt: skip
 
 # TotalSegmentator tasks whose weights are Apache-2.0. Licensed tasks are never run.
+# The README lists them under "Openly available for any usage (Apache-2.0 license)":
+# https://github.com/wasserth/TotalSegmentator#subtasks
 ALLOWED_TASKS = frozenset({"total", "body", "vertebrae_body"})
 
 
