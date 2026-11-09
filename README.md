@@ -88,7 +88,8 @@ MD5 and SHA-256 against [sources.json](sources.json), and unpacks one case.
 `segment.py` runs TotalSegmentator's `total` task for ten structures and scores
 each against the dataset's own reference segmentation. `mesh.py` writes one GLB
 with a closed mesh per structure, named by UBERON ID, and a manifest; the same
-masks always give the same bytes.
+masks always give the same bytes. The GLB credits the dataset's creator, DOI
+and case in its asset copyright, so the attribution travels with the file.
 
 ## Reference bodies
 
@@ -101,7 +102,8 @@ uv run --script scripts/bake_anny.py male data/bodies/anny-adult-m.rigged.glb
 uv run --script scripts/bake_anny.py female data/bodies/anny-adult-f.rigged.glb
 ```
 
-The bake is pinned by SHA-256 in [sources.json](sources.json).
+The bake is pinned by SHA-256 in [sources.json](sources.json);
+`python3 scripts/bake_check.py --bake` bakes both again and compares.
 
 Each reference body puts one CT's organs and trunk skeleton inside an ANNY
 body and attaches every structure to ANNY's skeleton. The male uses case s0903,
@@ -124,6 +126,7 @@ them all.
 ```bash
 .venv/bin/python scripts/mesh_check.py   # meshes synthetic ellipsoids; no download
 scripts/self-check.sh                     # every Blender self-check; skips without Blender
+python3 scripts/bake_check.py             # the bake's lock, and any baked body
 ```
 
 See [CONTRIBUTING](CONTRIBUTING.md) to take part.
