@@ -73,17 +73,28 @@ def test_a_mask_touching_any_face_is_cut(tmp_path: Path, axis: int, end: str) ->
     assert mesh.cut_reason(path) == f"cut by the scan's edge (axis {axis})"
 
 
-def test_fewer_than_min_voxels_is_a_stray_label(tmp_path: Path) -> None:
-    mask = box((20, 20, 20), (5, 5, 5), (8, 8, 16))  # 3 x 3 x 11 = 99 voxels
-    assert mask.sum() == mesh.MIN_VOXELS - 1
+VOXEL_ML = float(SPACING.prod()) / 1000  # 0.96 mm3
+
+
+def test_under_min_ml_is_a_stray_label(tmp_path: Path) -> None:
+    mask = box((40, 40, 40), (5, 5, 5), (17, 30, 6))  # 12 x 25 x 1 = 300 voxels, 0.288 ml
+    assert mask.sum() * VOXEL_ML < mesh.MIN_ML
     path = save(tmp_path / "m.nii.gz", mask)
     assert mesh.cut_reason(path) == "absent or a stray label"
 
 
-def test_exactly_min_voxels_counts_as_a_structure(tmp_path: Path) -> None:
-    mask = box((20, 20, 20), (5, 5, 5), (10, 10, 9))  # 5 x 5 x 4 = 100 voxels
-    assert mask.sum() == mesh.MIN_VOXELS
+def test_at_least_min_ml_counts_as_a_structure(tmp_path: Path) -> None:
+    mask = box((40, 40, 40), (5, 5, 5), (18, 30, 6))  # 13 x 25 x 1 = 325 voxels, 0.312 ml
+    assert mask.sum() * VOXEL_ML >= mesh.MIN_ML
     assert mesh.cut_reason(save(tmp_path / "m.nii.gz", mask)) is None
+
+
+def test_the_size_limit_is_a_volume_not_a_voxel_count(tmp_path: Path) -> None:
+    # The same 200 voxels are 0.19 ml at 0.8 x 0.8 x 1.5 mm but 0.68 ml at 1.5 mm.
+    mask = box((40, 40, 40), (5, 5, 5), (15, 25, 6))
+    assert mesh.cut_reason(save(tmp_path / "fine.nii.gz", mask)) == "absent or a stray label"
+    coarse = np.diag([-1.5, 1.5, 1.5, 1.0])
+    assert mesh.cut_reason(save(tmp_path / "coarse.nii.gz", mask, coarse)) is None
 
 
 def test_an_empty_mask_is_a_stray_label_not_a_crash(tmp_path: Path) -> None:
@@ -106,15 +117,18 @@ def run_main(
     reasons: dict[str, str],
     which: str = "reference",
     faces: set[str] | None = None,
+    shares: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     surfaced: list[str] = []
+    shares = shares or {}
 
     def fake_reason(path: Path) -> str | None:
         return reasons.get(path.name.removesuffix(".nii.gz"))
 
-    def fake_surface(path: Path, max_triangles: int, **_: object) -> tuple[Any, Any, float]:
-        surfaced.append(path.name.removesuffix(".nii.gz"))
-        return TETRA + len(surfaced), TETRA_TRIANGLES.copy(), TETRA_ML
+    def fake_surface(path: Path, max_triangles: int, **_: object) -> tuple[Any, Any, float, float]:
+        label = path.name.removesuffix(".nii.gz")
+        surfaced.append(label)
+        return TETRA + len(surfaced), TETRA_TRIANGLES.copy(), TETRA_ML, shares.get(label, 0.0)
 
     def fake_cartilage(seg_dir: Path, kept_ribs: list[str]) -> tuple[Any, Any, Any]:
         return TETRA.copy(), TETRA_TRIANGLES.copy(), []
@@ -128,7 +142,8 @@ def run_main(
     monkeypatch.setattr(mesh, "cut_faces", fake_faces)
     seg = tmp_path / "seg"
     seg.mkdir(exist_ok=True)
-    argv = ["mesh.py", "--case", "c", "--seg-dir", str(seg), "--out-dir", str(tmp_path)]
+    argv = ["mesh.py", "--case", "c", "--synthetic", "--seg-dir", str(seg),
+            "--out-dir", str(tmp_path)]  # fmt: skip
     monkeypatch.setattr(sys, "argv", [*argv, "--set", which])
     mesh.main()
     manifest: dict[str, Any] = json.loads((tmp_path / f"c.{which}.manifest.json").read_text())
@@ -287,6 +302,43 @@ def test_the_organ_set_ignores_cuts(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert [n["name"] for n in manifest["nodes"]] == [node_name(s.term) for s in ORGANS]
 
 
+def test_a_split_organ_stops_the_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(SystemExit, match="aorta: 30.0% of its volume is outside"):
+        run_main(tmp_path, monkeypatch, {}, shares={"aorta": 0.3})
+
+
+def test_a_bone_in_pieces_warns_and_records_its_share(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    manifest = run_main(tmp_path, monkeypatch, {}, shares={"vertebrae_L2": 0.6})
+    assert "warning: vertebrae_L2: 60.0%" in capsys.readouterr().err
+    l2 = next(n for n in manifest["nodes"] if n["term"] == next(
+        s.term for s in REFERENCE if s.label == "vertebrae_L2"
+    ))  # fmt: skip
+    assert l2["dropped_share"] == 0.6
+    assert isinstance(manifest["dropped"], list)  # the dropped structures, a separate thing
+
+
+def test_a_cut_organ_stops_the_reference_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with pytest.raises(SystemExit, match="liver: cut by the scan"):
+        run_main(tmp_path, monkeypatch, {"liver": "cut by the scan's edge (axis 2)"})
+
+
+def test_a_split_organ_mask_has_its_dropped_share_measured(tmp_path: Path) -> None:
+    # An ellipsoid cut in two by a 2-slice gap: the smaller half is dropped and counted.
+    shape = (40, 40, 40)
+    organ = ellipsoid(shape, np.array([10.0, 8.0, 20.0]))
+    organ[:, :, 22:24] = False
+    path = save(tmp_path / "split.nii.gz", organ)
+    _, _, _, share = mesh.surface(path, 40000)
+    labels, _ = mesh.ndimage.label(organ, structure=np.ones((3, 3, 3)))
+    sizes = np.bincount(labels.ravel())[1:]
+    assert share == pytest.approx(1 - sizes.max() / sizes.sum())
+    assert share > mesh.MAX_DROPPED_SHARE
+
+
 # The volume-keeping surface
 
 
@@ -299,7 +351,7 @@ def closed_volume_ml(vertices: FloatArray, triangles: npt.NDArray[np.uint32]) ->
 def test_an_ellipsoid_keeps_its_voxel_volume(tmp_path: Path) -> None:
     mask = ellipsoid((40, 40, 24), np.array([10.0, 7.0, 12.0]))
     path = save(tmp_path / "e.nii.gz", mask)
-    vertices, triangles, voxel_ml = mesh.surface(path, 40000)
+    vertices, triangles, voxel_ml, _ = mesh.surface(path, 40000)
     assert voxel_ml == pytest.approx(mask.sum() * SPACING.prod() / 1000)
     assert closed_volume_ml(vertices, triangles) == pytest.approx(
         voxel_ml, rel=mesh.MAX_VOLUME_DRIFT
@@ -312,7 +364,7 @@ def test_a_thin_plate_keeps_its_voxel_volume(tmp_path: Path) -> None:
     # Two voxels thick: a fixed 0.5 contour of the blurred mask would shrink it a lot.
     mask = box((30, 30, 16), (5, 5, 7), (25, 25, 9))
     path = save(tmp_path / "plate.nii.gz", mask)
-    vertices, triangles, voxel_ml = mesh.surface(path, 40000, along_slices=True)
+    vertices, triangles, voxel_ml, _ = mesh.surface(path, 40000, along_slices=True)
     assert closed_volume_ml(vertices, triangles) == pytest.approx(
         voxel_ml, rel=mesh.MAX_VOLUME_DRIFT
     )
@@ -320,7 +372,7 @@ def test_a_thin_plate_keeps_its_voxel_volume(tmp_path: Path) -> None:
 
 def test_the_surface_lies_where_the_affine_puts_the_mask(tmp_path: Path) -> None:
     mask = ellipsoid((40, 40, 24), np.array([10.0, 7.0, 12.0]))
-    vertices, _, _ = mesh.surface(save(tmp_path / "e.nii.gz", mask), 40000)
+    vertices, _, _, _ = mesh.surface(save(tmp_path / "e.nii.gz", mask), 40000)
     ijk_centre = np.argwhere(mask).mean(0)
     ras_centre = FLIPPED[:3, :3] @ ijk_centre + FLIPPED[:3, 3]
     np.testing.assert_allclose((vertices.min(0) + vertices.max(0)) / 2, ras_centre, atol=1.0)
@@ -340,8 +392,9 @@ def test_only_the_largest_piece_counts_for_a_single_structure(tmp_path: Path) ->
     big = box((40, 30, 20), (4, 5, 5), (20, 25, 15))
     stray = box((40, 30, 20), (30, 10, 8), (34, 14, 12))
     path = save(tmp_path / "m.nii.gz", big | stray)
-    vertices, triangles, voxel_ml = mesh.surface(path, 40000)
+    vertices, triangles, voxel_ml, share = mesh.surface(path, 40000)
     assert voxel_ml == pytest.approx(big.sum() * SPACING.prod() / 1000)
+    assert share == pytest.approx(stray.sum() / (big.sum() + stray.sum()))
     assert closed_volume_ml(vertices, triangles) == pytest.approx(
         voxel_ml, rel=mesh.MAX_VOLUME_DRIFT
     )
@@ -353,7 +406,8 @@ def test_a_set_keeps_every_piece_but_loose_blobs(tmp_path: Path) -> None:
     two = box(shape, (24, 5, 5), (36, 25, 15))
     blob = box(shape, (46, 12, 8), (49, 15, 11))  # 27 voxels, under MIN_PIECE_VOXELS
     path = save(tmp_path / "set.nii.gz", one | two | blob)
-    vertices, triangles, voxel_ml = mesh.surface(path, 40000, pieces=True)
+    vertices, triangles, voxel_ml, share = mesh.surface(path, 40000, pieces=True)
+    assert share == 0.0  # a set keeps its pieces; nothing counts as dropped
     assert voxel_ml == pytest.approx((one.sum() + two.sum()) * SPACING.prod() / 1000)
     assert closed_volume_ml(vertices, triangles) == pytest.approx(
         voxel_ml, rel=mesh.MAX_VOLUME_DRIFT
@@ -367,9 +421,9 @@ def test_a_set_keeps_every_piece_but_loose_blobs(tmp_path: Path) -> None:
 def test_decimating_hard_keeps_the_surface_closed(tmp_path: Path) -> None:
     mask = ellipsoid((40, 40, 24), np.array([10.0, 7.0, 12.0]))
     path = save(tmp_path / "e.nii.gz", mask)
-    _, full, _ = mesh.surface(path, 10**9)
+    _, full, _, _ = mesh.surface(path, 10**9)
     for budget in (200, 500, 2000):
-        vertices, triangles, voxel_ml = mesh.surface(path, budget)
+        vertices, triangles, voxel_ml, _ = mesh.surface(path, budget)
         assert len(triangles) <= max(int(budget * 2.25), len(full))
         assert closed_volume_ml(vertices, triangles) == pytest.approx(voxel_ml, rel=0.08)
 
