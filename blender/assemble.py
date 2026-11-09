@@ -7,6 +7,8 @@ Inputs (after `--`):
   --body <glb>        a rigged ANNY body from scripts/bake_anny.py
   --ct <glb>          the CT structures from mesh.py --set reference
   --outline <glb>     the CT's trunk outline from the same run (measured, never exported)
+  [--landmarks <glb>] the cut femurs and humeri from the same run, for their heads
+                      (measured, never exported)
   --out <glb>         the reference body: ANNY's skin and skeleton plus the CT nodes
   --report <json>     landmarks, the fit, the bone each node follows, containment
   [--render-dir <dir> --render-name <stem>]   front and three-quarter renders
@@ -275,6 +277,7 @@ def main() -> None:
     args = script_args()
     body_path, ct_path = option(args, "--body"), option(args, "--ct")
     outline_path = option(args, "--outline")
+    landmarks_path = option(args, "--landmarks")
     out, report_path = option(args, "--out"), option(args, "--report")
     if not (body_path and ct_path and outline_path and out and report_path):
         sys.stderr.write("assemble.py needs --body, --ct, --outline, --out and --report.\n")
@@ -293,17 +296,28 @@ def main() -> None:
     for o in ct:
         o.name = o.get("term", o.name).replace(":", "_")
         names[o.name] = o
+    # Bones the scan cut (the femurs, often the humeri) are not in the body, but
+    # their heads still give the joint landmarks: they come from the landmarks
+    # file, follow the same transform, and are deleted before export.
+    marks = []
+    if landmarks_path:
+        marks = [o for o in import_glb(landmarks_path) if o.type == "MESH"]
+        bake_world(marks)
+        for o in marks:
+            o.name = "landmark:" + o.get("term", o.name).replace(":", "_")
+    bones = dict(names)
+    bones.update({o.name.removeprefix("landmark:"): o for o in marks})
 
     # Landmarks: CT bone ends against ANNY's joints, in Blender's frame (+Z up).
     ct_marks, anny_marks = {}, {}
-    midline = float(np.mean([coords(names[n])[:, 0].mean() for n in FEMUR]))
+    midline = float(np.mean([coords(bones[n])[:, 0].mean() for n in FEMUR]))
     for table, finder, bone in (
         (FEMUR, femoral_head, "upperleg01"),
         (HUMERUS, humeral_head, "upperarm01"),
     ):
         for name, side in table.items():
             key = f"{bone}.{side}"
-            ct_marks[key] = finder(coords(names[name]), midline)
+            ct_marks[key] = finder(coords(bones[name]), midline)
             anny_marks[key] = joint(armature, key)
     c = {k: ct_marks[k] for k in sorted(ct_marks)}
     a = {k: anny_marks[k] for k in sorted(anny_marks)}
@@ -333,7 +347,7 @@ def main() -> None:
         np.mean(centres_a, 0)[1] - scale[1] * np.mean(centres_c, 0)[1],
         np.mean([m[2] for m in a.values()]) - sz * np.mean([m[2] for m in c.values()]),
     ])  # fmt: skip
-    for o in ct:
+    for o in [*ct, *marks]:
         set_coords(o, coords(o) * scale + shift)
     tree = skin_tree(skin)
     if inside_share(np.array([joint(armature, "spine03")]), tree) < 1:
@@ -341,10 +355,14 @@ def main() -> None:
         sys.exit(1)
     residuals = {k: float(np.linalg.norm(c[k] * scale + shift - a[k])) for k in c}
     before = {o.name: inside_share(coords(o)[::4], tree) for o in ct}
-    girdle = fit_girdle(ct, names, a, tree, midline=shift[0] + scale[0] * midline)
-    for key, name in (("upperarm01.L", "FMA_23131"), ("upperarm01.R", "FMA_23130")):
-        head = humeral_head(coords(names[name]), girdle["midline"])
-        residuals[key] = float(np.linalg.norm(head - a[key]))
+    has_girdle = all(n in names for n in (*CLAVICLE, *SCAPULA, *HUMERUS))
+    if has_girdle:
+        girdle = fit_girdle(ct, names, a, tree, midline=shift[0] + scale[0] * midline)
+        for key, name in (("upperarm01.L", "FMA_23131"), ("upperarm01.R", "FMA_23130")):
+            head = humeral_head(coords(names[name]), girdle["midline"])
+            residuals[key] = float(np.linalg.norm(head - a[key]))
+    for o in marks:
+        bpy.data.objects.remove(o)  # measured only; never exported or rendered
 
     # Attach each node rigidly to one ANNY bone, keeping where it is.
     followed = {}
@@ -358,16 +376,22 @@ def main() -> None:
         followed[o.name] = bone
 
     inside = {o.name: round(inside_share(coords(o)[::4], tree), 3) for o in ct}
-    moved = [n for n, w in girdle["weights"].items() if w > 0]
-    girdle_report = {
-        "verticalShiftM": round(girdle["dz"], 4),
-        "frontToBackShiftM": round(girdle["dy"], 4),
-        "sideToSideScale": round(girdle["sx"], 3),
-        "weights": {n: round(w, 2) for n, w in sorted(girdle["weights"].items()) if w > 0},
-        "insideSkinBefore": round(float(np.mean([before[n] for n in moved])), 3),
-        "insideSkinAfter": round(float(np.mean([inside[n] for n in moved])), 3),
-        "allInsideSkinBefore": round(float(np.mean(list(before.values()))), 3),
-    }
+    if not has_girdle:
+        girdle_report = {"skipped": "no shoulder girdle in this body (the scan cut it)"}
+    moved = [n for n, w in girdle["weights"].items() if w > 0] if has_girdle else []
+    girdle_report = (
+        girdle_report
+        if not has_girdle
+        else {
+            "verticalShiftM": round(girdle["dz"], 4),
+            "frontToBackShiftM": round(girdle["dy"], 4),
+            "sideToSideScale": round(girdle["sx"], 3),
+            "weights": {n: round(w, 2) for n, w in sorted(girdle["weights"].items()) if w > 0},
+            "insideSkinBefore": round(float(np.mean([before[n] for n in moved])), 3),
+            "insideSkinAfter": round(float(np.mean([inside[n] for n in moved])), 3),
+            "allInsideSkinBefore": round(float(np.mean(list(before.values()))), 3),
+        }
+    )
 
     bpy.data.objects.remove(outline)  # measured only; never exported or rendered
     mat = skin_material()
@@ -419,9 +443,12 @@ def main() -> None:
     print(f"scale {rounded(scale, 3)}, landmark residuals (cm): "
           + ", ".join(f"{k} {v * 100:.1f}" for k, v in residuals.items()))  # fmt: skip
     g = girdle_report
-    print(f"girdle: inside {g['insideSkinBefore']:.1%} -> {g['insideSkinAfter']:.1%} "
-          f"over {len(moved)} bones; all nodes {g['allInsideSkinBefore']:.1%} -> "
-          f"{np.mean(list(inside.values())):.1%}")  # fmt: skip
+    if has_girdle:
+        print(f"girdle: inside {g['insideSkinBefore']:.1%} -> {g['insideSkinAfter']:.1%} "
+              f"over {len(moved)} bones; all nodes {g['allInsideSkinBefore']:.1%} -> "
+              f"{np.mean(list(inside.values())):.1%}")  # fmt: skip
+    else:
+        print(f"girdle: {g['skipped']}; all nodes {np.mean(list(inside.values())):.1%} inside")
     outside = {k: v for k, v in inside.items() if v < 0.95}
     print(f"{len(ct)} nodes; under 95% inside the skin: {outside or 'none'}")
 
