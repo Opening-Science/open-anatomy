@@ -1,8 +1,8 @@
 # open-anatomy
 
 Human anatomy models built from openly licensed CT scans by scripts anyone can
-run. Each structure (organ, bone, cartilage) is segmented from a real CT,
-meshed, named by its [UBERON](https://obophenotype.github.io/uberon/) or
+run. Each organ and bone is segmented from a real CT, meshed, named by its
+[UBERON](https://obophenotype.github.io/uberon/) or
 [FMA](https://bioportal.bioontology.org/ontologies/FMA) ID, and placed inside
 an open, rigged ANNY body. The same inputs give the same files.
 
@@ -38,10 +38,10 @@ manifest lists what was left out and why.
 
 **Modelled, not from the scan:** the costal cartilages. Their segmentation is
 too broken to show, so each is a smooth bridge from a rib's front end to the
-sternum (ribs 2 to 7, in left-right pairs). Their node and manifest entry say
-`modelled: true`. Everything else is segmented from the CT. The CTs
-were taken lying down and the ANNY bodies stand, so organs sit as they do
-supine.
+sternum (ribs up to the seventh whose end lies near the sternum, in left-right
+pairs). Their node and manifest entry say `modelled: true`. Everything else is
+segmented from the CT. The CTs were taken lying down and the ANNY bodies
+stand, so organs sit as they do supine.
 
 Large inputs and outputs never go into git; [sources.json](sources.json) pins
 every download and every build by SHA-256.
@@ -58,8 +58,10 @@ uv venv .venv -p 3.12 && uv pip install --python .venv/bin/python -e '.[pipeline
 
 `reference.py` runs, for each reference body:
 
-1. `scripts/fetch.py`: downloads the TotalSegmentator dataset from Zenodo,
-   checks it against its pins, and unpacks the case;
+1. `scripts/fetch.py`: downloads the case's TotalSegmentator archive from
+   Zenodo, checks it against its pins, and unpacks the case. s0903, s0859 and
+   s1086 come from the small subset (a 3.2 GB zip), s0667 from the full
+   dataset (a 23.6 GB zip), so a default run fetches both, about 27 GB;
 2. `scripts/segment.py`: TotalSegmentator's Apache-2.0 tasks only, scored
    against the dataset's own reference masks;
 3. `scripts/mesh.py`: smooth, closed surfaces that keep each mask's volume;
@@ -79,7 +81,8 @@ scripts/self-check.sh   # Blender's; skips without Blender
 - **Code** is under the [Apache License 2.0](LICENSE).
 - **Assets** derived from CC BY sources go in [`assets/cc-by/`](assets/cc-by/),
   under CC BY; from CC BY-SA sources in [`assets/cc-by-sa/`](assets/cc-by-sa/).
-  Share-alike material never mixes into the CC BY folder.
+  Share-alike material never mixes into the CC BY folder. No asset is
+  released yet, so both folders hold only their LICENSE file.
 
 ## Credits
 
@@ -109,9 +112,14 @@ scripts/self-check.sh   # Blender's; skips without Blender
 - **ANNY (CC0 shapes, Apache-2.0 code):** CC0 asks for no credit; we credit
   NAVER LABS Europe anyway (arXiv:2511.03589), as good practice. The bake uses
   only the CC0 shapes, never ANNY's non-commercial SMPL/SMPL-X data.
+- **MakeHuman (CC0):** ANNY's shapes derive from MakeHuman's; we credit the
+  MakeHuman project as well.
 - **BodyParts3D and HRA:** nothing from them is used in this repository's
   outputs, so no credit is needed. `blender/fit_atlas.py` can fit them; if
   you use it, credit them, and put BodyParts3D results (CC BY-SA) under
   `assets/cc-by-sa/`.
+
+Non-commercial datasets and models, and scans of real people outside the
+TotalSegmentator dataset's open CTs, are never used.
 
 See [CONTRIBUTING](CONTRIBUTING.md) to take part.
