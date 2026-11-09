@@ -7,6 +7,7 @@ demo body, damaged on purpose (`--demo-damage`), never on a person's scan.
 
 Inputs (after `--`):
   --in <glb> --out-dir <dir> [--name <stem>] [--lods 0.5,0.25] [--voxel <metres>]
+     [--no-meshopt]       write uncompressed GLBs (for tools that read plain glTF)
      [--smooth <Taubin passes, default 5>] [--report <json>]
   --demo-damage [--seed 7]  first punch holes, add 2 mm noise and flip patches of
                             faces, then clean, and compare with the undamaged mesh
@@ -206,21 +207,25 @@ def run_one(
     smooth: int,
     voxel: float | None,
     reference: BVHTree | None,
+    meshopt: bool = True,
 ) -> dict:
     before = measure(obj)
     before_error = surface_error(obj, reference) if reference else None
+    # The cleaned surface's distance from the input itself: the measure that the
+    # person stays the person, for a real scan with no undamaged original.
+    as_input = bvh_of(obj)
     clean(obj, smooth, voxel)
     after = measure(obj)
     outputs = []
     base = Path(out_dir) / f"{name}.lod0.glb"
-    export_glb([obj], str(base))
+    export_glb([obj], str(base), meshopt=meshopt)
     outputs.append(
         {"lod": 0, "ratio": 1.0, "file": base.name, "sha256": sha256(str(base)), **measure(obj)}
     )
     for i, ratio in enumerate(lods, start=1):
         copy = lod(obj, ratio)
         path = Path(out_dir) / f"{name}.lod{i}.glb"
-        export_glb([copy], str(path))
+        export_glb([copy], str(path), meshopt=meshopt)
         outputs.append(
             {
                 "lod": i,
@@ -236,6 +241,7 @@ def run_one(
         "outputs": outputs,
         "voxelM": voxel,
         "smoothIterations": smooth,
+        "inputToOutputMm": surface_error(obj, as_input),
     }
     if reference:
         result["surfaceErrorBefore"] = before_error
@@ -282,7 +288,8 @@ def run(args: list[str]) -> None:
         report["damage"] = damage(
             obj, int(option(args, "--seed", "7") or 7), 0.002, holes=8, flips=6
         )
-    report.update(run_one(obj, out_dir, name, lods, smooth, voxel, reference))
+    meshopt = "--no-meshopt" not in args
+    report.update(run_one(obj, out_dir, name, lods, smooth, voxel, reference, meshopt))
     report_path = option(args, "--report", str(Path(out_dir) / f"{name}.cleanup.json"))
     write_json(report_path, report)
     print(f"cleanup_mesh: wrote {out_dir} and {report_path}")
