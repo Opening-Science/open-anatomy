@@ -1006,7 +1006,11 @@ def main() -> None:
     settled, fragments = {}, []
     if args.set in RULED_SETS:
         reasons = reference_rules(reasons)
-        bones = [s.label for s in SETS[args.set] if s.system == "skeletal" and not reasons[s.label]]
+        bones = [
+            s.label
+            for s in SETS[args.set]
+            if s.system == "skeletal" and s.label not in SETS_OF_PIECES and not reasons[s.label]
+        ]  # a set of pieces (the segmented cartilage) is many pieces by nature
         settled, fragments = settle_fragments(seg_dir, bones)
         for note in fragments:
             print(f"{note['label']}: {note['ml']} ml {note['action']}"

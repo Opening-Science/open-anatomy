@@ -40,16 +40,17 @@ from twinblend.blender_env import (  # noqa: E402
 # Quad faces per bone class: enough for the vertebrae's processes and the
 # sacral foramina, fewer for the long smooth bones.
 FACES = {
-    "vertebra": 6000,
-    "sacrum": 9000,
-    "hip bone": 9000,
-    "rib": 2500,
-    "sternum": 3000,
-    "clavicle": 2000,
-    "scapula": 6000,
-    "humerus": 3000,
-    "femur": 3000,
+    "vertebra": 8000,
+    "sacrum": 12000,
+    "hip bone": 12000,
+    "rib": 4000,
+    "sternum": 6000,
+    "clavicle": 4000,
+    "scapula": 10000,
+    "humerus": 4000,
+    "femur": 4000,
 }
+RETRIES = (1.0, 1.5, 2.25)  # face budget multipliers tried until the result is sound
 MIN_FACES = 800
 MAX_DRIFT_MM = 1.0  # a retopologised surface may sit this far from the CT surface at most
 
@@ -97,13 +98,13 @@ def lost_detail(original: bpy.types.Object, obj: bpy.types.Object) -> float:
     return worst
 
 
-def remesh(obj: bpy.types.Object, faces: int) -> set[str]:
+def remesh(obj: bpy.types.Object, faces: int, seed: int = 0) -> set[str]:
     with bpy.context.temp_override(
         object=obj, active_object=obj, selected_objects=[obj], selected_editable_objects=[obj]
     ):
         return bpy.ops.object.quadriflow_remesh(
             target_faces=faces, use_preserve_sharp=False, use_preserve_boundary=False,
-            use_mesh_symmetry=False, smooth_normals=True, seed=0,
+            use_mesh_symmetry=False, smooth_normals=True, seed=seed,
         )  # fmt: skip
 
 
@@ -176,23 +177,32 @@ def main() -> None:
         original.data = obj.data.copy()
         bpy.context.scene.collection.objects.link(original)
         budget = max(FACES[bone_class(obj.get("name", obj.name))], MIN_FACES)
-        try:
-            result = remesh(obj, budget)
-        except RuntimeError as error:
-            result = {str(error)}
-        if "FINISHED" not in result or measure(obj)["quads"] == 0:
-            report["kept"].append({"node": obj.name, "why": f"QuadriFlow gave up: {result}"})
-            obj.data = original.data
-            bpy.data.objects.remove(original)
-            continue
-        wrap_to(obj, original)
-        after = measure(obj)
-        drift = lost_detail(original, obj) * 1000
-        after["driftMm"] = round(drift, 3)
-        ok = after["open_edges"] == 0 and after["non_manifold_edges"] == 0 and drift <= MAX_DRIFT_MM
+        tries, ok, after = [], False, {}
+        for k, factor in enumerate(RETRIES):
+            # A thin or holed bone can come out open or smoothed over at a low
+            # budget; a denser remesh with another seed usually settles it.
+            obj.data = original.data.copy()
+            try:
+                result = remesh(obj, int(budget * factor), seed=k)
+            except RuntimeError as error:
+                result = {str(error)}
+            if "FINISHED" not in result or measure(obj)["quads"] == 0:
+                tries.append(
+                    {"faces": int(budget * factor), "why": f"QuadriFlow gave up: {result}"}
+                )
+                continue
+            wrap_to(obj, original)
+            after = measure(obj)
+            drift = lost_detail(original, obj) * 1000
+            after["driftMm"] = round(drift, 3)
+            ok = after["open_edges"] == 0 and after["non_manifold_edges"] == 0
+            ok = ok and drift <= MAX_DRIFT_MM
+            tries.append({"faces": int(budget * factor), **after})
+            if ok:
+                break
         if not ok:
             report["kept"].append(
-                {"node": obj.name, "why": "open, non-manifold or drifted", **after}
+                {"node": obj.name, "why": "open, non-manifold or drifted", "tries": tries}
             )
             obj.data = original.data
         bpy.data.objects.remove(original)
