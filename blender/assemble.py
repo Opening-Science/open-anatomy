@@ -21,6 +21,10 @@ outline (TotalSegmentator's body_trunc, --outline) against ANNY's skin
 vertices that follow the trunk, measured at four fractions of that rise: the
 median ratios set the scales and the outlines' centres the shift. The joints
 are not used for width because ANNY's sit wider than anatomical joint centres.
+A second step then fits the shoulder girdle (fit_girdle): clavicles, scapulae
+and humeri, with the upper thorax following by height, so that a girdle a
+supine or stooped scan holds low or forward lands on ANNY's shoulders. The
+report gives the inside-skin share of the moved bones before and after.
 No rotation:
 the CT is axial and ANNY stands upright in the same frame. Each node is then
 parented rigidly to one ANNY bone: femur to upperleg01, humerus to upperarm01,
@@ -68,6 +72,7 @@ LIMB_GROUPS = ("upperarm", "lowerarm", "wrist", "metacarpal", "finger", "upperle
                "foot", "toe")  # fmt: skip
 LEVELS = (0.25, 0.4, 0.55, 0.7)  # fractions of the hip-to-shoulder rise
 SLAB = 0.01  # metres either side of a level
+GIRDLE_RAMP = 0.15  # metres below the humeral heads where the girdle's pull fades out
 HEAD_DEPTH = 0.045  # metres of bone end used for a joint's sphere fit
 SKIN_RGBA = (0.80, 0.62, 0.52, 0.16)
 BACKGROUND = (0.82, 0.82, 0.80)
@@ -117,6 +122,52 @@ def inside_share(points: np.ndarray, skin: BVHTree) -> float:
         if hit[0] is not None and (Vector(p) - hit[0]).dot(hit[1]) < 0:
             inside += 1
     return inside / len(points)
+
+
+def fit_girdle(ct, names, anny: dict, tree: BVHTree, midline: float) -> dict:
+    """Second step: moves the shoulder girdle and upper thorax onto ANNY's shoulders.
+
+    Clavicles, scapulae and humeri move fully. The other bones move by a weight
+    that ramps from 0 at GIRDLE_RAMP below the humeral heads to 1 at their
+    height, by each bone's centroid, so the upper thorax follows the girdle and
+    the spine and ribs bend smoothly below it. Organs do not move. The vertical
+    shift puts the humeral heads' mean height on ANNY's shoulder joints'; the
+    front-to-back shift and a side-to-side scale about the midline are chosen
+    on a grid to keep the most of the moved bones inside the skin.
+    """
+    heads = [humeral_head(coords(names[n]), midline) for n in HUMERUS]
+    top = float(np.mean([h[2] for h in heads]))
+    dz = float(np.mean([anny[f"upperarm01.{s}"][2] for s in "LR"]) - top)
+    weights = {}
+    for o in ct:
+        if o.get("system") != "skeletal":
+            continue
+        if o.name in CLAVICLE or o.name in SCAPULA or o.name in HUMERUS:
+            weights[o.name] = 1.0
+            continue
+        height = coords(o).mean(0)[2]
+        weights[o.name] = float(np.clip((height - (top - GIRDLE_RAMP)) / GIRDLE_RAMP, 0, 1))
+    moving = {n: (coords(names[n]), w) for n, w in weights.items() if w > 0}
+
+    def place(points, w, dy, sx):
+        out = points.copy()
+        out[:, 0] = midline + (points[:, 0] - midline) * (1 + w * (sx - 1))
+        out[:, 1] += w * dy
+        out[:, 2] += w * dz
+        return out
+
+    best = (-1.0, 0.0, 1.0)
+    for dy in np.round(np.arange(-0.08, 0.0801, 0.01), 3):
+        for sx in np.round(np.arange(0.95, 1.2001, 0.025), 3):
+            share = np.mean(
+                [inside_share(place(p[::20], w, dy, sx), tree) for p, w in moving.values()]
+            )
+            if share > best[0] + 1e-9:
+                best = (share, float(dy), float(sx))
+    _, dy, sx = best
+    for name, (points, w) in moving.items():
+        set_coords(names[name], place(points, w, dy, sx))
+    return {"dz": dz, "dy": dy, "sx": sx, "weights": weights, "midline": midline}
 
 
 def trunk_points(skin: bpy.types.Object) -> np.ndarray:
@@ -289,6 +340,11 @@ def main() -> None:
         sys.stderr.write("The skin's normals do not point outward; containment is unreliable.\n")
         sys.exit(1)
     residuals = {k: float(np.linalg.norm(c[k] * scale + shift - a[k])) for k in c}
+    before = {o.name: inside_share(coords(o)[::4], tree) for o in ct}
+    girdle = fit_girdle(ct, names, a, tree, midline=shift[0] + scale[0] * midline)
+    for key, name in (("upperarm01.L", "FMA_23131"), ("upperarm01.R", "FMA_23130")):
+        head = humeral_head(coords(names[name]), girdle["midline"])
+        residuals[key] = float(np.linalg.norm(head - a[key]))
 
     # Attach each node rigidly to one ANNY bone, keeping where it is.
     followed = {}
@@ -302,6 +358,16 @@ def main() -> None:
         followed[o.name] = bone
 
     inside = {o.name: round(inside_share(coords(o)[::4], tree), 3) for o in ct}
+    moved = [n for n, w in girdle["weights"].items() if w > 0]
+    girdle_report = {
+        "verticalShiftM": round(girdle["dz"], 4),
+        "frontToBackShiftM": round(girdle["dy"], 4),
+        "sideToSideScale": round(girdle["sx"], 3),
+        "weights": {n: round(w, 2) for n, w in sorted(girdle["weights"].items()) if w > 0},
+        "insideSkinBefore": round(float(np.mean([before[n] for n in moved])), 3),
+        "insideSkinAfter": round(float(np.mean([inside[n] for n in moved])), 3),
+        "allInsideSkinBefore": round(float(np.mean(list(before.values()))), 3),
+    }
 
     bpy.data.objects.remove(outline)  # measured only; never exported or rendered
     mat = skin_material()
@@ -337,6 +403,7 @@ def main() -> None:
         "blender": bpy.app.version_string,
         "scale": rounded(scale),
         "shiftM": rounded(shift),
+        "girdle": girdle_report,
         "outlineRatios": {"width": rounded(widths, 3), "depth": rounded(depths, 3)},
         "meanInsideSkin": round(float(np.mean(list(inside.values()))), 3),
         "landmarks": {
@@ -351,6 +418,10 @@ def main() -> None:
     write_json(report_path, report)
     print(f"scale {rounded(scale, 3)}, landmark residuals (cm): "
           + ", ".join(f"{k} {v * 100:.1f}" for k, v in residuals.items()))  # fmt: skip
+    g = girdle_report
+    print(f"girdle: inside {g['insideSkinBefore']:.1%} -> {g['insideSkinAfter']:.1%} "
+          f"over {len(moved)} bones; all nodes {g['allInsideSkinBefore']:.1%} -> "
+          f"{np.mean(list(inside.values())):.1%}")  # fmt: skip
     outside = {k: v for k, v in inside.items() if v < 0.95}
     print(f"{len(ct)} nodes; under 95% inside the skin: {outside or 'none'}")
 

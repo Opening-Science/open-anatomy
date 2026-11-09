@@ -112,8 +112,8 @@ the female s0859, both from the TotalSegmentator dataset (CC BY 4.0):
 ```
 
 [`blender/assemble.py`](blender/assemble.py) fits the CT to the body: height
-from the hip and shoulder joints, width and depth from the trunk outlines. It
-reports each joint's residual and the share of every structure inside the
+from the hip and shoulder joints, width and depth from the trunk outlines, then
+the shoulder girdle and upper thorax onto ANNY's shoulders. It reports each joint's residual and the share of every structure inside the
 skin. The CT was taken lying down and ANNY stands, so the organs sit as they do
 supine. Other headless Blender 5.2.x scripts in [`blender/`](blender/) clean
 meshes up and fit an atlas to a body limb by limb; `scripts/blender.py` runs

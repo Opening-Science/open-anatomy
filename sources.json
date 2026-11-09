@@ -74,7 +74,7 @@
       "case": "s0903",
       "built": {
         "file": "anny-adult-m.reference.glb",
-        "sha256": "9d2b11d1bc47a9cfc8f5da51a34e68138e848a59dd55477d123bd6220ffbd172",
+        "sha256": "28776eb14c8c58c89ba2a9b51838a088480749f38884e6bfa79a5a89e68775d1",
         "ctSha256": "e63480228e8f1b5249e980ed18f5685ae9093714c537ad8e6bff7a0c7517e2b3",
         "note": "built on Linux x86_64, RTX 2080 Ti, Blender 5.2.3; GPU segmentation is not bit-exact across machines"
       }
@@ -84,7 +84,7 @@
       "case": "s0859",
       "built": {
         "file": "anny-adult-f.reference.glb",
-        "sha256": "5b7a1aba80982a03e5307383b9cb6ad073cef0a036c905e1d893c02861492caf",
+        "sha256": "f3b60118575e00938ccf10c66a8aba2d83be5a050317ce71f3bc30ec8923c4ff",
         "ctSha256": "be6d6118c98e66c27120ca0db3c91885381506ef6c9b43ff53544a73f6981e2c",
         "note": "built on Linux x86_64, RTX 2080 Ti, Blender 5.2.3; GPU segmentation is not bit-exact across machines"
       }
