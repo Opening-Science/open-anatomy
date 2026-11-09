@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Lint and self-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: pipx run ruff==0.17.4 check scripts
+      - run: pipx run ruff==0.17.4 format --check scripts
+      - run: shellcheck scripts/*.sh
+      # No Blender on the runner, so this reports a skip. Run it locally with Blender.
+      - run: scripts/self-check.sh

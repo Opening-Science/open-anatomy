@@ -1,0 +1,14 @@
+open-anatomy
+Copyright (c) 2026 Open Science Foundation (Opening Science)
+
+The code in this repository is licensed under the Apache License 2.0 (LICENSE).
+Assets are licensed as the LICENSE file in their folder under assets/ says.
+
+Sources
+-------
+
+Each source used to build a released asset is listed here with its licence and
+credit line. Input data is downloaded from the source's official page into the
+gitignored data/ folder and is not distributed with this repository.
+
+(No sources are used yet.)
