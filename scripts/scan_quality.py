@@ -230,9 +230,11 @@ def main() -> None:
         v, e = r["validity"], r["errorAgainstUndamagedMm"]
         holes = f"holes {v['before']['holes']} -> {v['after']['holes']}"
         flips = f"flipped {v['before']['inconsistentEdges']} -> {v['after']['inconsistentEdges']}"
-        error = f"error vs undamaged {e['before']['meanMm']} -> {e['after']['meanMm']} mm"
         shape = r["shapeChangeMm"]
-        error += f", input to output mean {shape['meanMm']} / p95 {shape['p95Mm']} mm"
+        error = f"input to output mean {shape['meanMm']} / p95 {shape['p95Mm']} mm"
+        if e["before"]:  # only a demo run has an undamaged body to compare against
+            before, after = e["before"]["meanMm"], e["after"]["meanMm"]
+            error = f"error vs undamaged {before} -> {after} mm, {error}"
         body = ", ".join(
             f"{k} {m['mm']}{'' if m['plausible'] else ' (OUT)'}"
             for k, m in r["bodyMeasuresMm"].items()
