@@ -5,6 +5,7 @@ surface. Blender 5.2.x, headless.
   blender --background --factory-startup --python blender/retopo.py -- \
       --in <reference glb> --out <glb> --report <json>
   blender --background --factory-startup --python blender/retopo.py -- --self-check
+  [--only <node>] retopologises that node alone, for looking at one bone
 
 Each bone (system "skeletal", not modelled) is remeshed with QuadriFlow to a
 face budget set by its class (FACES), then wrapped back onto its own original
@@ -20,6 +21,7 @@ system, licence, modelled) travel through unchanged.
 
 from __future__ import annotations
 
+import math
 import sys
 from pathlib import Path
 
@@ -99,6 +101,38 @@ def lost_detail(original: bpy.types.Object, obj: bpy.types.Object) -> float:
 
 
 def remesh(obj: bpy.types.Object, faces: int, seed: int = 0) -> set[str]:
+    """QuadriFlow on obj. It refuses a mesh with doubled vertices or a
+    non-manifold edge, so those are mended first. If it still refuses (it
+    does on some long thin bones that are manifold by every other test), the
+    mesh is voxel-remeshed at a size that gives about the same face count:
+    that is an all-quad manifold mesh too, only less evenly flowing."""
+    mend(obj)
+    result = quadriflow(obj, faces, seed)
+    if "FINISHED" not in result:
+        bm = bmesh.new()
+        bm.from_mesh(obj.data)
+        area = sum(f.calc_area() for f in bm.faces)
+        bm.free()
+        obj.data.remesh_voxel_size = max(math.sqrt(area / faces), 0.0005)
+        obj.data.remesh_voxel_adaptivity = 0.0
+        with bpy.context.temp_override(object=obj, active_object=obj, selected_objects=[obj]):
+            result = bpy.ops.object.voxel_remesh()
+    return result
+
+
+def mend(obj: bpy.types.Object) -> None:
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=1e-6)
+    bmesh.ops.dissolve_degenerate(bm, dist=1e-6, edges=bm.edges)
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)  # one stray inward face stops QuadriFlow
+    if bm.calc_volume(signed=True) < 0:
+        bmesh.ops.reverse_faces(bm, faces=bm.faces)
+    bm.to_mesh(obj.data)
+    bm.free()
+
+
+def quadriflow(obj: bpy.types.Object, faces: int, seed: int) -> set[str]:
     with bpy.context.temp_override(
         object=obj, active_object=obj, selected_objects=[obj], selected_editable_objects=[obj]
     ):
@@ -170,8 +204,9 @@ def main() -> None:
         sys.exit(2)
     empty_scene()
     objects = import_glb(source)
+    only = option(args, "--only")  # one node, to look at a bone that gives trouble
     report = {"bones": {}, "kept": []}
-    for obj in [o for o in objects if is_bone(o)]:
+    for obj in [o for o in objects if is_bone(o) and (not only or o.name == only)]:
         before = measure(obj)
         original = obj.copy()
         original.data = obj.data.copy()
