@@ -15,6 +15,9 @@ A case qualifies when, in its reference masks:
   the arm hangs as ANNY's does;
 - ribs 5 to 8 are there to measure the ribcage;
 - the study covers the trunk and the record names no trauma (fractures).
+  meta.csv's pathology column takes a fixed set of values (PATHOLOGIES); the
+  match ignores case, "trauma" and anything naming a fracture are excluded,
+  and a value outside the set stops the run rather than slipping through.
 
 For each it prints sex, age, study, the recorded pathology, the ribcage width
 and the hip-to-shoulder rise, and with --out writes them as JSON. Masks are
@@ -49,6 +52,18 @@ MAX_SKULL_VOXELS = 1000
 MIN_FEMUR_MM = 60
 MIN_HUMERUS_MM = 80
 MAX_ARM_ANGLE_DEG = 45
+# Every pathology value in v2.0.1's meta.csv, lower-cased ("" when none is given).
+PATHOLOGIES = {
+    "no_pathology", "tumor", "unclear", "vascular", "trauma", "inflammation", "other",
+    "bleeding", "",
+}  # fmt: skip
+EXCLUDED = {"trauma"}  # injuries, fractures among them
+
+
+def excluded(pathology: str) -> bool:
+    """True for a record that names trauma or a fracture, whatever its case."""
+    value = pathology.strip().lower()
+    return value in EXCLUDED or "trauma" in value or "fractur" in value
 
 
 class Case:
@@ -131,11 +146,16 @@ def main() -> None:
     archive = zipfile.ZipFile(path)
     meta = archive.read("meta.csv").decode("utf-8-sig")
     rows = list(csv.DictReader(io.StringIO(meta), delimiter=";"))
+    values = collections.Counter(r["pathology"].strip().lower() for r in rows)
+    print("# pathology values: " + ", ".join(f"{v or '(none)'} {n}" for v, n in values.items()))
+    unknown = sorted(set(values) - PATHOLOGIES)
+    if unknown:
+        sys.exit(f"meta.csv has pathology values select_cases.py does not know: {unknown}")
     reasons, found = collections.Counter(), []
     for row in rows:
         if row["study_type"] not in TRUNK_STUDIES or row["gender"] not in ("m", "f"):
             continue
-        if "trauma" in row["pathology"]:
+        if excluded(row["pathology"]):
             reasons[(row["gender"], "trauma")] += 1
             continue
         result = check(Case(archive, row["image_id"]))

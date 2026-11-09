@@ -5,16 +5,18 @@ Runs the headless Blender scripts in blender/ with a checked Blender.
   python scripts/blender.py cleanup --in <glb> --out-dir <dir> [cleanup_mesh.py options]
   python scripts/blender.py qa --in <glb> --manifest <json> --out-dir <dir>
   python scripts/blender.py assemble --body <glb> --ct <glb> --out <glb> --report <json>
-  python scripts/blender.py fit --atlas <glb> --scheme bodyparts3d|hra --body <glb> \
+  python scripts/blender.py fit --atlas <glb> --scheme hra --body <glb> \
       --out <glb> --report <json> [fit_atlas.py options]
+      (--scheme bodyparts3d also needs --allow-share-alike: its licence may be CC BY-SA)
 
 Blender comes from BLENDER_BIN, else `blender` on PATH, and must be 5.2.x LTS.
 Without one, self-check says so and exits 0, so CI (which has none) skips;
-the other tasks fail. self-check
-runs this repository's glTF round trip and both ported scripts on synthetic
-meshes. Inputs under a data/vitronic/ folder are refused: the scripts are only
-ever run on synthetic bodies, open atlases and open CT data, never on a scan of
-a person.
+the other tasks fail. self-check runs this repository's glTF round trip, both
+ported scripts and qa.py on synthetic meshes. Any argument that points under a
+data/vitronic/ folder is refused, input or output, given as `--flag path` or
+`--flag=path`: the scripts are only ever run on synthetic bodies, open atlases
+and open CT data, never on a scan of a person. self-check tests that guard
+first, with or without Blender.
 
 Ported from twin-llm's scripts/blender/run.ts and blender-bin.ts (a4058fa8,
 Apache-2.0).
@@ -54,10 +56,39 @@ def run(blender: str, script: Path, args: list[str]) -> int:
     return subprocess.run([*command, "--python", str(script), "--", *args], cwd=ROOT).returncode
 
 
-def personal_inputs(args: list[str]) -> list[str]:
-    flags = ("--in", "--atlas", "--body", "--ct")  # qa's --in is checked here too
-    paths = [args[i + 1] for i, a in enumerate(args[:-1]) if a in flags]
-    return [p for p in paths if PERSONAL.search(str(Path(p).resolve()))]
+def personal_paths(args: list[str]) -> list[str]:
+    """Every argument that points under data/vitronic/, whichever flag it belongs to.
+
+    Each argument is checked, and the value of each `--flag=value`, so a new
+    input or output flag needs no entry here. A relative path is checked both
+    from here and from the repository root, where Blender runs.
+    """
+    values = [a.split("=", 1)[1] if a.startswith("--") and "=" in a else a for a in args]
+    found = []
+    for value in filter(None, values):
+        seen = (value, str(Path(value).resolve()), str((ROOT / value).resolve()))
+        if any(PERSONAL.search(v) for v in seen):
+            found.append(value)
+    return found
+
+
+def guard_check() -> list[str]:
+    """Failures of personal_paths on cases it must refuse and cases it must let through."""
+    refused = [
+        ["--in", "data/vitronic/scan.glb"],
+        ["--in=data/vitronic/scan.glb"],
+        ["--body", "x.glb", "--out", "data/vitronic/out.glb"],
+        ["--render-dir=data/vitronic/renders"],
+        ["--outline", "/home/someone/twin-llm/data/vitronic/p1/outline.glb"],
+        ["--report", str(ROOT / "data" / "vitronic" / "fit.json")],
+    ]
+    allowed = [
+        ["--in", "data/work/s1086/s1086.organs.glb", "--out-dir", "data/work/clean"],
+        ["--atlas=data/atlas/hra.glb", "--scheme", "hra", "--max-shift", "0.5"],
+        ["--out", "data/vitronic-like/x.glb"],
+    ]
+    failures = [f"not refused: {a}" for a in refused if not personal_paths(a)]
+    return failures + [f"refused: {a}" for a in allowed if personal_paths(a)]
 
 
 def main() -> int:
@@ -65,6 +96,11 @@ def main() -> int:
     if task not in ("self-check", "cleanup", "fit", "assemble", "qa"):
         print(__doc__.split("\n\n")[1], file=sys.stderr)
         return 2
+    if task == "self-check":
+        if failures := guard_check():
+            print("personal-data guard failed: " + "; ".join(failures), file=sys.stderr)
+            return 1
+        print("personal-data guard passed", flush=True)
     blender = find_blender()
     if blender is None:
         # Only the self-check skips (for CI); a build without Blender must fail.
@@ -75,7 +111,7 @@ def main() -> int:
         shown = ".".join(map(str, found)) if found else "not a Blender this script can read"
         print(f"{blender} is {shown}; the pipeline needs Blender 5.2.x LTS.", file=sys.stderr)
         return 1
-    if refused := personal_inputs(args):
+    if refused := personal_paths(args):
         print(f"Refusing personal data: {', '.join(refused)}", file=sys.stderr)
         return 2
 
@@ -84,6 +120,7 @@ def main() -> int:
             (ROOT / "scripts" / "self_check.py", []),
             (ROOT / "blender" / "fit_atlas.py", ["--self-check"]),
             (ROOT / "blender" / "cleanup_mesh.py", ["--self-check"]),
+            (ROOT / "blender" / "qa.py", ["--self-check"]),
         ]
         failed = [s.name for s, a in checks if run(blender, s, a) != 0]
         print("all Blender self-checks passed" if not failed else f"failed: {', '.join(failed)}")

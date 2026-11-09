@@ -34,7 +34,8 @@ def main() -> None:
     qa = json.loads((args.qa_dir / "qa.json").read_text())
     structures = qa["structures"]
     tiles = args.qa_dir / "tiles"
-    size = Image.open(tiles / f"{structures[0]['name']}.view0.png").size[0]
+    drawn = [s for s in structures if not s.get("empty")]
+    size = Image.open(tiles / f"{drawn[0]['name']}.view0.png").size[0] if drawn else 320
     font = ImageFont.load_default(size=15)
     small = ImageFont.load_default(size=12)
     header = 34
@@ -49,6 +50,12 @@ def main() -> None:
             draw.text((LABEL_WIDTH + i * size + 8, 10), name, fill=TEXT, font=small)
         for row, s in enumerate(page):
             y = header + row * size
+            if s.get("empty"):
+                # An empty mesh has no tiles; its row shows only the flag.
+                draw.text((10, y + 10), s["label"], fill=TEXT, font=font)
+                draw.text((10, y + 30), "empty mesh", fill=FLAG, font=small)
+                draw.line([(0, y), (sheet.width, y)], fill=(70, 70, 74))
+                continue
             for col, view in enumerate(VIEWS):
                 tile = Image.open(tiles / f"{s['name']}.{view}.png").convert("RGB")
                 sheet.paste(tile, (LABEL_WIDTH + col * size, y))
@@ -56,7 +63,8 @@ def main() -> None:
                 (s["label"], TEXT, font),
                 (s["name"], TEXT, small),
                 (f"{s['vertices']} vertices, {s['fragments']} piece(s)", TEXT, small),
-                (f"holes {s['holes']}, crossings {s['selfIntersections']}", TEXT, small),
+                (f"open edges {s['holes']}, non-manifold {s['nonManifoldEdges']}", TEXT, small),
+                (f"crossings {s['selfIntersections']}", TEXT, small),
                 (f"spikes {s['spikes']} (max {s['spikeScoreMax']})", TEXT, small),
                 (f"bend mean {s['bendMeanDeg']} / 95% {s['bend95Deg']} deg", TEXT, small),
             ]
