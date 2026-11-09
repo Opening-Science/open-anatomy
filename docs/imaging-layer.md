@@ -24,14 +24,32 @@ body cuts the same liver, kidneys and bones that the 3D layers show.
 | --- | --- |
 | `axial.png`, `coronal.png`, `sagittal.png` | one slice each, windowed for soft tissue (W400/L40) or bone (W1800/L400); each segmented structure is tinted 38% towards its display colour (converted from linear to sRGB first, so tints match the meshes); air outside the body is transparent |
 | `axial@2x.png`, `coronal@2x.png`, `sagittal@2x.png` | the same slices at twice the size, for display only: the colour is Lanczos-3 upsampled on premultiplied alpha and clamped to the range of the body voxels around each source voxel, so it has no dark fringe and no ringing; the edge is anti-aliased: the native mask is pulled in by one source voxel (its outer voxel is often air at the skin) and softened by a small Gaussian, and colour is taken from inside that, so the edge shows no staircase and no dark rim; the native PNGs stay the ones to measure on |
-| `<body>.imaging.glb` | three double-sided, unlit quads (`KHR_materials_unlit`) carrying the 2x PNGs, with `alphaMode` BLEND |
+| `<body>.imaging.glb` | three double-sided, unlit quads (`KHR_materials_unlit`) carrying the 2x PNGs, with `alphaMode` MASK and `alphaCutoff` 0.5 (see below) |
 | `imaging.json` | each slice's plane, voxel index, pixel size, SHA-256 (native and display), the structures it cuts (by UBERON or FMA ID) and its corners in metres |
 
 The display PNGs are filtered in integer arithmetic, with the Lanczos weights
-in fixed point (steps of 1/4096), so their SHA-256 does not depend on the BLAS
-build or the thread count. The weights themselves are computed in floating
-point once; a machine whose `sin` differs in the last bit could only change a
-byte if a weight sat within that bit of a rounding boundary.
+in fixed point (steps of 1/4096), and the edge's blur is a sum of shifted
+copies in a fixed order, so their SHA-256 does not depend on the BLAS build or
+the thread count. The filter weights themselves are computed in floating point
+once; a machine whose `sin` or `exp` differs in the last bit could only change
+a byte if a value sat within that bit of a rounding boundary.
+
+**The display shows slightly less than the native slice.** Pulling the mask in
+by one source voxel removes the dark rim of air at the skin, but it also
+removes any part of the body two voxels wide or less and widens every gap by
+two voxels. For the trunk that is only the skin's outer voxel; for thin
+features (a finger of tissue, a narrow gap between arm and trunk) the display
+PNG and the GLB show less than the native PNG, which keeps every voxel. Measure
+on the native PNGs.
+
+**Why MASK and not BLEND.** The three quads cut through each other. Viewers
+sort BLEND materials per object, not per pixel, and three.js's GLTFLoader
+turns depth writes off for them, so with BLEND one plane is drawn over another
+wrongly wherever they cross. MASK is drawn with the depth buffer like an opaque
+surface, so the crossings are right in every viewer. The soft edge is kept in
+the texture's alpha: under bilinear filtering its 0.5 contour runs smoothly
+(no voxel staircase), and a viewer that turns on alpha-to-coverage with MSAA
+(three.js: `material.alphaToCoverage = true`) gets the anti-aliased edge too.
 
 The GLB loads together with `<body>.reference.glb`: the quads sit where their
 slices lie in the fitted body. They use the trunk fit from

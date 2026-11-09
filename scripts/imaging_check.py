@@ -23,7 +23,9 @@ head far above C7, a bowed head with the face level with C7, and a head just
 above the margin at the scan's bottom; and that the 2x display upsample keeps
 flat regions flat, anti-aliases the body's edge one source voxel in (dropping
 the air rim) and adds no dark fringe there, also for an odd image size, a
-diagonal edge, a one-voxel strip and gap, and a tinted structure at the edge.
+diagonal edge, a one-voxel strip and gap, and a tinted structure at the edge;
+that alpha rises monotonically across a diagonal edge with no staircase; and
+that colour does not wrap round from one border of the image to the other.
 """
 
 from __future__ import annotations
@@ -263,6 +265,35 @@ def main() -> int:
     shown = big[big[..., 3] > 0, :3].astype(int)
     check(bool((shown >= (180, 80, 60)).all() and (shown <= (200, 180, 180)).all()),
           "a structure tinted at the edge: no ring or fringe leaves its colours")  # fmt: skip
+
+    # A diagonal edge: the binary mask is a staircase (its edge moves 0, 2, 0, 2
+    # display pixels per row); the anti-aliased alpha must rise monotonically
+    # across it and its half-alpha contour must move evenly, one pixel per row.
+    height, width = 20, 30
+    r, c = np.mgrid[:height, :width]
+    diagonal = np.zeros((height, width, 4), dtype=np.uint8)
+    diagonal[..., :3], diagonal[..., 3] = 180, (c > r + 3) * 255
+    alpha = upsample(diagonal, 2)[..., 3].astype(float) / 255
+    check(bool((np.diff(alpha, axis=1) >= 0).all() and (np.diff(alpha, axis=0) <= 0).all()),
+          "a diagonal edge: alpha is monotonic across it, along rows and columns")  # fmt: skip
+    crossing = []
+    for row in alpha[4:36]:
+        x = int(np.flatnonzero(row >= 0.5)[0])
+        crossing.append(x - 1 + (0.5 - row[x - 1]) / (row[x] - row[x - 1]))
+    steps = np.diff(crossing)
+    check(bool((np.abs(steps - 1) < 0.25).all()),
+          f"a diagonal edge: no staircase, the contour moves {steps.min():.2f}-"
+          f"{steps.max():.2f} pixels per row")  # fmt: skip
+
+    # A body touching the image's top and right borders: no colour may wrap
+    # round to the bottom or left border, and the border itself is not an edge.
+    corner = np.zeros((20, 30, 4), dtype=np.uint8)
+    corner[:10, 15:, :3], corner[:10, 15:, 3] = 180, 255
+    big = upsample(corner, 2)
+    check(int(big[-1, :, :3].max()) == 0 and int(big[:, 0, :3].max()) == 0,
+          "a body at the top and right borders: no colour wraps to the bottom or left")  # fmt: skip
+    check(bool((big[0, 40:, 3] == 255).all() and (big[:10, -1, 3] == 255).all()),
+          "a body at the image's border is not faded there")  # fmt: skip
 
     print("imaging check passed" if not failures else f"imaging check failed: {len(failures)}")
     return 1 if failures else 0
