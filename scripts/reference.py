@@ -3,7 +3,10 @@ Builds the reference bodies end to end: for each ANNY body in sources.json's
 "references", fetch and segment its CT case, mesh the organs and trunk
 skeleton, check the baked body against its pin, and assemble them in Blender.
 
-  python scripts/reference.py [anny-adult-m|anny-adult-f ...] [--render] [--skip-segment]
+  python scripts/reference.py [<reference> ...] [--render] [--skip-segment]
+
+A reference names its ANNY body and its CT case in sources.json; bodies of
+other sizes are baked with the weight and height pinned there.
 
 Writes data/reference/<body>.reference.glb and <body>.report.json, and with
 --render three PNGs per body in data/renders/. Each step is a script on its
@@ -36,7 +39,8 @@ def body_file(name: str) -> Path:
     path = ROOT / "data" / "bodies" / pin["file"]
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
-        step("uv", "run", "--script", ROOT / "scripts" / "bake_anny.py", pin["sex"], path)
+        size = [a for k in ("weight", "height") if k in pin for a in (f"--{k}", str(pin[k]))]
+        step("uv", "run", "--script", ROOT / "scripts" / "bake_anny.py", pin["sex"], path, *size)
     found = hashlib.sha256(path.read_bytes()).hexdigest()
     if found != pin["sha256"]:
         sys.exit(f"{path.name}: sha256 {found} does not match {pin['sha256']}")
@@ -58,7 +62,7 @@ def main() -> None:
         if not args.skip_segment:
             step(python, ROOT / "scripts" / "segment.py", "--case", case, "--set", "reference")
         step(python, ROOT / "scripts" / "mesh.py", "--case", case, "--set", "reference")
-        body = body_file(name)
+        body = body_file(SOURCES["references"][name].get("body", name))
         out = ROOT / "data" / "reference"
         assemble = [
             "--body", body,

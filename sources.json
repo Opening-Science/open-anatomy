@@ -33,7 +33,7 @@
     "s1086": {
       "source": "totalsegmentator-small-v201",
       "ct_sha256": "77b17dac577a5a0cd119024462cc1d5b51a50031ff3bc5380a601d06316dd3e8",
-      "why": "all ten v0 structures present and none cut off by the scan edge; 1.5 mm isotropic"
+      "why": "all ten v0 structures present and none cut off by the scan edge; 1.5 mm isotropic; also a taller male reference body: hip-to-shoulder rise 535 mm, arms hanging (12-20 degrees from vertical); the dataset notes a tumour in thorax and abdomen"
     },
     "s0903": {
       "source": "totalsegmentator-small-v201",
@@ -48,6 +48,10 @@
       "sex": "f",
       "age": 74,
       "why": "female reference: arms down, femoral and humeral heads in the scan; the dataset notes inflammation"
+    },
+    "s0667": {
+      "source": "totalsegmentator-v201",
+      "why": "short male: shortest hip-to-shoulder rise (487 mm) and narrowest ribcage (300 mm) among the male candidates; no pathology noted"
     }
   },
   "bodies": {
@@ -66,6 +70,28 @@
       "file": "anny-adult-f.rigged.glb",
       "bytes": 464816,
       "sha256": "9032bfeb29ba4be8aeb0eb38a81e72c5dd5420a38005913d907c83c4f87fdbe1"
+    },
+    "anny-adult-m-w0.9-h0.5": {
+      "sex": "male",
+      "weight": 0.9,
+      "height": 0.5,
+      "made_by": "scripts/bake_anny.py male --weight 0.9 --height 0.5",
+      "licence": "CC0-1.0 shapes, Apache-2.0 code",
+      "file": "anny-adult-m-w0.9-h0.5.rigged.glb",
+      "bytes": 464828,
+      "sha256": "8cf0c271129f8ef810a288ae5ad982a02777cabb519914f5e7c40ad7fa51fe96",
+      "sized_by": "scripts/size_body.py --case s0667 --sex male"
+    },
+    "anny-adult-m-w0.9-h0.9": {
+      "sex": "male",
+      "weight": 0.9,
+      "height": 0.9,
+      "made_by": "scripts/bake_anny.py male --weight 0.9 --height 0.9",
+      "licence": "CC0-1.0 shapes, Apache-2.0 code",
+      "file": "anny-adult-m-w0.9-h0.9.rigged.glb",
+      "bytes": 464864,
+      "sha256": "e2bfbe9c6ee7a49ce92dbf7fcc8043f8f2015e1b38a16fb4009869dcd9cebf9d",
+      "sized_by": "scripts/size_body.py --case s1086 --sex male"
     }
   },
   "references": {
@@ -86,6 +112,26 @@
         "file": "anny-adult-f.reference.glb",
         "sha256": "f3b60118575e00938ccf10c66a8aba2d83be5a050317ce71f3bc30ec8923c4ff",
         "ctSha256": "be6d6118c98e66c27120ca0db3c91885381506ef6c9b43ff53544a73f6981e2c",
+        "note": "built on Linux x86_64, RTX 2080 Ti, Blender 5.2.3; GPU segmentation is not bit-exact across machines"
+      }
+    },
+    "anny-adult-m-w0.9-h0.5.s0667": {
+      "body": "anny-adult-m-w0.9-h0.5",
+      "case": "s0667",
+      "built": {
+        "file": "anny-adult-m-w0.9-h0.5.s0667.reference.glb",
+        "sha256": "2c6d92566a86e46982233ad3f3e3251250a4564d48045ba57b3b159534c73874",
+        "ctSha256": "3e2538363a3a1f9569574238b5ec65709c57a436656f581e73c5fe319d12223b",
+        "note": "built on Linux x86_64, RTX 2080 Ti, Blender 5.2.3; GPU segmentation is not bit-exact across machines"
+      }
+    },
+    "anny-adult-m-w0.9-h0.9.s1086": {
+      "body": "anny-adult-m-w0.9-h0.9",
+      "case": "s1086",
+      "built": {
+        "file": "anny-adult-m-w0.9-h0.9.s1086.reference.glb",
+        "sha256": "5247a89a86603974fee810e1f875ff285ff50c7d8442212b011c733a95422af7",
+        "ctSha256": "1c66ddd6c4d1e4983ed21c7dd80f9b79c391fc564d53d4575e2669653803ef5b",
         "note": "built on Linux x86_64, RTX 2080 Ti, Blender 5.2.3; GPU segmentation is not bit-exact across machines"
       }
     }

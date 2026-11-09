@@ -103,11 +103,16 @@ def _member(archive: zipfile.ZipFile, case: str, label: str) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--source", default=SOURCES["default"]["source"])
+    parser.add_argument("--source", help="default: the case's source in sources.json")
     parser.add_argument("--case", default=SOURCES["default"]["case"])
     parser.add_argument("--pick", action="store_true")
     args = parser.parse_args()
-    zip_path = fetch_source(args.source)
+    source = (
+        args.source
+        or SOURCES["cases"].get(args.case, {}).get("source")
+        or SOURCES["default"]["source"]
+    )
+    zip_path = fetch_source(source)
     if args.pick:
         pick(zip_path)
     else:

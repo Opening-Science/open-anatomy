@@ -48,6 +48,7 @@ from structures import SETS, Structure, node_name  # noqa: E402
 
 # RAS millimetres to glTF metres: X = -R (the body's left), Y = S, Z = A.
 # Limb bones run out of a trunk scan by design; their joint ends are what count.
+MIN_VOXELS = 100  # a mask smaller than this (0.3 ml at 1.5 mm) is a stray label, not a bone
 CUT_ALLOWED = {"femur_left", "femur_right", "humerus_left", "humerus_right"}
 OUTLINE = Structure("body_trunc", "outline", "trunk outline", "outline", (0.8, 0.8, 0.8))
 RAS_TO_GLTF = np.array([[-1, 0, 0], [0, 0, 1], [0, 1, 0]], dtype=np.float64) * 0.001
@@ -87,9 +88,9 @@ def decimate(poly: vtk.vtkPolyData, max_triangles: int) -> vtk.vtkPolyData:
 
 
 def cut_by_scan(path: Path) -> bool:
-    """True if the mask is empty or touches the scan's first or last axial slice."""
+    """True if the mask is too small to mesh or touches the scan's first or last axial slice."""
     data = np.asanyarray(nib.load(path).dataobj) > 0
-    if not data.any():
+    if data.sum() < MIN_VOXELS:
         return True
     k = np.flatnonzero(data.any((0, 1)))
     return bool(k[0] == 0 or k[-1] == data.shape[2] - 1)
@@ -311,6 +312,10 @@ def main() -> None:
         name = p["structure"].label
         if open_edges(p["triangles"]):
             sys.exit(f"{name}: the surface is not closed and manifold")
+        if signed_volume(p["vertices"], p["triangles"]) < 0:
+            # VTK's auto-orientation can miss on a ragged fragment; a closed
+            # surface with negative volume is simply wound the other way round.
+            p["triangles"], p["normals"] = p["triangles"][:, ::-1].copy(), -p["normals"]
         if signed_volume(p["vertices"], p["triangles"]) <= 0:
             sys.exit(f"{name}: the normals point inward")
 

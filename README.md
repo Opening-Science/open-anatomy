@@ -111,6 +111,12 @@ the female s0859, both from the TotalSegmentator dataset (CC BY 4.0):
 .venv/bin/python scripts/reference.py --render   # data/reference/, data/renders/
 ```
 
+More bodies come from the full dataset. `scripts/select_cases.py` lists the
+cases that qualify (every organ whole, no head, the hip and shoulder joints in
+the scan, arms hanging, no trauma), and `scripts/size_body.py` picks the ANNY
+weight and height whose trunk matches the case's, which `bake_anny.py` then
+bakes with `--weight` and `--height`.
+
 [`blender/assemble.py`](blender/assemble.py) fits the CT to the body: height
 from the hip and shoulder joints, width and depth from the trunk outlines, then
 the shoulder girdle and upper thorax onto ANNY's shoulders. It reports each joint's residual and the share of every structure inside the
