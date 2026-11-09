@@ -1,7 +1,7 @@
 """
 Builds an atlas skeleton from one complete-thorax CT case, end to end:
 
-  python scripts/atlas.py <case> [--skip-segment] [--samples 256]
+  python scripts/atlas.py <case> [--skip-segment] [--skip-mesh] [--samples 256]
 
 For the case (pinned in sources.json) it fetches and segments the CT, meshes
 the trunk skeleton under the cut and symmetry rules (mesh.py --set
@@ -51,6 +51,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("case")
     parser.add_argument("--skip-segment", action="store_true", help="masks are already there")
+    parser.add_argument(
+        "--skip-mesh", action="store_true", help="the skeleton GLB is already there"
+    )
     parser.add_argument("--samples", type=int, default=256, help="Cycles samples per pixel")
     args = parser.parse_args()
     case = args.case
@@ -65,7 +68,8 @@ def main() -> None:
     if not args.skip_segment:
         step(python, ROOT / "scripts" / "fetch.py", "--source", record["source"], "--case", case)
         step(python, ROOT / "scripts" / "segment.py", "--case", case, "--set", "skeleton")
-    step(python, ROOT / "scripts" / "mesh.py", "--case", case, "--set", "skeleton")
+    if not args.skip_mesh:
+        step(python, ROOT / "scripts" / "mesh.py", "--case", case, "--set", "skeleton")
     meshed = work / f"{case}.skeleton.glb"
     manifest = work / f"{case}.skeleton.manifest.json"
     retopo = out / f"{case}.skeleton.glb"
