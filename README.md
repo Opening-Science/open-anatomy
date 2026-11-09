@@ -90,11 +90,26 @@ each against the dataset's own reference segmentation. `mesh.py` writes one GLB
 with a closed mesh per structure, named by UBERON ID, and a manifest; the same
 masks always give the same bytes.
 
+## Reference bodies
+
+The bodies are ANNY (CC0 shapes): an adult male and an adult female, each
+rigged with ANNY's own 104-bone skeleton. They are synthetic: no scan of any
+person is used.
+
+```bash
+uv run --script scripts/bake_anny.py male data/bodies/anny-adult-m.rigged.glb
+uv run --script scripts/bake_anny.py female data/bodies/anny-adult-f.rigged.glb
+```
+
+The bake is pinned by SHA-256 in [sources.json](sources.json). Headless
+Blender 5.2.x scripts in [`blender/`](blender/) clean meshes up and fit an
+atlas to a body limb by limb; run them through `scripts/blender.py`.
+
 ## Self-checks
 
 ```bash
 .venv/bin/python scripts/mesh_check.py   # meshes synthetic ellipsoids; no download
-scripts/self-check.sh                     # glTF round trip in Blender; skips without it
+scripts/self-check.sh                     # every Blender self-check; skips without Blender
 ```
 
 See [CONTRIBUTING](CONTRIBUTING.md) to take part.

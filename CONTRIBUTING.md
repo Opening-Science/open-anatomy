@@ -9,8 +9,8 @@
 5. Before you push:
 
    ```bash
-   ruff check scripts
-   ruff format --check scripts
+   ruff check scripts blender
+   ruff format --check scripts blender
    python scripts/mesh_check.py
    scripts/self-check.sh   # needs Blender 5.2+; skips without it
    ```
