@@ -11,17 +11,23 @@ largest connected piece, decimate it to at most --max-triangles (organs) or
 --max-bone-triangles (bones) while it stays closed, and orient the normals
 outward. Coordinates go from the CT's RAS millimetres to glTF metres (+Y up,
 +Z anterior, +X the body's left), and the whole set is moved so its bounding
-box is centred on the origin.
+box is centred on the origin. The share of a single structure's voxels outside
+its largest piece goes into the manifest as dropped_share; above
+MAX_DROPPED_SHARE an organ stops the run (an organ in two pieces is a
+segmentation problem, not noise), while a bone only warns.
 
 --set organs (the default) needs every organ; --set reference adds the trunk
 skeleton and lists, rather than meshes, a bone the scan misses or cuts (the
-femurs and humeri may be cut). With body_trunc.nii.gz in the masks it also
+femurs and humeri may be cut). An organ that is absent or cut by the scan
+stops the run. With body_trunc.nii.gz in the masks it also
 writes <case>.outline.glb, the trunk outline in the same frame, which
 assemble.py measures and never releases.
 
 Writes data/work/<case>/<case>.<set>.glb and <case>.<set>.manifest.json with each node's
-UBERON ID, system, licence, triangle count and volume, and the GLB's SHA-256.
-It stops if any surface is open, non-manifold or inside out, or if its volume
+UBERON ID, system, licence, triangle count, volume and dropped share, and the
+GLB's SHA-256. Every GLB's asset.copyright and asset.extras credit the source
+dataset's creator, DOI and case, so a GLB copied on its own keeps its
+attribution. It stops if any surface is open, non-manifold or inside out, or if its volume
 is more than 5% off the mask's voxel volume. VTK runs on
 one thread so the same masks give the same bytes.
 """
@@ -51,7 +57,7 @@ from structures import SETS, Structure, node_name  # noqa: E402
 
 # RAS millimetres to glTF metres: X = -R (the body's left), Y = S, Z = A.
 # Limb bones run out of a trunk scan by design; their joint ends are what count.
-MIN_VOXELS = 100  # a mask smaller than this (0.3 ml at 1.5 mm) is a stray label, not a bone
+MIN_ML = 0.3  # a mask smaller than this is a stray label, not a bone (volume, not voxels)
 SETS_OF_PIECES = {"costal_cartilages"}  # one node, several separate pieces
 MIN_PIECE_VOXELS = 150  # a piece smaller than this (0.5 ml) in a set is a loose blob
 LEVEL_STEPS = 12
@@ -74,6 +80,10 @@ LANDMARK_BONES = {"femur_left", "femur_right", "humerus_left", "humerus_right"}
 OUTLINE = Structure("body_trunc", "outline", "trunk outline", "outline", (0.8, 0.8, 0.8))
 RAS_TO_GLTF = np.array([[-1, 0, 0], [0, 0, 1], [0, 1, 0]], dtype=np.float64) * 0.001
 SOURCE_LICENCE = "CC-BY-4.0"
+SOURCES = json.loads((ROOT / "sources.json").read_text())
+# Pieces other than the largest may hold at most this share of a single
+# structure's voxels: stray voxels are dropped, a split organ stops the run.
+MAX_DROPPED_SHARE = 0.02
 
 
 def triangles_of(poly: vtk.vtkPolyData) -> np.ndarray:
@@ -141,7 +151,7 @@ def rib_end_of(mask: np.ndarray, affine: np.ndarray) -> dict | None:
     from scipy.spatial import cKDTree
 
     voxels = np.argwhere(mask)
-    if len(voxels) < MIN_VOXELS:
+    if len(voxels) * abs(np.linalg.det(affine[:3, :3])) / 1000 < MIN_ML:
         return None
     ras = voxels @ affine[:3, :3].T + affine[:3, 3]
     spacing = np.linalg.norm(affine[:3, :3], axis=0)
@@ -322,13 +332,15 @@ def modelled_cartilage(
 def cut_reason(path: Path) -> str | None:
     """Why a mask cannot be a whole structure, or None if it is whole.
 
-    Too small to be a structure, or touching any face of the scan (the first
-    or last slice, or the in-plane border): the scan cut it.
+    Smaller than MIN_ML (measured with the voxel size from the affine, so the
+    limit is the same at 0.8 mm and 1.5 mm), or touching any face of the scan
+    (the first or last slice, or the in-plane border): the scan cut it.
     """
     if not path.exists():
         return "not segmented"
-    data = np.asanyarray(nib.load(path).dataobj) > 0
-    if data.sum() < MIN_VOXELS:
+    image = nib.load(path)
+    data = np.asanyarray(image.dataobj) > 0
+    if data.sum() * abs(np.linalg.det(image.affine[:3, :3])) / 1000 < MIN_ML:
         return "absent or a stray label"
     for axis in range(3):
         k = np.flatnonzero(data.any(tuple(a for a in range(3) if a != axis)))
@@ -566,8 +578,11 @@ def surface(
     along_slices: bool = False,
     centreline: bool = False,
     mask: np.ndarray | None = None,
-) -> tuple[np.ndarray, np.ndarray, float]:
-    """Returns (vertices in RAS mm, triangles, voxel volume in ml) for the mask at path.
+) -> tuple[np.ndarray, np.ndarray, float, float]:
+    """Returns (vertices in RAS mm, triangles, voxel volume in ml, dropped share).
+
+    The dropped share is the part of the mask's voxels outside its largest
+    piece, which is the only one kept; for a set of pieces it is 0.
 
     The mask is upsampled 2x and blurred (Gaussian, one source voxel; half or a
     quarter where a thin, lobed structure would come apart), so the surface
@@ -588,6 +603,7 @@ def surface(
     sizes = np.bincount(labels.ravel())[1:]
     keep = np.flatnonzero(sizes >= MIN_PIECE_VOXELS) + 1 if pieces else [int(sizes.argmax()) + 1]
     data = np.isin(labels, keep)  # the contour level must be tuned on what is kept
+    dropped = 0.0 if pieces else 1 - float(sizes.max()) / float(sizes.sum())
     lo = np.maximum(np.argwhere(data).min(0) - 3, 0)
     hi = np.argwhere(data).max(0) + 4
     crop = np.pad(data[lo[0] : hi[0], lo[1] : hi[1], lo[2] : hi[2]], PAD).astype(np.float32)
@@ -625,7 +641,7 @@ def surface(
     # The padded crop's first voxel sits at the origin.
     ijk = points / spacing + lo - PAD
     ras = ijk @ image.affine[:3, :3].T + image.affine[:3, 3]
-    return ras, triangles.astype(np.uint32), target / 1000
+    return ras, triangles.astype(np.uint32), target / 1000, dropped
 
 
 def outward(vertices: np.ndarray, triangles: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -667,10 +683,33 @@ def signed_volume(vertices: np.ndarray, triangles: np.ndarray) -> float:
     return float(np.einsum("ij,ij->i", a, np.cross(b, c)).sum() / 6)
 
 
-def write_glb(path: Path, parts: list[dict]) -> None:
-    """Writes one node and mesh per part, each with its own material."""
+def credit(case: str) -> dict:
+    """The attribution a GLB built from case carries: creator, DOI, licence, case."""
+    if case not in SOURCES["cases"]:
+        sys.exit(f"{case} is not in sources.json, so its source cannot be credited")
+    source = SOURCES["sources"][SOURCES["cases"][case]["source"]]
+    return {
+        "copyright": (
+            f"Derived from case {case} of the {source['title']} by {source['creator']}, "
+            f"doi:{source['doi']}, licensed {source['licence']}"
+        ),
+        "extras": {
+            "source": source["title"],
+            "creator": source["creator"],
+            "doi": source["doi"],
+            "licence": source["licence"],
+            "case": case,
+        },
+    }
+
+
+def write_glb(path: Path, parts: list[dict], attribution: dict | None = None) -> None:
+    """Writes one node and mesh per part, each with its own material.
+
+    attribution (from credit()) goes into asset.copyright and asset.extras.
+    """
     gltf: dict = {
-        "asset": {"version": "2.0", "generator": "open-anatomy mesh.py"},
+        "asset": {"version": "2.0", "generator": "open-anatomy mesh.py", **(attribution or {})},
         "scene": 0,
         "scenes": [{"nodes": list(range(len(parts)))}],
         "nodes": [],
@@ -762,7 +801,15 @@ def main() -> None:
     parser.add_argument("--set", choices=SETS, default="organs", help="structures to mesh")
     parser.add_argument("--max-triangles", type=int, default=40000, help="per organ")
     parser.add_argument("--max-bone-triangles", type=int, default=15000, help="per bone")
+    parser.add_argument(
+        "--synthetic", action="store_true", help="test masks with no source to credit"
+    )
     args = parser.parse_args()
+    attribution = (
+        {"copyright": "Synthetic test data", "extras": {"case": args.case}}
+        if args.synthetic
+        else credit(args.case)
+    )
 
     work = args.out_dir or ROOT / "data" / "work" / args.case
     work.mkdir(parents=True, exist_ok=True)
@@ -773,9 +820,12 @@ def main() -> None:
     if args.set == "reference":
         reasons = reference_rules(reasons)
     for s in SETS[args.set]:
-        cap = args.max_bone_triangles if s.system == "skeletal" else args.max_triangles
+        bone = s.system == "skeletal"
+        cap = args.max_bone_triangles if bone else args.max_triangles
         path = seg_dir / f"{s.label}.nii.gz"
         reason = reasons[s.label] if args.set == "reference" else None
+        if reason and not bone:
+            sys.exit(f"{s.label}: {reason} in {args.case}; organs must be whole")
         if reason:
             # Never exported, never capped. The femurs and humeri are still
             # meshed into the landmarks file for their joint centres.
@@ -812,20 +862,31 @@ def main() -> None:
                 float(abs(np.linalg.det(image.affine[:3, :3]))) / 1000,
             )
         try:
-            ras, triangles, voxel_ml = surface(
+            ras, triangles, voxel_ml, share = surface(
                 path, cap, pieces=s.label in SETS_OF_PIECES,
                 along_slices=s.label.startswith(SLICE_SMOOTHED),
                 centreline=s.label.startswith("rib_"),
                 mask=knobless if s.label.startswith("rib_") else None,
             )  # fmt: skip
         except ValueError:
-            if args.set == "organs":
-                raise
+            if not bone:
+                sys.exit(f"{s.label}: the mask is empty in {args.case}; organs must be whole")
             missing.append(s.label)
             continue
+        if share > MAX_DROPPED_SHARE:
+            message = (
+                f"{s.label}: {share:.1%} of its volume is outside its largest piece "
+                f"(at most {MAX_DROPPED_SHARE:.0%} may be dropped from an organ)"
+            )
+            if not bone:
+                sys.exit(message)
+            # A segmented bone often comes in pieces (a vertebra's processes, a
+            # humerus leaving and re-entering the scan); its share is recorded
+            # in the manifest and said here, not silently dropped.
+            print(f"warning: {message}", file=sys.stderr)
         parts.append({
             "structure": s, "vertices": ras @ RAS_TO_GLTF.T, "triangles": triangles,
-            "voxel_ml": voxel_ml, "trimmed_ml": round(trimmed_ml, 2),
+            "voxel_ml": voxel_ml, "trimmed_ml": round(trimmed_ml, 2), "dropped_share": share,
         })  # fmt: skip
 
     everything = np.vstack([p["vertices"] for p in parts])
@@ -850,21 +911,23 @@ def main() -> None:
             sys.exit(f"{name}: the mesh's volume is {p['drift']:+.1%} off its voxel volume")
 
     glb = work / f"{args.case}.{args.set}.glb"
-    write_glb(glb, parts)
+    write_glb(glb, parts, attribution)
     outline_path = seg_dir / "body_trunc.nii.gz"
     if args.set == "reference" and outline_path.exists():
         # The trunk outline, in the same frame, for assemble.py to measure. It is
         # the outer surface of a person's trunk, so it is never released.
-        ras, triangles, _ = surface(outline_path, args.max_triangles)
+        ras, triangles, _, _ = surface(outline_path, args.max_triangles)
         vertices = (ras @ RAS_TO_GLTF.T - centre).astype(np.float32)
         triangles, normals = outward(vertices, triangles)
         outline = {"structure": OUTLINE, "vertices": vertices, "triangles": triangles}
-        write_glb(work / f"{args.case}.outline.glb", [{**outline, "normals": normals}])
+        outline["normals"] = normals
+        write_glb(work / f"{args.case}.outline.glb", [outline], attribution)
     manifest = {
         "case": args.case,
         "set": args.set,
         "file": glb.name,
         "sha256": hashlib.sha256(glb.read_bytes()).hexdigest(),
+        "attribution": attribution["copyright"],
         "units": "metres",
         "axes": "+Y superior, +Z anterior, +X the body's left",
         "centre_offset_m": [round(float(c), 6) for c in centre],
@@ -883,6 +946,7 @@ def main() -> None:
                 "pieces": "several" if p["structure"].label in SETS_OF_PIECES else "one",
                 "volume_drift": round(p["drift"], 4) if p["drift"] is not None else None,
                 **({"knobs_trimmed_ml": p["trimmed_ml"]} if p.get("trimmed_ml") else {}),
+                **({"dropped_share": round(p["dropped_share"], 4)} if "dropped_share" in p else {}),
             }
             for p in parts
         ],
@@ -894,12 +958,12 @@ def main() -> None:
         # heads) and never released, like the trunk outline.
         marks = []
         for s in landmarks:
-            ras, triangles, _ = surface(seg_dir / f"{s.label}.nii.gz", args.max_bone_triangles)
+            ras, triangles, _, _ = surface(seg_dir / f"{s.label}.nii.gz", args.max_bone_triangles)
             vertices = (ras @ RAS_TO_GLTF.T - centre).astype(np.float32)
             triangles, normals = outward(vertices, triangles)
             marks.append({"structure": s, "vertices": vertices, "triangles": triangles,
                           "normals": normals})  # fmt: skip
-        write_glb(work / f"{args.case}.landmarks.glb", marks)
+        write_glb(work / f"{args.case}.landmarks.glb", marks, attribution)
     (work / f"{args.case}.{args.set}.manifest.json").write_text(
         json.dumps(manifest, indent=2) + "\n"
     )

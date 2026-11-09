@@ -95,6 +95,7 @@
     },
     "s0667": {
       "source": "totalsegmentator-v201",
+      "ct_sha256": "e88096e68554096680291f433d95dfa56093709800efdd5b003a51618bde0097",
       "why": "short male: shortest hip-to-shoulder rise (487 mm) and narrowest ribcage (300 mm) among the male candidates; no pathology noted",
       "record": {
         "sex": "m",
