@@ -1,0 +1,16 @@
+Metadata-Version: 2.4
+Name: open-anatomy
+Version: 0.0.0
+Summary: Open, imaging-based human anatomy models built from scripts
+License-Expression: Apache-2.0
+Requires-Python: >=3.11
+License-File: LICENSE
+License-File: NOTICE
+Provides-Extra: mesh
+Requires-Dist: nibabel==5.4.2; extra == "mesh"
+Requires-Dist: numpy==2.5.4; extra == "mesh"
+Requires-Dist: vtk==9.7.2; extra == "mesh"
+Provides-Extra: pipeline
+Requires-Dist: open-anatomy[mesh]; extra == "pipeline"
+Requires-Dist: TotalSegmentator==2.18.0; extra == "pipeline"
+Dynamic: license-file
