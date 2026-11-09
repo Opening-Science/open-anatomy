@@ -46,7 +46,7 @@ GPU for segmentation (a CPU works, slowly).
 
 ```bash
 uv venv .venv -p 3.12 && uv pip install --python .venv/bin/python -e '.[pipeline]'
-.venv/bin/python scripts/reference.py --render --qa
+.venv/bin/python scripts/reference.py --render
 ```
 
 `reference.py` runs, for each reference body:
@@ -58,9 +58,7 @@ uv venv .venv -p 3.12 && uv pip install --python .venv/bin/python -e '.[pipeline
 3. `scripts/mesh.py`: smooth, closed surfaces that keep each mask's volume;
 4. `scripts/bake_anny.py`: the ANNY body, sized to the case;
 5. `blender/assemble.py`: the CT structures placed in the body and attached to
-   its skeleton; with `--render`, front, three-quarter and trunk views;
-6. with `--qa`, `blender/qa.py`: a close-up check of every mesh and contact
-   sheets in `data/qa/`.
+   its skeleton; with `--render`, front, three-quarter and trunk views.
 
 Self-checks, also run in CI:
 
