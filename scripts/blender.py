@@ -3,6 +3,7 @@ Runs the headless Blender scripts in blender/ with a checked Blender.
 
   python scripts/blender.py self-check
   python scripts/blender.py cleanup --in <glb> --out-dir <dir> [cleanup_mesh.py options]
+  python scripts/blender.py qa --in <glb> --manifest <json> --out-dir <dir>
   python scripts/blender.py assemble --body <glb> --ct <glb> --out <glb> --report <json>
   python scripts/blender.py fit --atlas <glb> --scheme bodyparts3d|hra --body <glb> \
       --out <glb> --report <json> [fit_atlas.py options]
@@ -54,14 +55,14 @@ def run(blender: str, script: Path, args: list[str]) -> int:
 
 
 def personal_inputs(args: list[str]) -> list[str]:
-    flags = ("--in", "--atlas", "--body", "--ct")
+    flags = ("--in", "--atlas", "--body", "--ct")  # qa's --in is checked here too
     paths = [args[i + 1] for i, a in enumerate(args[:-1]) if a in flags]
     return [p for p in paths if PERSONAL.search(str(Path(p).resolve()))]
 
 
 def main() -> int:
     task, args = (sys.argv[1], sys.argv[2:]) if len(sys.argv) > 1 else ("", [])
-    if task not in ("self-check", "cleanup", "fit", "assemble"):
+    if task not in ("self-check", "cleanup", "fit", "assemble", "qa"):
         print(__doc__.split("\n\n")[1], file=sys.stderr)
         return 2
     blender = find_blender()
@@ -87,7 +88,10 @@ def main() -> int:
         failed = [s.name for s, a in checks if run(blender, s, a) != 0]
         print("all Blender self-checks passed" if not failed else f"failed: {', '.join(failed)}")
         return 1 if failed else 0
-    script = {"cleanup": "cleanup_mesh.py", "fit": "fit_atlas.py", "assemble": "assemble.py"}[task]
+    script = {
+        "cleanup": "cleanup_mesh.py", "fit": "fit_atlas.py", "assemble": "assemble.py",
+        "qa": "qa.py",
+    }[task]  # fmt: skip
     return run(blender, ROOT / "blender" / script, args)
 
 
