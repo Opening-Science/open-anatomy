@@ -193,5 +193,42 @@
         "note": "built on Linux x86_64, RTX 2080 Ti, Blender 5.2.3; GPU segmentation is not bit-exact across machines"
       }
     }
+  },
+  "reference_data": {
+    "studio-hdri": {
+      "file": "studio/studio_small_09_2k.hdr",
+      "url": "https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/studio_small_09_2k.hdr",
+      "page": "https://polyhaven.com/a/studio_small_09",
+      "licence": "CC0-1.0",
+      "sha256": "36724313c0fc66dab126ff90f081b85a0b1ef47be65eda1417bd20b033f0573f",
+      "used": "lighting for the studio renders; never in a released asset"
+    },
+    "gray-plates": {
+      "page": "https://commons.wikimedia.org/wiki/Category:Gray%27s_Anatomy_plates",
+      "licence": "public domain (Gray's Anatomy, 1918; drawings by Henry Vandyke Carter)",
+      "files": {
+        "reference/gray112.png": {
+          "url": "https://upload.wikimedia.org/wikipedia/commons/8/88/Gray112.png",
+          "sha256": "1c01d496bfcbbd5fe40d033544fb85cb0ff81d8e3bd86b874bff0c6589607848",
+          "plate": "112, the thorax from in front"
+        },
+        "reference/gray113.png": {
+          "url": "https://upload.wikimedia.org/wikipedia/commons/9/9b/Gray113.png",
+          "sha256": "bc9e0822e15e4f956082493eaa6fac6ee6681dbfca727c385f73f498594488b4",
+          "plate": "113, the thorax from behind"
+        },
+        "reference/gray114.png": {
+          "url": "https://upload.wikimedia.org/wikipedia/commons/4/4b/Gray114.png",
+          "sha256": "14a3fb9911666c86cf9a538852490da307d200841f6cdb83337a595c7e877b39",
+          "plate": "114, the thorax from the side"
+        },
+        "reference/gray115.png": {
+          "url": "https://upload.wikimedia.org/wikipedia/commons/3/3d/Gray115.png",
+          "sha256": "58c26a85d58f0594dbd405d2a3c6d8305b9258e0883123d6d91f35cd66a013a6",
+          "plate": "115, the sternum from in front"
+        }
+      },
+      "used": "side-by-side comparison of renders; never in a released asset"
+    }
   }
 }

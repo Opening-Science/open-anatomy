@@ -54,7 +54,7 @@ from vtk.util.numpy_support import numpy_to_vtk, vtk_to_numpy  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from structures import SETS, Structure, node_name  # noqa: E402
+from structures import RULED_SETS, SETS, Structure, node_name  # noqa: E402
 
 # RAS millimetres to glTF metres: X = -R (the body's left), Y = S, Z = A.
 # Limb bones run out of a trunk scan by design; their joint ends are what count.
@@ -92,6 +92,10 @@ BRIDGE_GAP_MM = (
     20.0  # a bone in two pieces this close, in line, is one bone with a segmentation gap
 )
 BRIDGE_END_MM = 15.0  # the length of bone whose direction the gap must follow
+BRIDGEABLE = ("rib", "clavicula", "humerus", "femur")  # long bones a gap can split in two
+FRAGMENT_SHARE = 0.05  # a detached piece under this share of a bone is a segmentation fragment
+REASSIGN_SHARE = 0.25  # up to this share, a piece touching a neighbour of the same kind is its
+NEIGHBOUR_CONTACT = 20  # voxels of contact that make a piece a neighbour's
 
 
 def triangles_of(poly: vtk.vtkPolyData) -> np.ndarray:
@@ -480,6 +484,72 @@ def bridge_gap(mask: np.ndarray, spacing: np.ndarray) -> tuple[np.ndarray, float
     bridged = mask.copy()
     bridged[tuple(grid[inside].T)] = True
     return bridged, round(gap, 1)
+
+
+def bone_kind(label: str) -> str:
+    return label.split("_")[0]  # vertebrae, rib, clavicula, scapula, ...
+
+
+def settle_fragments(seg_dir: Path, labels: list[str]) -> tuple[dict[str, np.ndarray], list[dict]]:
+    """Sorts out the detached pieces of the bones in labels before meshing.
+
+    A piece of a bone's mask that is not its largest is, in order: left for
+    bridge_gap when it lies in line with a long bone (a gap over thin bone);
+    moved to a neighbouring bone of the same kind (a vertebra, a rib) that it
+    touches, when it is under REASSIGN_SHARE of the bone, because the
+    segmentation gave that neighbour's voxels the wrong label; dropped when
+    it is under FRAGMENT_SHARE (a chip off a process, calcified cartilage at
+    a rib's end); otherwise left, and the split bone stops the build.
+    Returns the corrected masks and a note per piece moved or dropped.
+    """
+    masks, affines = {}, {}
+    for label in labels:
+        path = seg_dir / f"{label}.nii.gz"
+        if path.exists():
+            image = nib.load(path)
+            masks[label] = np.asanyarray(image.dataobj) > 0
+            affines[label] = image.affine
+    notes = []
+    for label in [lab for lab in labels if lab in masks]:
+        pieces, count = ndimage.label(masks[label], structure=np.ones((3, 3, 3)))
+        if count < 2:
+            continue
+        sizes = np.bincount(pieces.ravel())[1:]
+        total = int(sizes.sum())
+        spacing = np.linalg.norm(affines[label][:3, :3], axis=0)
+        voxel_ml = float(np.prod(spacing)) / 1000
+        main = int(np.argmax(sizes)) + 1
+        for piece in sorted(set(range(1, count + 1)) - {main}, key=lambda k: -sizes[k - 1]):
+            share = sizes[piece - 1] / total
+            if share <= MAX_DROPPED_SHARE:
+                continue  # noise at the limit the manifest already records
+            part = pieces == piece
+            if (
+                bone_kind(label) in BRIDGEABLE
+                and bridge_gap(masks[label] & ((pieces == main) | part), spacing)[1] is not None
+            ):
+                continue  # one bone with a gap: bridged when it is meshed
+            grown = ndimage.binary_dilation(part)
+            contact = {
+                other: int((grown & masks[other]).sum())
+                for other in masks
+                if other != label and bone_kind(other) == bone_kind(label)
+            }
+            neighbour = max(contact, key=contact.get) if contact else None
+            note = {
+                "label": label,
+                "voxels": int(sizes[piece - 1]),
+                "ml": round(sizes[piece - 1] * voxel_ml, 2),
+                "share": round(float(share), 4),
+            }
+            if neighbour and contact[neighbour] >= NEIGHBOUR_CONTACT and share <= REASSIGN_SHARE:
+                masks[neighbour] |= part
+                masks[label] &= ~part
+                notes.append({**note, "action": "moved", "to": neighbour})
+            elif share < FRAGMENT_SHARE:
+                masks[label] &= ~part
+                notes.append({**note, "action": "dropped"})
+    return masks, notes
 
 
 def trim_knobs(mask: np.ndarray, voxel_ml: float) -> tuple[np.ndarray, float]:
@@ -933,13 +1003,19 @@ def main() -> None:
         sys.exit(f"{ct_path} is missing: the CT is needed to see where the scan ends")
     outside = scan_outside(ct_path) if ct_path.exists() else None
     reasons = {label: cut_reason(seg_dir / f"{label}.nii.gz", outside) for label in labels}
-    if args.set == "reference":
+    settled, fragments = {}, []
+    if args.set in RULED_SETS:
         reasons = reference_rules(reasons)
+        bones = [s.label for s in SETS[args.set] if s.system == "skeletal" and not reasons[s.label]]
+        settled, fragments = settle_fragments(seg_dir, bones)
+        for note in fragments:
+            print(f"{note['label']}: {note['ml']} ml {note['action']}"
+                  + (f" to {note['to']}" if note.get("to") else ""), file=sys.stderr)  # fmt: skip
     for s in SETS[args.set]:
         bone = s.system == "skeletal"
         cap = args.max_bone_triangles if bone else args.max_triangles
         path = seg_dir / f"{s.label}.nii.gz"
-        reason = reasons[s.label] if args.set == "reference" else None
+        reason = reasons[s.label] if args.set in RULED_SETS else None
         if reason and not bone:
             sys.exit(f"{s.label}: {reason} in {args.case}; organs must be whole")
         if reason:
@@ -954,7 +1030,7 @@ def main() -> None:
                     # A head cut by the scan would fit a joint to the cut face.
                     dropped[-1]["landmark"] = f"not used: cut at {''.join(sorted(faces))}"
             continue
-        if s.label == "costal_cartilages" and args.set == "reference":
+        if s.label == "costal_cartilages" and args.set in RULED_SETS:
             # The segmented cartilage is too lumpy and broken to show; the
             # reference body carries modelled cartilages instead.
             kept_ribs = [r for r in labels if r.startswith("rib_") and not reasons[r]]
@@ -970,11 +1046,11 @@ def main() -> None:
                 "voxel_ml": None, "modelled": True,
             })  # fmt: skip
             continue
-        knobless, trimmed_ml = None, 0.0
+        knobless, trimmed_ml = settled.get(s.label), 0.0
         if s.label.startswith("rib_") and path.exists():
             image = nib.load(path)
             knobless, trimmed_ml = trim_knobs(
-                np.asanyarray(image.dataobj) > 0,
+                settled.get(s.label, np.asanyarray(image.dataobj) > 0),
                 float(abs(np.linalg.det(image.affine[:3, :3]))) / 1000,
             )
         try:
@@ -982,7 +1058,7 @@ def main() -> None:
                 path, cap, pieces=s.label in SETS_OF_PIECES,
                 along_slices=s.label.startswith(SLICE_SMOOTHED),
                 centreline=s.label.startswith("rib_"),
-                mask=knobless if s.label.startswith("rib_") else None,
+                mask=knobless,
             )  # fmt: skip
         except ValueError:
             if not bone:
@@ -990,7 +1066,7 @@ def main() -> None:
             missing.append(s.label)
             continue
         bridged_mm = None
-        if share > MAX_DROPPED_SHARE and bone and path.exists():
+        if share > MAX_DROPPED_SHARE and bone_kind(s.label) in BRIDGEABLE and path.exists():
             # A bone split by the segmentation over thin bone is one bone: the
             # gap is bridged and the surface redone. Anything else in pieces
             # (a mislabelled neighbour) stops the build, as a split organ does.
@@ -1038,7 +1114,7 @@ def main() -> None:
     glb = work / f"{args.case}.{args.set}.glb"
     write_glb(glb, parts, attribution)
     outline_path = seg_dir / "body_trunc.nii.gz"
-    if args.set == "reference" and outline_path.exists():
+    if args.set in RULED_SETS and outline_path.exists():
         # The trunk outline, in the same frame, for assemble.py to measure. It is
         # the outer surface of a person's trunk, so it is never released.
         ras, triangles, _, _ = surface(outline_path, args.max_triangles)
@@ -1078,6 +1154,7 @@ def main() -> None:
         ],
     }
     manifest["missing"] = missing
+    manifest["fragments"] = fragments
     manifest["dropped"] = dropped
     if landmarks:
         # Cut bones, measured for their joint centres (femoral and humeral

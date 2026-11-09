@@ -119,6 +119,7 @@ def main() -> int:
             (ROOT / "scripts" / "self_check.py", []),
             (ROOT / "blender" / "fit_atlas.py", ["--self-check"]),
             (ROOT / "blender" / "cleanup_mesh.py", ["--self-check"]),
+            (ROOT / "blender" / "retopo.py", ["--self-check"]),
         ]
         failed = [s.name for s, a in checks if run(blender, s, a) != 0]
         print("all Blender self-checks passed" if not failed else f"failed: {', '.join(failed)}")

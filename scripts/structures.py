@@ -106,7 +106,8 @@ SKELETON: tuple[Structure, ...] = (
 
 STRUCTURES = ORGANS
 REFERENCE = ORGANS + SKELETON
-SETS = {"organs": ORGANS, "reference": REFERENCE}
+SETS = {"organs": ORGANS, "reference": REFERENCE, "skeleton": SKELETON}
+RULED_SETS = ("reference", "skeleton")  # the sets built under the cut and symmetry rules
 
 # TotalSegmentator tasks whose weights are Apache-2.0. Licensed tasks are never run.
 # The README lists them under "Openly available for any usage (Apache-2.0 license)":

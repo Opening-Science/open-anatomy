@@ -13,7 +13,7 @@ TERM = re.compile(r"^(UBERON:\d{7}|FMA:\d+)$")
 
 def test_the_reference_set_is_the_organs_then_the_skeleton() -> None:
     assert REFERENCE == ORGANS + SKELETON
-    assert SETS == {"organs": ORGANS, "reference": REFERENCE}
+    assert SETS == {"organs": ORGANS, "reference": REFERENCE, "skeleton": SKELETON}
 
 
 def test_labels_terms_and_names_are_unique() -> None:

@@ -28,7 +28,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from structures import ALLOWED_TASKS, SETS  # noqa: E402
+from structures import ALLOWED_TASKS, RULED_SETS, SETS  # noqa: E402
 
 TASK = "total"
 BODY_TASK = "body"  # trunk outline, for the reference set only
@@ -73,7 +73,7 @@ def main() -> None:
         quiet=True,
     )
 
-    if args.set == "reference":
+    if args.set in RULED_SETS:
         # The trunk outline (body_trunc) is used only to measure the body for the
         # fit in blender/assemble.py; it is never exported.
         totalsegmentator(

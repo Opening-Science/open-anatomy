@@ -579,3 +579,61 @@ def test_write_glb_names_nodes_by_term_and_marks_modelled_ones(tmp_path: Path) -
     assert gltf["nodes"][0]["extras"]["term"] == REFERENCE[0].term
     assert "modelled" not in gltf["nodes"][0]["extras"]
     assert gltf["nodes"][1]["extras"]["modelled"] is True
+
+
+# settle_fragments: detached pieces of bones before meshing
+
+
+def vertebra_pair(tmp_path: Path, chip: tuple[int, int, int] | None, moved: bool) -> Path:
+    """T1 above T2, both 10-voxel cubes. T1's mask may carry a chip: either a
+    piece lying on T2 (the segmentation's label error), or a small far one."""
+    shape = (40, 40, 60)
+    t1 = box(shape, (15, 15, 30), (25, 25, 40))
+    t2 = box(shape, (15, 15, 18), (25, 25, 28))
+    if chip is not None:
+        lo = chip
+        hi = (lo[0] + 5, lo[1] + 5, lo[2] + 4) if moved else (lo[0] + 2, lo[1] + 2, lo[2] + 2)
+        t1 |= box(shape, lo, hi)
+    save(tmp_path / "vertebrae_T1.nii.gz", t1)
+    save(tmp_path / "vertebrae_T2.nii.gz", t2)
+    return tmp_path
+
+
+def test_a_piece_on_the_neighbour_is_moved_to_it(tmp_path: Path) -> None:
+    seg = vertebra_pair(tmp_path, chip=(15, 25, 20), moved=True)  # 100 voxels against T2
+    masks, notes = mesh.settle_fragments(seg, ["vertebrae_T1", "vertebrae_T2"])
+    assert notes == [
+        {"label": "vertebrae_T1", "voxels": 100, "ml": pytest.approx(0.1, abs=1e-6),
+         "share": pytest.approx(100 / 1100, abs=1e-4), "action": "moved", "to": "vertebrae_T2"}
+    ]  # fmt: skip
+    assert masks["vertebrae_T1"].sum() == 1000
+    assert masks["vertebrae_T2"].sum() == 1100
+    assert mesh.ndimage.label(masks["vertebrae_T2"], structure=np.ones((3, 3, 3)))[1] == 1
+
+
+def test_a_small_far_chip_is_dropped(tmp_path: Path) -> None:
+    seg = vertebra_pair(tmp_path, chip=(5, 5, 50), moved=False)  # 8 voxels, touching nothing
+    # 8 of 1008 is under 2%, so it is only noise the manifest records; make it bigger.
+    t1 = np.asanyarray(nib.load(seg / "vertebrae_T1.nii.gz").dataobj) > 0
+    t1 |= box(t1.shape, (3, 3, 48), (7, 7, 51))  # 48 voxels in all, 4.6%: a fragment
+    save(seg / "vertebrae_T1.nii.gz", t1)
+    masks, notes = mesh.settle_fragments(seg, ["vertebrae_T1", "vertebrae_T2"])
+    assert [n["action"] for n in notes] == ["dropped"]
+    assert masks["vertebrae_T1"].sum() == 1000
+
+
+def test_a_large_loose_piece_is_left_for_the_build_to_stop_on(tmp_path: Path) -> None:
+    seg = vertebra_pair(tmp_path, chip=None, moved=False)
+    t1 = np.asanyarray(nib.load(seg / "vertebrae_T1.nii.gz").dataobj) > 0
+    t1 |= box(t1.shape, (2, 2, 46), (9, 9, 53))  # 343 voxels, 26%: touching nothing
+    save(seg / "vertebrae_T1.nii.gz", t1)
+    masks, notes = mesh.settle_fragments(seg, ["vertebrae_T1", "vertebrae_T2"])
+    assert notes == []
+    assert masks["vertebrae_T1"].sum() == 1343
+
+
+def test_pieces_in_line_are_left_for_bridging(tmp_path: Path) -> None:
+    rib = two_piece_rib(gap_voxels=5)
+    save(tmp_path / "rib_left_5.nii.gz", rib)
+    masks, notes = mesh.settle_fragments(tmp_path, ["rib_left_5"])
+    assert notes == [] and masks["rib_left_5"].sum() == rib.sum()
