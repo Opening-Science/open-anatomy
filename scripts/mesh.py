@@ -55,7 +55,7 @@ from structures import SETS, Structure, node_name  # noqa: E402
 
 # RAS millimetres to glTF metres: X = -R (the body's left), Y = S, Z = A.
 # Limb bones run out of a trunk scan by design; their joint ends are what count.
-MIN_VOXELS = 100  # a mask smaller than this (0.3 ml at 1.5 mm) is a stray label, not a bone
+MIN_ML = 0.3  # a mask smaller than this is a stray label, not a bone (volume, not voxels)
 CUT_ALLOWED = {"femur_left", "femur_right", "humerus_left", "humerus_right"}
 OUTLINE = Structure("body_trunc", "outline", "trunk outline", "outline", (0.8, 0.8, 0.8))
 RAS_TO_GLTF = np.array([[-1, 0, 0], [0, 0, 1], [0, 1, 0]], dtype=np.float64) * 0.001
@@ -98,13 +98,22 @@ def decimate(poly: vtk.vtkPolyData, max_triangles: int) -> vtk.vtkPolyData:
     return poly
 
 
-def cut_by_scan(path: Path) -> bool:
-    """True if the mask is too small to mesh or touches the scan's first or last axial slice."""
-    data = np.asanyarray(nib.load(path).dataobj) > 0
-    if data.sum() < MIN_VOXELS:
-        return True
+def cut_reason(path: Path) -> str | None:
+    """Why a mask cannot be a whole structure, or None if it is whole.
+
+    Smaller than MIN_ML (measured with the voxel size from the affine, so the
+    limit is the same at 0.8 mm and 1.5 mm), or touching the scan's first or
+    last axial slice.
+    """
+    image = nib.load(path)
+    data = np.asanyarray(image.dataobj) > 0
+    ml = data.sum() * abs(np.linalg.det(image.affine[:3, :3])) / 1000
+    if ml < MIN_ML:
+        return f"absent or a stray label ({ml:.2f} ml)"
     k = np.flatnonzero(data.any((0, 1)))
-    return bool(k[0] == 0 or k[-1] == data.shape[2] - 1)
+    if k[0] == 0 or k[-1] == data.shape[2] - 1:
+        return "cut by the scan's first or last slice"
+    return None
 
 
 def enclosed_volume(poly: vtk.vtkPolyData) -> float:
@@ -340,19 +349,21 @@ def main() -> None:
     work = args.out_dir or ROOT / "data" / "work" / args.case
     work.mkdir(parents=True, exist_ok=True)
     seg_dir = args.seg_dir or work / "seg"
-    parts, missing = [], []
+    parts, missing, reasons = [], [], {}
     for s in SETS[args.set]:
         bone = s.system == "skeletal"
         cap = args.max_bone_triangles if bone else args.max_triangles
         path = seg_dir / f"{s.label}.nii.gz"
-        if args.set == "reference" and s.label not in CUT_ALLOWED and cut_by_scan(path):
+        checked = args.set == "reference" and s.label not in CUT_ALLOWED
+        reason = cut_reason(path) if checked else None
+        if reason:
             # A bone the scan covers only partly (an upper cervical vertebra) would
             # be a fragment; it is listed instead. Every organ must be whole.
             if not bone:
-                sys.exit(
-                    f"{s.label}: empty or cut by the scan in {args.case}; organs must be whole"
-                )
+                sys.exit(f"{s.label}: {reason} in {args.case}; organs must be whole")
             missing.append(s.label)
+            reasons[s.label] = reason
+            print(f"{s.label}: {reason}; listed as missing", file=sys.stderr)
             continue
         try:
             ras, triangles, dropped = surface(path, cap)
@@ -360,6 +371,7 @@ def main() -> None:
             if not bone:
                 sys.exit(f"{s.label}: the mask is empty in {args.case}; organs must be whole")
             missing.append(s.label)
+            reasons[s.label] = "empty mask"
             continue
         if dropped > MAX_DROPPED_SHARE:
             message = (
@@ -428,6 +440,7 @@ def main() -> None:
         ],
     }
     manifest["missing"] = missing
+    manifest["missing_reasons"] = reasons
     (work / f"{args.case}.{args.set}.manifest.json").write_text(
         json.dumps(manifest, indent=2) + "\n"
     )
