@@ -5,9 +5,34 @@ description = "Open, imaging-based human anatomy models built from scripts"
 license = "Apache-2.0"
 requires-python = ">=3.11"
 
+# Tools for the unit tests and the type check. Install with
+#   pip install --group test   (pip 25.1+)   or   uv pip install --group test
+[dependency-groups]
+test = ["pytest==9.2.0"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# Modules in scripts/ count as first-party imports in tests.
+src = [".", "scripts"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers", "--import-mode=importlib"]
+
+# Pyright runs in strict mode on scripts/ and tests/. Scripts that run inside
+# Blender import bpy, bmesh or mathutils, which exist only there, so each such
+# script is listed under exclude. tests/test_repo_config.py fails when a
+# Blender script is missing from this list. Keep Blender-only code in those
+# scripts and put pure-Python logic in modules that are type checked.
+[tool.pyright]
+include = ["scripts", "tests"]
+exclude = ["scripts/self_check.py"]
+extraPaths = ["scripts"]
+pythonVersion = "3.11"
+typeCheckingMode = "strict"
+venvPath = "."
+venv = ".venv"

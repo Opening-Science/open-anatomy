@@ -13,14 +13,146 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Each job's `name:` is what branch protection lists as a required check, so
+# keep the names short and do not rename them lightly.
+# Actions are pinned by commit SHA; the comment gives the release tag.
+
 jobs:
-  check:
-    name: Lint and self-check
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: pipx run ruff==0.17.4 check scripts
-      - run: pipx run ruff==0.17.4 format --check scripts
-      - run: shellcheck scripts/*.sh
-      # No Blender on the runner, so this reports a skip. Run it locally with Blender.
-      - run: scripts/self-check.sh
+        with:
+          persist-credentials: false
+      - name: Ruff
+        run: |
+          # Lint only the Python folders that exist, so adding one is enough.
+          paths=()
+          for dir in scripts blender tests; do
+            if [[ -d "$dir" ]]; then paths+=("$dir"); fi
+          done
+          pipx run ruff==0.17.4 check "${paths[@]}"
+          pipx run ruff==0.17.4 format --check "${paths[@]}"
+      - name: ShellCheck
+        run: shellcheck scripts/*.sh
+
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Install the test group
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install pip==26.3
+          .venv/bin/python -m pip install --group test
+      - run: .venv/bin/pytest
+
+  type-check:
+    name: Type check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      # Pyright reads .venv (see [tool.pyright] in pyproject.toml) to resolve pytest.
+      - name: Install the test group
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install pip==26.3
+          .venv/bin/python -m pip install --group test
+      - run: npx --yes pyright@1.1.414
+
+  blender-self-check:
+    name: Blender self-check
+    runs-on: ubuntu-latest
+    env:
+      # Bump the version and its SHA-256 together. The hash is copied from
+      # https://download.blender.org/release/Blender5.2/blender-5.2.3.sha256
+      BLENDER_VERSION: 5.2.3
+      BLENDER_SHA256: 78486c018b4443efe5e75ab54c290ed8c15abafd249b862c2c9ce2530a918eec
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Only the tarball is cached; it is checked against the pinned hash on
+      # every run, cached or not, before it is unpacked.
+      - name: Cache the Blender tarball
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/blender-download
+          key: blender-${{ env.BLENDER_VERSION }}-linux-x64-${{ env.BLENDER_SHA256 }}
+      - name: Install Blender
+        run: |
+          tarball="blender-${BLENDER_VERSION}-linux-x64.tar.xz"
+          mkdir -p ~/blender-download ~/blender
+          if [[ ! -f ~/blender-download/"$tarball" ]]; then
+            curl -fsSL -o ~/blender-download/"$tarball" \
+              "https://download.blender.org/release/Blender${BLENDER_VERSION%.*}/$tarball"
+          fi
+          echo "${BLENDER_SHA256}  $HOME/blender-download/$tarball" | sha256sum -c -
+          tar -xJf ~/blender-download/"$tarball" -C ~/blender --strip-components=1
+      # System libraries the Blender binary links against that are not bundled
+      # in its lib/ folder (X11, input, GL). Headless runs still load them.
+      - name: Install system libraries
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            libx11-6 libxext6 libxfixes3 libxi6 libxrender1 libxkbcommon0 \
+            libxt6t64 libsm6 libice6 libgl1 libglx0 libopengl0 libegl1
+      - name: Self-check
+        run: |
+          ~/blender/blender --version
+          BLENDER="$HOME/blender/blender" scripts/self-check.sh
+
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # The official gitleaks action needs a paid licence for organisations, so
+      # use the open-source CLI. Bump the version and its SHA-256 (from the
+      # release's checksums file) together.
+      - name: Install gitleaks
+        env:
+          GITLEAKS_VERSION: 8.30.1
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          curl -fsSL -o gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz gitleaks
+          sudo mv gitleaks /usr/local/bin/gitleaks
+          rm gitleaks.tar.gz
+          gitleaks version
+      - name: Scan
+        run: gitleaks detect --source . --config .gitleaks.toml --verbose --redact
+
+  data-guard:
+    name: Data guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: python3 scripts/data_guard.py
+
+  licence-check:
+    name: Licence check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: python3 scripts/licence_check.py
