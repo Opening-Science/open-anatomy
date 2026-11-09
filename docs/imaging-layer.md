@@ -67,6 +67,11 @@ A head guard (`face_free_top`) keeps faces out:
   the top of C7 alone is not a safe cut.
 - If any of C1–C6 is in the scan, nothing above the top of C7 reaches an
   image. Without C7, the cut is 2 cm below the lowest of them.
+- The slices stop at the lowest of these cuts. 2 cm is turned into slices
+  from the scan's own slice spacing (14 at 1.5 mm, 25 at 0.8 mm, 7 at 3 mm),
+  rounded up.
+- A case whose head comes within 2 cm of the scan's bottom slice is refused:
+  there would be no trunk below the cut to show.
 - `scripts/imaging_check.py` tests these rules on synthetic masks in CI.
 
 The male case s0903 shows why the skull rule matters. His head is bowed, and

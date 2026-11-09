@@ -19,9 +19,11 @@ writes, in data/imaging/<body>/:
 The slices are cut at kidney level (axial), through the kidneys (coronal) and
 on the spine's midline (sagittal), and cropped to the trunk, from 5 cm below
 the femurs' top to the scan top. A head guard (face_free_top) refuses a case
-whose skull and brain were not segmented, and stops every slice at the top of
-C7 when the scan reaches the head, so no face is ever included. This is CT, not
-MRI: "MRI layer" is the product name for an imaging-style view. Pure numpy;
+whose skull and brain were not segmented, and when the scan reaches the head
+stops every slice at the lowest of the C7 and skull/brain cuts (the top of C7,
+2 cm below the lowest skull or brain voxel), so no face is ever included; a
+case whose head comes within 2 cm of the scan's bottom is refused. This is CT,
+not MRI: "MRI layer" is the product name for an imaging-style view. Pure numpy;
 the same inputs give the same bytes.
 """
 
@@ -47,22 +49,29 @@ from structures import HEAD_GUARD, REFERENCE  # noqa: E402
 WINDOWS = {"soft": (400, 40), "bone": (1800, 400)}
 TINT = 0.38  # share of a structure's colour mixed into its voxels
 SOURCE_LICENCE = "CC-BY-4.0"
-GUARD_MARGIN_SLICES = 14  # about 2 cm at 1.5 mm
+GUARD_MARGIN_MM = 20.0  # how far below the head or neck the guard cuts
 
 
 NECK = [f"vertebrae_C{i}" for i in range(1, 7)]
 
 
-def face_free_top(masks: dict[str, np.ndarray | None]) -> int | None:
+def guard_margin(spacing_mm: float) -> int:
+    """GUARD_MARGIN_MM in axial slices, rounded up so it is never less than 2 cm."""
+    return int(np.ceil(GUARD_MARGIN_MM / spacing_mm - 1e-9))
+
+
+def face_free_top(masks: dict[str, np.ndarray | None], margin: int) -> int | None:
     """The highest axial index (canonical, superior = higher) a slice may show.
 
-    masks maps HEAD_GUARD labels and C1-C6 to their masks, plus vertebrae_C7.
+    masks maps HEAD_GUARD labels and C1-C6 to their masks, plus vertebrae_C7;
+    margin is 2 cm in slices (guard_margin).
     With none of the skull, brain or C1-C6 in the scan, the scan starts below
     the head and nothing is cropped (None). Otherwise the cut is the lowest of:
     2 cm below the lowest skull or brain voxel (a bowed head brings the jaw down
     beside the neck, level with C7), the top of C7, and, without C7, 2 cm below
     the lowest of C1-C6. A guard label that was never segmented (None) is an
-    error: absence must be shown, not assumed.
+    error: absence must be shown, not assumed. The result can be negative when
+    the head reaches the scan's bottom; apply_head_guard refuses that case.
     """
     for label in HEAD_GUARD:
         if masks.get(label) is None:
@@ -79,13 +88,38 @@ def face_free_top(masks: dict[str, np.ndarray | None]) -> int | None:
         return None
     cuts = []
     if head:
-        cuts.append(lowest(head) - GUARD_MARGIN_SLICES)
+        cuts.append(lowest(head) - margin)
     c7 = masks.get("vertebrae_C7")
     if c7 is not None and c7.any():
         cuts.append(int(np.flatnonzero(c7.any((0, 1)))[-1]))
     elif neck:
-        cuts.append(lowest(neck) - GUARD_MARGIN_SLICES)
+        cuts.append(lowest(neck) - margin)
     return min(cuts)
+
+
+def apply_head_guard(
+    body: np.ndarray, masks: dict[str, np.ndarray | None], spacing_mm: float
+) -> tuple[np.ndarray, int | None]:
+    """The body mask with nothing above face_free_top, and that top (None: no cut).
+
+    Raises ValueError when a guard mask is missing, when the head comes within
+    the margin of the scan's bottom slice (a negative top, which as an index
+    would wrap round and blank only the top slices), or when nothing of the
+    body is left below the cut.
+    """
+    top = face_free_top(masks, guard_margin(spacing_mm))
+    if top is None:
+        return body, None
+    if top < 0:
+        raise ValueError(
+            f"the head reaches within {GUARD_MARGIN_MM:.0f} mm of the scan's bottom slice "
+            f"(cut at {top}); refusing the case"
+        )
+    body = body.copy()
+    body[:, :, top + 1 :] = False  # top + 1 >= 1, so this never wraps
+    if not body.any():
+        raise ValueError("nothing of the trunk is left below the head")
+    return body, top
 
 
 def srgb(linear) -> np.ndarray:
@@ -276,19 +310,19 @@ def main() -> None:
     for label in (*HEAD_GUARD, *NECK, "vertebrae_C7"):
         path = work / "seg" / f"{label}.nii.gz"
         guard[label] = np.asanyarray(canonical(path).dataobj) > 0 if path.exists() else None
+    spacing = float(np.linalg.norm(affine[:3, 2]))
     try:
-        top = face_free_top(guard)
+        body, top = apply_head_guard(body, guard, spacing)
     except ValueError as error:
-        sys.exit(f"head guard: {error}")
+        sys.exit(f"head guard: {case}: {error}")
     if top is not None:
-        body[:, :, top + 1 :] = False  # nothing above the guard reaches an image
         print(f"head guard: the scan reaches the head; slices stop at axial index {top}")
-    if not body.any():
-        sys.exit("head guard: nothing of the trunk is left below the head")
     inside = np.argwhere(body)
     lo = inside.min(0)
     hi = inside.max(0)
-    lo[2] = max(int(lo[2]), femur_top - int(round(50 / np.linalg.norm(affine[:3, 2]))))
+    lo[2] = max(int(lo[2]), femur_top - int(round(50 / spacing)))
+    if lo[2] > hi[2]:
+        sys.exit(f"head guard: {case}: nothing is left between the femurs and the head cut")
     crop = tuple(slice(int(a), int(b) + 1) for a, b in zip(lo, hi, strict=True))
     ct, labels, body = ct[crop], labels[crop], body[crop]
     offset = lo
