@@ -18,7 +18,7 @@ writes, in data/imaging/<body>/:
 
 The slices are cut at kidney level (axial), through the kidneys (coronal) and
 on the spine's midline (sagittal), and cropped to the trunk, from 5 cm below
-the hip joints to the scan top. A head guard (face_free_top) refuses a case
+the femurs' top to the scan top. A head guard (face_free_top) refuses a case
 whose skull and brain were not segmented, and stops every slice at the top of
 C7 when the scan reaches the head, so no face is ever included. This is CT, not
 MRI: "MRI layer" is the product name for an imaging-style view. Pure numpy;
@@ -88,6 +88,13 @@ def face_free_top(masks: dict[str, np.ndarray | None]) -> int | None:
     return min(cuts)
 
 
+def srgb(linear) -> np.ndarray:
+    """Linear RGB (structures.py's colours) to sRGB, the space of a PNG and of a
+    glTF baseColorTexture, so a tint matches the same structure's mesh."""
+    c = np.clip(np.asarray(linear, dtype=np.float64), 0, 1)
+    return np.where(c <= 0.0031308, 12.92 * c, 1.055 * c ** (1 / 2.4) - 0.055)
+
+
 def canonical(path: Path) -> nib.Nifti1Image:
     return nib.as_closest_canonical(nib.load(path))  # voxel axes along R, A, S
 
@@ -128,7 +135,7 @@ def slice_image(ct, labels, body, axis: int, index: int, window) -> tuple[np.nda
     rgb = np.repeat(grey[..., None], 3, -1)
     for i, s in enumerate(REFERENCE, start=1):
         hit = lab == i
-        rgb[hit] = (1 - TINT) * rgb[hit] + TINT * np.array(s.colour)
+        rgb[hit] = (1 - TINT) * rgb[hit] + TINT * srgb(s.colour)
     alpha = inside.astype(np.float64)
     image = np.dstack([rgb, alpha])
     # The 2D array's axes are the two remaining voxel axes, in order. Rows run
@@ -250,17 +257,21 @@ def main() -> None:
             labels[np.asanyarray(canonical(path).dataobj) > 0] = i
     body = np.asanyarray(canonical(work / "seg" / "body_trunc.nii.gz").dataobj) > 0
 
-    def centroid(label: str) -> np.ndarray:
-        i = [s.label for s in REFERENCE].index(label) + 1
-        return np.argwhere(labels == i).mean(0)
+    def voxels(label: str) -> np.ndarray:
+        found = np.argwhere(labels == [s.label for s in REFERENCE].index(label) + 1)
+        if not len(found):
+            sys.exit(f"{case}: {label} is empty or missing in {work / 'seg'}; "
+                     "imaging.py needs it to place the slices")  # fmt: skip
+        return found
 
-    kidneys = (centroid("kidney_left") + centroid("kidney_right")) / 2
+    kidneys = (voxels("kidney_left").mean(0) + voxels("kidney_right").mean(0)) / 2
     spine = np.argwhere(np.isin(labels, [
         i for i, s in enumerate(REFERENCE, 1) if s.label.startswith("vertebrae_")
     ])).mean(0)  # fmt: skip
-    femurs = [np.argwhere(labels == [s.label for s in REFERENCE].index(f) + 1)
-              for f in ("femur_left", "femur_right")]  # fmt: skip
-    hip_k = max(int(f[:, 2].max()) for f in femurs)  # the femoral heads' top
+    # The femurs' top: the head or the greater trochanter, whichever is higher.
+    # Both femurs are needed, so the crop's bottom does not depend on which one
+    # the scan happened to keep.
+    femur_top = max(int(voxels(f)[:, 2].max()) for f in ("femur_left", "femur_right"))
     guard = {}
     for label in (*HEAD_GUARD, *NECK, "vertebrae_C7"):
         path = work / "seg" / f"{label}.nii.gz"
@@ -277,7 +288,7 @@ def main() -> None:
     inside = np.argwhere(body)
     lo = inside.min(0)
     hi = inside.max(0)
-    lo[2] = max(int(lo[2]), hip_k - int(round(50 / np.linalg.norm(affine[:3, 2]))))
+    lo[2] = max(int(lo[2]), femur_top - int(round(50 / np.linalg.norm(affine[:3, 2]))))
     crop = tuple(slice(int(a), int(b) + 1) for a, b in zip(lo, hi, strict=True))
     ct, labels, body = ct[crop], labels[crop], body[crop]
     offset = lo
