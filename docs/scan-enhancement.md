@@ -23,7 +23,8 @@ anything derived from it, and its measures stay on that machine.
   or any other shared place, because body measures identify a person.
 - **No face render ever leaves the machine**, and a protected face region (no
   smoothing, no filling) is required before any real scan is processed;
-  `scripts/scan_quality.py --real` refuses to run without it.
+  `scripts/scan_quality.py --real` refuses to run without it, and every run
+  fails when the face changed beyond its limit (below).
 
 ## Disk budget
 
@@ -84,13 +85,18 @@ below works from the scan itself.
 | --- | --- | --- |
 | **Mesh validity** | holes, open and non-manifold edges, edges whose faces disagree on their winding | none after, and fewer than before |
 | **Shape change** | distance from the cleaned surface to the input surface, per region | mean / 95th percentile under: trunk 2 / 5 mm, head 1 / 3 mm, hands 1 / 3 mm, feet 1.5 / 4 mm: the person stays the person |
+| **Face unchanged** | the same distance on the face alone (the front of the head below the brow) | mean / 95th percentile under 0.5 / 1 mm: a protected face is neither smoothed nor filled |
 | **Repeatability** | stature and hip breadth measured on repeat scans of the same body | spread under 10 mm |
 | **Plausibility** | the same measures against ANSUR II for the sex | between the 1st and 99th percentiles. Outside is a flag to look at, never a reason to reject or reshape the scan: real people fall outside a military survey |
 | **Scanner landmarks** | the scanner's own markers and measurements (heights, distances, cross-sections) re-measured on the cleaned mesh | each marker moves under 2 mm along its normal, each measurement drifts under 1% |
 | **Rig preserved** | the skin's joints, every vertex's weights, the UVs and texture | same joints, every vertex weighted, weights summing to 1 |
 
 `scripts/scan_quality.py` computes these from cleanup_mesh.py's report and
-output. The scanner-landmark measure needs a measurements file; on the
+output, and exits with status 1 when any region of any run, the face included,
+is over its mean or 95th-percentile limit. The face is checked on its own
+because it is small: a crumpled face moves the head's numbers too little to
+fail them. With `--real` a run without its input surface is refused, since
+then the face cannot be checked. The scanner-landmark measure needs a measurements file; on the
 synthetic demo it is skipped, since ANNY has no scanner markers.
 
 Reprojection against camera photos is not available from this scanner's
@@ -119,22 +125,26 @@ every vertex's weights summing to 1, at most 4 joints per vertex.
 Shape change by region (mean / 95th percentile, all three repeats): trunk
 0.82–0.83 / 2.3 mm, head 0.52–0.53 / 1.6 mm, hands 0.65–0.73 / 1.6–1.9 mm,
 feet 0.59–0.62 / 1.7–1.8 mm, all inside their limits. The head passes on
-distance while the close-up shows the inner eye and mouth surfaces crumpled:
-a mean distance does not see damage to fine detail, which is why face
-protection is required rather than measured.
+distance while the close-up shows the inner eye and mouth surfaces crumpled.
+The face alone does not: 0.39–0.40 / 1.14–1.16 mm, over its 0.5 / 1 mm limit,
+so `scan_quality.py` fails all three repeats. That is the intended result:
+the demo cleanup does not protect the face yet.
 
 Repeatability spread: stature 4.2 mm, hip breadth 1.0 mm. Both measures are
 inside ANSUR II's range for women. These repeats damage one synthetic body
 three ways; they test that the cleanup and the measures are stable, not how
-repeatable a real scanner is, which needs repeat scans of one person.
+repeatable a real scanner is. Real repeat scans of one person differ in pose,
+breathing and clothing, none of which is in these repeats, so 4.2 mm is not a
+scanner's repeatability; that needs repeat scans of one person.
 
 ## What is not good enough yet
 
 - **One hole in three repeats stays open.** The hole filler leaves it when the
   punched hole meets the noise; the next fix tries a second pass.
 - **The face is damaged by the cleanup.** Around the eyes and mouth, smoothing
-  crumples ANNY's inner surfaces. A real scan's face must be protected (no
-  smoothing in a face region) before any real scan is processed.
+  crumples ANNY's inner surfaces, and `scan_quality.py` fails the demo on the
+  face's change. A real scan's face must be protected (no smoothing in a face
+  region) before any real scan is processed.
 - **Chest breadth is not measured.** Where the arms rest against the chest
   there is no gap to tell them from the trunk.
 - **Attribute names change case.** Blender's glTF exporter writes custom

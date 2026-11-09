@@ -9,9 +9,9 @@ each run it reports:
 - validity before and after: holes, open and non-manifold edges, edges whose
   faces disagree on their winding (from the report);
 - shape change: the cleaned surface against the input, mean and 95th
-  percentile in mm, per region (trunk, head, hands, feet), each under its
-  REGION_TOLERANCE_MM (the person must stay the person); on a demo body, also
-  the error against the undamaged body;
+  percentile in mm, per region (trunk, head, hands, feet, and the face within
+  the head), each under its REGION_TOLERANCE_MM (the person must stay the
+  person); on a demo body, also the error against the undamaged body;
 - body measures: stature and hip breadth on the cleaned surface (chest breadth
   is not taken where the arms touch the chest),
   each placed among the ANSUR II percentiles for the sex.
@@ -23,8 +23,13 @@ docs/scan-enhancement.md) and is reported as not measured until then.
 
 It reads only local files and writes only --out: no network, no logging of
 anything from the scan beyond these numbers, which stay on the machine too.
-With --real it refuses any run whose cleanup did not protect a face region.
-ANSUR II outside the 1st to 99th percentile is a flag, never a reject.
+It exits with status 1, after reporting, when any region of any run changed
+beyond its limit at the mean or the 95th percentile; the face is one of those
+regions, so a cleanup that smooths or fills the face fails here even when the
+head as a whole passes. With --real it refuses any run whose cleanup did not
+protect a face region, or whose input surface is missing so the face cannot
+be checked. ANSUR II outside the 1st to 99th percentile is a flag, never a
+reject.
 """
 
 from __future__ import annotations
@@ -42,10 +47,14 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from size_body import accessor, read_glb  # noqa: E402
 
-# Per region: (mean, 95th percentile) shape change allowed, mm.
+# Per region: (mean, 95th percentile) shape change allowed, mm. The face lies
+# inside the head; a protected face is neither smoothed nor filled, so it may
+# barely move.
 REGION_TOLERANCE_MM = {"trunk": (2.0, 5.0), "head": (1.0, 3.0), "hands": (1.0, 3.0),
-                       "feet": (1.5, 4.0)}  # fmt: skip
+                       "feet": (1.5, 4.0), "face": (0.5, 1.0)}  # fmt: skip
 HEAD_ABOVE, FEET_BELOW = 0.87, 0.05  # fractions of stature
+FACE_BELOW = 0.96  # fraction of stature: the face lies between the chin and the brow
+FACE_FRONT = 0.25  # the front of the head: past this share of its half-depth (+Z front)
 NEAREST = 8  # triangles checked exactly per vertex
 REPEAT_TOLERANCE_MM = 10.0
 HIP_AT = 0.52  # fraction of stature where hip breadth is taken (ANSUR-like)
@@ -116,7 +125,15 @@ def regions(points: np.ndarray) -> dict[str, np.ndarray]:
     hip_half = np.percentile(side[(h > 0.48) & (h < 0.56)], 60)
     hands = (h > 0.3) & (h < 0.5) & (side > hip_half + 30)
     trunk = ~(head | feet | hands)
-    return {"trunk": trunk, "head": head, "hands": hands, "feet": feet}
+    # The face: the front of the head below the brow. It overlaps the head
+    # region on purpose, so a face change too small to move the head's numbers
+    # is still caught.
+    face = head & (h < FACE_BELOW)
+    if head.any():
+        z = points[:, 2]
+        centre = float(np.median(z[head]))
+        face &= z > centre + FACE_FRONT * (float(z[head].max()) - centre)
+    return {"trunk": trunk, "head": head, "hands": hands, "feet": feet, "face": face}
 
 
 def closest_on_triangles(p: np.ndarray, a: np.ndarray, b: np.ndarray, c: np.ndarray) -> np.ndarray:
@@ -162,6 +179,10 @@ def shape_change(output: tuple, source: tuple) -> dict[str, dict[str, float]]:
     for name, mask in regions(output[0]).items():
         d = best[mask]
         mean_lim, p95_lim = REGION_TOLERANCE_MM[name]
+        if not len(d):
+            # A region that cannot be found cannot be shown to be unchanged.
+            out[name] = {"meanMm": None, "p95Mm": None, "within": False}
+            continue
         out[name] = {
             "meanMm": round(float(d.mean()), 3), "p95Mm": round(float(np.percentile(d, 95)), 3),
             "within": bool(d.mean() <= mean_lim and np.percentile(d, 95) <= p95_lim),
@@ -186,8 +207,12 @@ def main() -> None:
         if args.real and not report.get("faceProtected"):
             sys.exit(f"{run.name}: refused: the cleanup did not protect a face region, which a "
                      "real scan requires (docs/scan-enhancement.md)")  # fmt: skip
+        has_input = (run / "demo.input.glb").exists()
+        if args.real and not has_input:
+            sys.exit(f"{run.name}: refused: demo.input.glb is missing, so the face's change "
+                     "cannot be checked")  # fmt: skip
         output = surface(run / "demo.lod0.glb")
-        source = surface(run / "demo.input.glb") if (run / "demo.input.glb").exists() else None
+        source = surface(run / "demo.input.glb") if has_input else None
         body = measures(*output)
         keys = ("holes", "openEdges", "nonManifoldEdges", "inconsistentEdges")
         entry = {
@@ -221,6 +246,9 @@ def main() -> None:
         "runs": runs,
         "repeatabilitySpreadMm": repeat,
         "repeatable": bool(all(v <= REPEAT_TOLERANCE_MM for v in repeat.values())),
+        "shapeChangeWithinLimits": all(
+            m["within"] for r in runs for m in (r["shapeChangeByRegionMm"] or {}).values()
+        ),
         "tolerances": {"shapeChangeMm": REGION_TOLERANCE_MM, "repeatSpreadMm": REPEAT_TOLERANCE_MM},
     }
     text = json.dumps(summary, indent=2)
@@ -245,6 +273,14 @@ def main() -> None:
             print(f"    {ok} {region}: mean {m['meanMm']} / p95 {m['p95Mm']} mm")
     ok = summary["repeatable"]
     print(f"repeatability spread (mm): {repeat}; within {REPEAT_TOLERANCE_MM} mm: {ok}")
+    over = [
+        f"{r['run']} {region}"
+        for r in runs
+        for region, m in (r["shapeChangeByRegionMm"] or {}).items()
+        if not m["within"]
+    ]
+    if over:
+        sys.exit(f"FAIL: shape changed beyond its limit in {', '.join(over)}")
 
 
 if __name__ == "__main__":

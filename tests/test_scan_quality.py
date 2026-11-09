@@ -13,7 +13,6 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 import pytest
-
 import scan_quality
 from scan_quality import closest_on_triangles, cross_section, measures, regions, shape_change
 
@@ -105,6 +104,17 @@ def test_regions_split_head_feet_hands_and_trunk() -> None:
     assert all(m.any() for m in masks.values())
 
 
+def test_the_face_is_the_front_of_the_head_below_the_brow() -> None:
+    points, _ = standing_body()
+    masks = regions(points)
+    h = points[:, 1] / STATURE
+    # The head tube is 100 mm deep each way about z = 0 (+Z is the front).
+    front = points[:, 2] > scan_quality.FACE_FRONT * 100.0
+    expected = masks["head"] & (h < scan_quality.FACE_BELOW) & front
+    np.testing.assert_array_equal(masks["face"], expected)
+    assert not (masks["face"] & ~masks["head"]).any()
+
+
 A = np.array([0.0, 0.0, 0.0])
 B = np.array([1.0, 0.0, 0.0])
 C = np.array([0.0, 1.0, 0.0])
@@ -152,7 +162,7 @@ def test_closest_on_triangles_beats_dense_sampling() -> None:
 def test_no_change_is_within_every_tolerance() -> None:
     body = standing_body()
     result = shape_change(body, body)
-    assert set(result) == {"trunk", "head", "hands", "feet"}
+    assert set(result) == {"trunk", "head", "hands", "feet", "face"}
     for region in result.values():
         assert region == {"meanMm": 0.0, "p95Mm": 0.0, "within": True}
 
@@ -289,7 +299,7 @@ def test_real_refuses_when_the_report_does_not_say(
 def test_real_refuses_if_any_one_of_several_runs_is_unprotected(
     ansur_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    ok = make_run(ansur_root, "r1", standing_body(), face_protected=True)
+    ok = make_run(ansur_root, "r1", standing_body(), face_protected=True, source=standing_body())
     bad = make_run(ansur_root, "r2", standing_body())
     with pytest.raises(SystemExit, match="r2: refused"):
         run_main(monkeypatch, "--real", "--runs", str(ok), str(bad))
@@ -298,7 +308,8 @@ def test_real_refuses_if_any_one_of_several_runs_is_unprotected(
 def test_real_accepts_a_protected_run(
     ansur_root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    run = make_run(ansur_root, "r1", standing_body(), face_protected=True)
+    body = standing_body()
+    run = make_run(ansur_root, "r1", body, face_protected=True, source=body)
     run_main(monkeypatch, "--real", "--runs", str(run))
     assert "r1: holes 3 -> 0, flipped 12 -> 0" in capsys.readouterr().out
 
@@ -315,7 +326,7 @@ def test_a_demo_run_is_measured_and_written(
     assert entry["validity"]["before"]["holes"] == 3
     assert entry["validity"]["after"] == VALIDITY
     assert entry["errorAgainstUndamagedMm"] == {"before": {"meanMm": 2.5}, "after": {"meanMm": 0.9}}
-    assert set(entry["shapeChangeByRegionMm"]) == {"trunk", "head", "hands", "feet"}
+    assert set(entry["shapeChangeByRegionMm"]) == {"trunk", "head", "hands", "feet", "face"}
     assert all(r["within"] for r in entry["shapeChangeByRegionMm"].values())
     # Stature 1700 is inside the table; a 301 mm hip breadth is under its 1st percentile.
     stature, hips = entry["bodyMeasuresMm"]["stature"], entry["bodyMeasuresMm"]["hipbreadth"]
@@ -362,5 +373,62 @@ def test_repeat_runs_close_together_are_repeatable(
 def test_a_scan_without_an_undamaged_reference_is_reported(
     ansur_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    run = make_run(ansur_root, "r1", standing_body(), face_protected=True, undamaged=False)
+    body = standing_body()
+    run = make_run(ansur_root, "r1", body, face_protected=True, source=body, undamaged=False)
     run_main(monkeypatch, "--real", "--runs", str(run))
+
+
+# The face check: a body where only the face moves.
+
+
+def face_moved(by: float) -> Mesh:
+    """standing_body() with only its face region pushed forward by `by` mm."""
+    points, triangles = standing_body()
+    moved = points.copy()
+    moved[regions(points)["face"], 2] += by
+    return moved, triangles
+
+
+def test_a_face_change_fails_although_the_head_passes() -> None:
+    result = shape_change(face_moved(2.0), standing_body())
+    assert not result["face"]["within"]
+    assert result["face"]["p95Mm"] > scan_quality.REGION_TOLERANCE_MM["face"][1]
+    # The head as a whole and every other region stay within their limits: the
+    # face check catches what the head's numbers would not.
+    assert all(result[r]["within"] for r in ("head", "trunk", "hands", "feet"))
+
+
+def test_a_run_whose_face_moved_fails(
+    ansur_root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run = make_run(ansur_root, "r1", face_moved(2.0), source=standing_body())
+    out = ansur_root / "out.json"
+    with pytest.raises(SystemExit, match="FAIL: shape changed beyond its limit in r1 face"):
+        run_main(monkeypatch, "--runs", str(run), "--out", str(out))
+    # The numbers are still reported (locally) before it fails.
+    summary = json.loads(out.read_text())
+    assert summary["shapeChangeWithinLimits"] is False
+    assert "OVER face" in capsys.readouterr().out
+
+
+def test_a_real_run_whose_face_moved_fails_even_when_marked_protected(
+    ansur_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(ansur_root, "r1", face_moved(2.0), face_protected=True, source=standing_body())
+    with pytest.raises(SystemExit, match="r1 face"):
+        run_main(monkeypatch, "--real", "--runs", str(run))
+
+
+def test_a_real_run_without_its_input_is_refused(
+    ansur_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(ansur_root, "r1", standing_body(), face_protected=True)
+    with pytest.raises(SystemExit, match="r1: refused: demo.input.glb is missing"):
+        run_main(monkeypatch, "--real", "--runs", str(run))
+
+
+def test_an_unchanged_face_passes(ansur_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    run = make_run(ansur_root, "r1", face_moved(0.0), source=standing_body())
+    out = ansur_root / "out.json"
+    run_main(monkeypatch, "--runs", str(run), "--out", str(out))
+    assert json.loads(out.read_text())["shapeChangeWithinLimits"] is True
