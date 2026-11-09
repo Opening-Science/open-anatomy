@@ -79,8 +79,6 @@ from assemble import (  # noqa: E402
     trunk_points,
 )
 from mathutils import Matrix, Vector  # noqa: E402
-from size_body import uniform_scale  # noqa: E402
-from structures import SKELETON  # noqa: E402
 from twinblend.blender_env import (  # noqa: E402
     bake_world,
     coords,
@@ -93,6 +91,9 @@ from twinblend.blender_env import (  # noqa: E402
     sha256,
     write_json,
 )
+
+from size_body import uniform_scale  # noqa: E402
+from structures import SKELETON  # noqa: E402
 
 SPINE_BONES = ["spine05", "spine04", "spine03", "spine02", "spine01", "neck01"]
 VERTEBRAE = [s for s in SKELETON if s.label.startswith("vertebrae_")][::-1]  # L5 up to C1
