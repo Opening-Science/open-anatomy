@@ -1075,14 +1075,14 @@ def main() -> None:
         bones = [
             s.label
             for s in SETS[args.set]
-            if s.system == "skeletal" and s.label not in SETS_OF_PIECES and not reasons[s.label]
+            if s.system == "skeleton" and s.label not in SETS_OF_PIECES and not reasons[s.label]
         ]  # a set of pieces (the segmented cartilage) is many pieces by nature
         settled, fragments = settle_fragments(seg_dir, bones)
         for note in fragments:
             print(f"{note['label']}: {note['ml']} ml {note['action']}"
                   + (f" to {note['to']}" if note.get("to") else ""), file=sys.stderr)  # fmt: skip
     for s in SETS[args.set]:
-        bone = s.system == "skeletal"
+        bone = s.system == "skeleton"
         cap = args.max_bone_triangles if bone else args.max_triangles
         path = seg_dir / f"{s.label}.nii.gz"
         if s.label == "costal_cartilages" and args.set in RULED_SETS:

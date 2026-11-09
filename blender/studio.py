@@ -100,7 +100,7 @@ def frame(objects: list[bpy.types.Object]) -> tuple[Vector, Vector]:
     points = [o.matrix_world @ Vector(c) for o in objects for c in o.bound_box]
     lo = Vector([min(p[i] for p in points) for i in range(3)])
     hi = Vector([max(p[i] for p in points) for i in range(3)])
-    hips = [o for o in objects if "hip bone" in o.get("name", "")]
+    hips = [o for o in objects if "hip bone" in o.get("label", "")]
     if hips:
         tops = [max((o.matrix_world @ Vector(c)).z for c in o.bound_box) for o in hips]
         lo.z = min(tops) - 0.02
@@ -146,7 +146,7 @@ def main() -> None:
     samples = int(option(args, "--samples", "256"))
     empty_scene()
     objects = [o for o in import_glb(source) if o.type == "MESH"]
-    skeleton = [o for o in objects if o.get("system") == "skeletal"]
+    skeleton = [o for o in objects if o.get("system") == "skeleton"]
     for o in objects:
         o.hide_render = o not in skeleton
     bone, cartilage = material("bone", BONE, 0.12), material("cartilage", CARTILAGE, 0.3)

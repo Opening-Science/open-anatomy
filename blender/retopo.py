@@ -7,7 +7,7 @@ surface. Blender 5.2.x, headless.
   blender --background --factory-startup --python blender/retopo.py -- --self-check
   [--only <node>] retopologises that node alone, for looking at one bone
 
-Each bone (system "skeletal", not modelled) is remeshed into quads to a face
+Each bone (system "skeleton", not modelled) is remeshed into quads to a face
 budget set by its class (FACES): QuadriFlow first, then the voxel remesher
 at rising density, until the result is closed, manifold, free of faces that
 cross each other, and within MAX_DRIFT_MM of the CT surface everywhere (so
@@ -16,8 +16,9 @@ back onto a thin process folded faces through each other. Organs and the
 modelled cartilage are left as they are. The report gives, per bone, the
 face count before and after, every try, the largest distance from the CT
 surface to the new one, and whether it passed; a bone that never passes
-keeps its original mesh and is listed under "kept". Node extras (term, name,
-system, licence, modelled) travel through unchanged.
+keeps its original mesh and is listed under "kept". Each node keeps its
+translation (the structure's centre, under the GLB contract) and its extras
+(term, label, system, explode and the rest) travel through unchanged.
 """
 
 from __future__ import annotations
@@ -71,7 +72,7 @@ def bone_class(name: str) -> str:
 
 
 def is_bone(obj: bpy.types.Object) -> bool:
-    return obj.type == "MESH" and obj.get("system") == "skeletal" and not obj.get("modelled")
+    return obj.type == "MESH" and obj.get("system") == "skeleton" and not obj.get("modelled")
 
 
 def measure(obj: bpy.types.Object) -> dict:
@@ -181,7 +182,7 @@ def self_check() -> int:
     empty_scene()
     bpy.ops.mesh.primitive_uv_sphere_add(segments=64, ring_count=32, radius=0.03)
     obj = bpy.context.active_object
-    obj["system"], obj["name"] = "skeletal", "test vertebra"
+    obj["system"], obj["label"] = "skeleton", "test vertebra"
     for v in obj.data.vertices:
         if v.co.z > 0.02:
             v.co.z -= 0.006 * (v.co.z - 0.02) / 0.01  # a dent in the top, like a foramen's rim
@@ -224,7 +225,7 @@ def main() -> None:
         original = obj.copy()
         original.data = obj.data.copy()
         bpy.context.scene.collection.objects.link(original)
-        budget = max(FACES[bone_class(obj.get("name", obj.name))], MIN_FACES)
+        budget = max(FACES[bone_class(obj.get("label", obj.name))], MIN_FACES)
         tries, ok, after = [], False, {}
         for k, (method, factor) in enumerate(RETRIES):
             # QuadriFlow can fold faces through each other on a thin process;
@@ -256,7 +257,7 @@ def main() -> None:
         bpy.data.objects.remove(original)
         obj.data.shade_smooth()
         report["bones"][obj.name] = {
-            "class": bone_class(obj.get("name", obj.name)),
+            "class": bone_class(obj.get("label", obj.name)),
             "before": before,
             "after": after,
             "retopologised": ok,

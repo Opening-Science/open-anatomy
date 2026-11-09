@@ -221,7 +221,7 @@ def fit_girdle(ct, names, anny: dict, tree: BVHTree, midline: float) -> dict:
     dz = float(np.mean([anny[f"upperarm01.{s}"][2] for s in "LR"]) - top)
     weights = {}
     for o in ct:
-        if o.get("system") != "skeletal":
+        if o.get("system") != "skeleton":
             continue
         if o.name in CLAVICLE or o.name in SCAPULA or o.name in HUMERUS:
             weights[o.name] = 1.0
@@ -232,7 +232,7 @@ def fit_girdle(ct, names, anny: dict, tree: BVHTree, midline: float) -> dict:
     bones = {n: coords(names[n]) for n in weights}
     organs = {}
     for o in ct:
-        if o.get("system") != "skeletal":
+        if o.get("system") != "skeleton":
             points = coords(o)
             organs[o.name] = (mesh_tree(o), points.min(0), points.max(0))
 
