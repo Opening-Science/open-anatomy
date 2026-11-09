@@ -62,6 +62,8 @@ NOT_AVAILABLE = [
 
 
 def group_of(label: str) -> str:
+    if "cyst" in label:  # before the organs, whose "kidney" would match first
+        return "Cysts"
     for name, keys in GROUPS:
         if any(k in label for k in keys):
             return name
