@@ -14,6 +14,8 @@ pipeline = ["open-anatomy[mesh]", "TotalSegmentator==2.18.0"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# Modules in scripts/ count as first-party imports in tests.
+src = [".", "scripts"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP"]
