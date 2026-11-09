@@ -22,7 +22,7 @@ body cuts the same liver, kidneys and bones that the 3D layers show.
 
 | File | Content |
 | --- | --- |
-| `axial.png`, `coronal.png`, `sagittal.png` | one slice each, windowed for soft tissue (W400/L40) or bone (W1800/L400); each segmented structure is tinted 38% towards its display colour; air outside the body is transparent |
+| `axial.png`, `coronal.png`, `sagittal.png` | one slice each, windowed for soft tissue (W400/L40) or bone (W1800/L400); each segmented structure is tinted 38% towards its display colour (converted from linear to sRGB first, so tints match the meshes); air outside the body is transparent |
 | `<body>.imaging.glb` | three double-sided, unlit quads (`KHR_materials_unlit`) carrying those PNGs, with `alphaMode` MASK |
 | `imaging.json` | each slice's plane, voxel index, pixel size, SHA-256, the structures it cuts (by UBERON or FMA ID) and its corners in metres |
 
@@ -46,17 +46,22 @@ The textures follow radiology's usual layout: the body's right is on the
 image's left, superior is at the top, and in the axial slice anterior is at
 the top. The quads' corners are computed from the CT's affine with the same
 row and column order, so the texture lands the right way round in 3D whatever
-the image layout.
+the image layout. `scripts/imaging_check.py` checks this on a synthetic
+phantom stored in a non-canonical voxel order: markers on the left, front and
+top must land on the expected side of each image, and each marker's pixel must
+map through the quad back to the marker's position.
 
 ### Crop and privacy
 
 Every slice is cropped to the trunk outline (TotalSegmentator's
-`body_trunc`), from 5 cm below the top of the femoral heads to the top of the
-scan. Both scans used here start at the neck (s0903 at C6, s0859 at T2), so
-no face is in any slice; the code does not yet stop a head scan from being
-sliced, and a case with the head in view needs a crop at C7 first. The source
-is an open, de-identified research dataset; no scan of any identified person
-is used.
+`body_trunc`), from 5 cm below the femurs' top (the head or the greater
+trochanter, whichever is higher; a case without both femurs is refused) to the
+top of the scan. Both scans used here start at the neck (s0903 at C6, s0859
+at T2), so no face is in any slice. The code on its own does not yet stop a
+head scan from being sliced: a case with the head in view needs a head guard
+first (and a bowed head can bring the jaw down level with C7, so a crop at C7
+alone is not enough). The source is an open, de-identified research dataset;
+no scan of any identified person is used.
 
 ## Licence
 
