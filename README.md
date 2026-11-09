@@ -119,6 +119,13 @@ supine. Other headless Blender 5.2.x scripts in [`blender/`](blender/) clean
 meshes up and fit an atlas to a body limb by limb; `scripts/blender.py` runs
 them all.
 
+## Imaging layer (prototype)
+
+`scripts/imaging.py` cuts axial, coronal and sagittal slices through a
+reference body's own CT, tints the segmented structures and places the slices
+as textured planes inside the body. See
+[docs/imaging-layer.md](docs/imaging-layer.md).
+
 ## Self-checks
 
 ```bash
