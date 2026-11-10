@@ -320,6 +320,30 @@ def test_a_cut_bone_says_which_side_the_scan_cut_it(
     assert notes["scapula_right"]["reason"] == "shoulder girdle dropped: clavicula_left cut"
 
 
+def test_bones_the_scan_cut_are_offered_as_neighbours_for_loose_pieces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, list[str]] = {}
+
+    def fake_settle(
+        seg_dir: Path, labels: list[str], left_out: list[str] | None = None
+    ) -> tuple[dict[str, Any], list[Any]]:
+        seen["labels"], seen["left_out"] = labels, left_out or []
+        return {}, []
+
+    monkeypatch.setattr(mesh, "settle_fragments", fake_settle)
+    cut = {
+        "vertebrae_T1": "cut by the scan's edge (unscanned padding)",
+        "rib_left_4": "cut by the scan's edge (axis 0)",
+        "vertebrae_C3": "absent or a stray label",
+    }
+    run_main(tmp_path, monkeypatch, cut)
+    assert {"vertebrae_T1", "rib_left_4", "rib_right_4"} <= set(seen["left_out"])
+    assert "vertebrae_C3" not in seen["left_out"]  # not in the scan: no neighbour
+    assert not set(seen["left_out"]) & set(seen["labels"])
+    assert "vertebrae_T2" in seen["labels"]
+
+
 @pytest.mark.parametrize(
     ("label", "reason", "faces", "ok"),
     [
@@ -695,6 +719,42 @@ def test_a_piece_on_the_neighbour_is_moved_to_it(tmp_path: Path) -> None:
     assert masks["vertebrae_T1"].sum() == 1000
     assert masks["vertebrae_T2"].sum() == 1100
     assert mesh.ndimage.label(masks["vertebrae_T2"], structure=np.ones((3, 3, 3)))[1] == 1
+
+
+def test_a_piece_on_a_neighbour_the_scan_cut_leaves_with_it(tmp_path: Path) -> None:
+    # T2 is cut by the scan and left out of the body. T1's piece lying on it
+    # is T2's bone under the wrong label: it goes too, and T1 is one piece.
+    seg = vertebra_pair(tmp_path, chip=(15, 25, 20), moved=True)
+    masks, notes = mesh.settle_fragments(seg, ["vertebrae_T1"], ["vertebrae_T2"])
+    assert [(n["action"], n["to"], n["exported"]) for n in notes] == [
+        ("moved", "vertebrae_T2", False)
+    ]
+    assert set(masks) == {"vertebrae_T1"} and masks["vertebrae_T1"].sum() == 1000
+    # Without knowing of T2 the piece, 9% of T1, is no fragment: the build stops on it.
+    masks, notes = mesh.settle_fragments(seg, ["vertebrae_T1"])
+    assert notes == [] and masks["vertebrae_T1"].sum() == 1100
+
+
+def test_chips_under_the_noise_limit_are_settled_when_together_they_are_over_it(
+    tmp_path: Path,
+) -> None:
+    # Three chips of T1's label lie on T2: 49, 36 and 25 voxels, each under 2%
+    # of T1 and 2.7% together. The largest goes to T2; the 1.5% left is noise.
+    shape = (40, 40, 60)
+    t1 = box(shape, (10, 10, 30), (30, 30, 40))
+    t1 |= box(shape, (10, 10, 28), (17, 17, 29))
+    t1 |= box(shape, (20, 10, 28), (26, 16, 29))
+    t1 |= box(shape, (10, 20, 28), (15, 25, 29))
+    save(tmp_path / "vertebrae_T1.nii.gz", t1)
+    save(tmp_path / "vertebrae_T2.nii.gz", box(shape, (10, 10, 18), (30, 30, 28)))
+    masks, notes = mesh.settle_fragments(tmp_path, ["vertebrae_T1", "vertebrae_T2"])
+    assert [(n["voxels"], n["action"], n["to"]) for n in notes] == [(49, "moved", "vertebrae_T2")]
+    assert masks["vertebrae_T1"].sum() == 4000 + 36 + 25
+    assert masks["vertebrae_T2"].sum() == 4000 + 49
+    # Two of them alone, 1.5%, are left as they are.
+    t1[10:17, 10:17, 28] = False
+    save(tmp_path / "vertebrae_T1.nii.gz", t1)
+    assert mesh.settle_fragments(tmp_path, ["vertebrae_T1", "vertebrae_T2"])[1] == []
 
 
 def test_a_small_far_chip_is_dropped(tmp_path: Path) -> None:

@@ -577,7 +577,9 @@ def bone_kind(label: str) -> str:
     return label.split("_")[0]  # vertebrae, rib, clavicula, scapula, ...
 
 
-def settle_fragments(seg_dir: Path, labels: list[str]) -> tuple[dict[str, np.ndarray], list[dict]]:
+def settle_fragments(
+    seg_dir: Path, labels: list[str], left_out: list[str] | None = None
+) -> tuple[dict[str, np.ndarray], list[dict]]:
     """Sorts out the detached pieces of the bones in labels before meshing.
 
     A piece of a bone's mask that is not its largest is, in order: left for
@@ -587,10 +589,17 @@ def settle_fragments(seg_dir: Path, labels: list[str]) -> tuple[dict[str, np.nda
     segmentation gave that neighbour's voxels the wrong label; dropped when
     it is under FRAGMENT_SHARE (a chip off a process, calcified cartilage at
     a rib's end); otherwise left, and the split bone stops the build.
-    Returns the corrected masks and a note per piece moved or dropped.
+    Pieces are taken largest first, until what is still loose is within
+    MAX_DROPPED_SHARE of the bone, the noise the manifest records: several
+    chips, each under that limit, can be over it together.
+    The neighbour may be a bone in left_out, one the scan cut and the body
+    leaves out: its mislabelled piece leaves with it, and the note says so
+    ("exported": False). Returns the corrected masks of the bones in labels
+    and a note per piece moved or dropped.
     """
     masks, affines = {}, {}
-    for label in labels:
+    left_out = [lab for lab in left_out or [] if lab not in labels]
+    for label in labels + left_out:
         path = seg_dir / f"{label}.nii.gz"
         if path.exists():
             image = nib.load(path)
@@ -606,15 +615,17 @@ def settle_fragments(seg_dir: Path, labels: list[str]) -> tuple[dict[str, np.nda
         spacing = np.linalg.norm(affines[label][:3, :3], axis=0)
         voxel_ml = float(np.prod(spacing)) / 1000
         main = int(np.argmax(sizes)) + 1
+        loose = 1 - sizes[main - 1] / total  # the share outside the largest piece
         for piece in sorted(set(range(1, count + 1)) - {main}, key=lambda k: -sizes[k - 1]):
             share = sizes[piece - 1] / total
-            if share <= MAX_DROPPED_SHARE:
-                continue  # noise at the limit the manifest already records
+            if loose <= MAX_DROPPED_SHARE:
+                break  # noise at the limit the manifest already records
             part = pieces == piece
             if (
                 bone_kind(label) in BRIDGEABLE
                 and bridge_gap(masks[label] & ((pieces == main) | part), spacing)[1] is not None
             ):
+                loose -= share
                 continue  # one bone with a gap: bridged when it is meshed
             grown = ndimage.binary_dilation(part)
             contact = {
@@ -632,11 +643,14 @@ def settle_fragments(seg_dir: Path, labels: list[str]) -> tuple[dict[str, np.nda
             if neighbour and contact[neighbour] >= NEIGHBOUR_CONTACT and share <= REASSIGN_SHARE:
                 masks[neighbour] |= part
                 masks[label] &= ~part
-                notes.append({**note, "action": "moved", "to": neighbour})
+                gone = {"exported": False} if neighbour in left_out else {}
+                notes.append({**note, "action": "moved", "to": neighbour, **gone})
+                loose -= share
             elif share < FRAGMENT_SHARE:
                 masks[label] &= ~part
                 notes.append({**note, "action": "dropped"})
-    return masks, notes
+                loose -= share
+    return {label: masks[label] for label in labels if label in masks}, notes
 
 
 def trim_knobs(mask: np.ndarray, voxel_ml: float) -> tuple[np.ndarray, float]:
@@ -1098,10 +1112,19 @@ def main() -> None:
             for s in SETS[args.set]
             if s.system == "skeletal" and s.label not in SETS_OF_PIECES and not reasons[s.label]
         ]  # a set of pieces (the segmented cartilage) is many pieces by nature
-        settled, fragments = settle_fragments(seg_dir, bones)
+        # A bone the scan cut is left out, and takes its mislabelled pieces along.
+        cut = [
+            s.label
+            for s in SETS[args.set]
+            if s.system == "skeletal" and s.label not in SETS_OF_PIECES
+            and (reasons[s.label] or "").startswith(("cut by", "shoulder girdle", "its pair"))
+        ]  # fmt: skip
+        settled, fragments = settle_fragments(seg_dir, bones, cut)
         for note in fragments:
             print(f"{note['label']}: {note['ml']} ml {note['action']}"
-                  + (f" to {note['to']}" if note.get("to") else ""), file=sys.stderr)  # fmt: skip
+                  + (f" to {note['to']}" if note.get("to") else "")
+                  + (" (left out)" if note.get("exported") is False else ""),
+                  file=sys.stderr)  # fmt: skip
     for s in SETS[args.set]:
         bone = s.system == "skeletal"
         cap = args.max_bone_triangles if bone else args.max_triangles
