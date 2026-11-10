@@ -1,0 +1,44 @@
+name: Viewer
+
+# The viewer's job lives in its own workflow so it merges cleanly with the
+# jobs in ci.yml. The job's `name:` is what branch protection lists as a
+# check. Actions are pinned by commit SHA; the comment gives the release tag.
+
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: viewer-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  viewer:
+    name: Viewer tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 24
+      - name: Pure modules
+        run: node --test 'viewer/test/*.test.js'
+      # The runner image ships Google Chrome; the test takes the first browser
+      # it finds, or the binary named in CHROMIUM. three.js comes from the
+      # pinned CDN import map, so this step needs the network.
+      - name: Browser tests and screenshots
+        run: node --test --test-timeout=300000 viewer/test/screenshots.test.mjs
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        if: always()
+        with:
+          name: viewer-screenshots
+          path: out/viewer-screenshots
+          if-no-files-found: ignore
