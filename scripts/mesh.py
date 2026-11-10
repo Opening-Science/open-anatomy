@@ -108,6 +108,7 @@ END_FIT_BINS = 7  # bins behind those (21 mm) that give the end's direction
 RIB_SMOOTH_MM = 9.0
 RIB_LEAD_MM = 30.0  # a rib's centreline runs on this far past its ends, for the blur's reach
 RIB_KEPT_SHARE = 0.9  # of a rib's volume must lie where its centreline puts it (real ribs: 0.96+)
+END_SECTION_MM = (8.0, 18.0)  # behind a rib's tip: its section is taken clear of the rounding
 PAD = 2  # empty voxels around a crop, so the surface closes
 UPSAMPLE = 2
 BLUR_VOXELS = (1.0, 0.5, 0.25)  # Gaussian sigmas to try, in source voxels
@@ -166,9 +167,11 @@ def decimate(poly: vtk.vtkPolyData, max_triangles: int) -> vtk.vtkPolyData:
 def rib_end_of(vertices: np.ndarray, triangles: np.ndarray) -> dict | None:
     """The front end of a rib's meshed surface (RAS mm vertices, triangles):
     its tip, the unit direction the rib runs in there, and the surface's
-    points 3 to 10 mm behind the tip, centred and flattened across the rib
-    ("section"), with the direction across their width and the half-width
-    and half-thickness along that. The rib's centreline is its surface
+    points END_SECTION_MM behind the tip, centred and flattened across the
+    rib ("section"), with the direction across their width and the
+    half-width and half-thickness along that. The section is taken behind
+    the tip's rounding, where the rib is as wide as it looks, so a cartilage
+    that takes it is as wide as its rib. The rib's centreline is its surface
     walked along the mesh from its back end in RIB_BIN_MM bins; the walk's
     last bins curl into a corner of a blunt end (and its first ones fan out
     from one, which is why it starts at the back), so the direction comes
@@ -218,7 +221,7 @@ def rib_end_of(vertices: np.ndarray, triangles: np.ndarray) -> dict | None:
         direction = fitted if fitted @ direction > 0 else -fitted
     ahead = (near - anchor) @ direction
     reach = float(ahead.max())
-    ring = near[(ahead > reach - 10) & (ahead < reach - 3)]
+    ring = near[(ahead > reach - END_SECTION_MM[1]) & (ahead < reach - END_SECTION_MM[0])]
     if len(ring) < 10:
         return None
     flat = ring - np.outer((ring - anchor) @ direction, direction)

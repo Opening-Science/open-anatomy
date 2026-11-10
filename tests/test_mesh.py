@@ -1167,6 +1167,23 @@ def test_a_rib_end_is_measured_on_its_meshed_surface() -> None:
     np.testing.assert_allclose(end["section"] @ end["direction"], 0, atol=1e-9)  # flattened
 
 
+def test_a_rib_ends_section_is_taken_behind_its_tapering_tip() -> None:
+    tip, unit = (
+        np.array([40.0, 30, 100]),
+        np.array([0.3, 0.9, -0.3]) / np.linalg.norm([0.3, 0.9, -0.3]),
+    )
+    vertices, triangles = bar((40, 30, 100), (0.3, 0.9, -0.3), 7.0, 3.0)
+    # The last 8 mm narrow to half the rib's section at the tip.
+    behind = (tip - vertices) @ unit
+    axis = tip - np.outer(behind, unit)
+    vertices = axis + (vertices - axis) * np.clip(0.5 + behind / 16, 0.5, 1)[:, None]
+    end = mesh.rib_end_of(vertices, triangles)
+    assert end is not None
+    assert end["halfWidth"] == pytest.approx(7.0, abs=0.3)  # the rib's width, not its tip's
+    assert end["halfDepth"] == pytest.approx(3.0, abs=0.3)
+    np.testing.assert_allclose(end["tip"], tip, atol=0.5)
+
+
 def test_a_rib_too_short_to_walk_has_no_end() -> None:
     vertices, triangles = bar((0, 0, 0), (0, 1, 0), 1.5, 1.5, length=3.0)
     assert mesh.rib_end_of(vertices, triangles) is None
