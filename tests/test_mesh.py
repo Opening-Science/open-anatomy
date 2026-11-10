@@ -1549,6 +1549,56 @@ def test_a_band_is_never_wider_than_the_cap_and_a_steep_rib_end_does_not_hook() 
     assert curve[-1, 2] == pytest.approx(100.0)
 
 
+def test_a_rib_end_that_points_away_from_where_its_band_goes_turns_at_once_in_one_bend() -> None:
+    # Ribs far out to the side that end pointing down and forward, not at the sternum.
+    down = (0.0, 0.56, -0.83)
+    ends = {
+        "rib_left_7": rib_end_at((-115, 40, 40), down, 7.0, 3.0),
+        "rib_right_7": rib_end_at((115, 40, 40), down, 7.0, 3.0),
+        "rib_left_8": rib_end_at((-125, 30, 12), down, 6.0, 3.0),
+        "rib_right_8": rib_end_at((125, 30, 12), down, 6.0, 3.0),
+    }
+    bands, skipped = mesh.band_curves(ends, plate_sternum())
+    assert skipped == []
+    for rib in ends:
+        band = bands[rib]
+        _, curve, half_w, _ = shown(band)
+        # It leaves in the rib's line, but does not run on downward and hook back.
+        assert band["tangent"][band["tipAt"]] @ ends[rib]["direction"] > 0.999
+        assert curve[:, 2].min() > curve[0, 2] - 0.75 * mesh.TURN_WIDTHS * half_w.max()
+        # And it bends without a kink: nowhere tighter than its own width.
+        tangent = np.gradient(curve, axis=0)
+        tangent /= np.linalg.norm(tangent, axis=1, keepdims=True)
+        angle = np.arccos(np.clip(np.einsum("ij,ij->i", tangent[1:], tangent[:-1]), -1, 1))
+        steps = np.linalg.norm(np.diff(curve, axis=0), axis=1)
+        assert (angle / steps).max() < 1 / (1.5 * half_w.max())
+
+
+def test_a_bend_leaves_in_the_ribs_line_turns_in_one_arc_and_arrives_as_asked() -> None:
+    tip, start = np.array([0.0, 0, 0]), np.array([0.0, 0, -1.0])
+    end, arrive = np.array([100.0, 0, 30]), np.array([1.0, 0, 0])
+    curve = mesh.bend_from(tip, start, end, arrive, 12.0, 400)
+    assert len(curve) == 400
+    np.testing.assert_allclose(curve[[0, -1]], [tip, end], atol=1e-9)
+    tangent = np.diff(curve, axis=0)
+    tangent /= np.linalg.norm(tangent, axis=1, keepdims=True)
+    assert tangent[0] @ start > 0.999 and tangent[-1] @ arrive > 0.999
+    # The arc: 12 mm from its centre, which lies 12 mm toward the end from the tip.
+    arc = curve[np.linalg.norm(curve - tip, axis=1) < 12.0]
+    np.testing.assert_allclose(np.linalg.norm(arc - [12.0, 0, 0], axis=1), 12.0, atol=0.01)
+    assert curve[:, 2].min() == pytest.approx(-12.0, abs=0.5)  # it dips by the arc, no more
+    assert np.abs(curve[:, 1]).max() < 1e-9  # in the plane of the rib's line and the end
+    turn = np.einsum("ij,ij->i", tangent[1:], tangent[:-1])
+    assert turn.min() > np.cos(np.radians(3.0))  # no kink where the arc ends
+    # A short way makes the arc tighter: its chord is a quarter of the span at most.
+    short = mesh.bend_from(tip, start, np.array([10.0, 0, 0]), arrive, 12.0, 100)
+    assert short[:, 2].min() > -3.0
+    # A rib that already points at the end gets no arc at all.
+    straight = mesh.bend_from(tip, arrive, np.array([50.0, 0, 0]), arrive, 12.0, 50)
+    np.testing.assert_allclose(straight[:, 1:], 0, atol=1e-9)
+    assert np.all(np.diff(straight[:, 0]) > 0)
+
+
 def test_pairs_meet_the_sternum_one_above_the_other_and_never_on_the_xiphoid() -> None:
     ends = {
         "rib_left_6": rib_end_at((-70, 40, 62), (0.3, 0.9, -0.3), 6.0, 3.0),
@@ -1585,24 +1635,47 @@ def test_ribs_8_to_10_merge_into_the_band_above_and_an_orphan_is_skipped() -> No
         ("rib_right_10", "no cartilage above it to join"),
     ]  # and rib 11 floats: it is not even listed
     assert set(bands) == {"rib_left_7", "rib_right_7", "rib_left_8", "rib_right_8"}
+    from scipy.spatial import cKDTree
+
     for side in ("left", "right"):
         above, band = bands[f"rib_{side}_7"], bands[f"rib_{side}_8"]
         along = shown(above)[0]
         k = above["tipAt"] + int(np.searchsorted(along, mesh.ARCH_JOIN[8]))
         assert along[k - above["tipAt"]] == pytest.approx(mesh.ARCH_JOIN[8], abs=0.01)
         j = band["endAt"]
-        np.testing.assert_allclose(band["curve"][j], above["curve"][k])  # on its centreline
-        assert band["halfW"][j] == pytest.approx(above["halfW"][k])
-        assert band["halfD"][j] == pytest.approx(above["halfD"][k])
-        assert band["tangent"][j] @ above["tangent"][k] > 0.99  # running along it
-        assert abs(band["across"][j] @ above["across"][k]) > 0.99  # with the same face
-        # Then on along that centreline, if at all, and ending short of the band's own end.
-        run = len(band["curve"]) - 1 - j
-        assert 0 <= run < above["endAt"] - k
-        np.testing.assert_allclose(band["curve"][j + 1 :], above["curve"][k + 1 : k + 1 + run])
-        assert band["halfW"][-1] <= band["halfW"][j]
-        assert band["halfD"][-1] <= band["halfD"][j]
-        assert np.all(np.abs(np.diff(shown(band)[2])) < 0.05)  # the width never steps
+        f, curve, half_w, half_d = shown(band)
+        own = half_w[f >= 0.35]
+        np.testing.assert_allclose(own, own[0])  # it keeps its own width up to the join
+        # There it lies along the lower edge of the band above, in its plane, lapping
+        # over it by ARCH_LAP of its own half width, running the same way with the
+        # same face: the slit between the two has closed.
+        offset = band["curve"][j] - above["curve"][k]
+        deep = np.cross(above["tangent"][k], above["across"][k])
+        below = above["halfW"][k] + (1 - mesh.ARCH_LAP) * band["halfW"][j]
+        assert offset @ above["across"][k] == pytest.approx(-below, abs=0.3)
+        assert offset @ deep == pytest.approx(0.0, abs=0.3)
+        assert offset @ above["tangent"][k] == pytest.approx(0.0, abs=0.3)
+        assert band["tangent"][j] @ above["tangent"][k] > 0.99
+        assert abs(band["across"][j] @ above["across"][k]) > 0.99
+        # On the way there it never comes nearer the band above than that.
+        nearest = cKDTree(above["curve"]).query(curve)[0]
+        assert nearest.min() > below - 0.5
+        assert curve[:, 2].min() > curve[0, 2] - 12.0  # and it turns up soon after its rib
+        # Then on along that edge, tapering and sinking into the band above until its
+        # edge is that band's edge, and ending short of that band's own end.
+        end, last = band["curve"][-1], cKDTree(above["curve"]).query(band["curve"][-1])[1]
+        assert k < last < above["endAt"]
+        assert band["halfW"][-1] == pytest.approx(mesh.ARCH_THIN * band["halfW"][j])
+        assert band["halfD"][-1] == pytest.approx(mesh.ARCH_THIN * band["halfD"][j])
+        inside = above["halfW"][last] - band["halfW"][-1]
+        assert (end - above["curve"][last]) @ above["across"][last] == pytest.approx(
+            -inside, abs=0.3
+        )
+        assert np.all(np.diff(band["halfW"][j:]) <= 0)
+        steps = np.linalg.norm(np.diff(band["curve"], axis=0), axis=1)
+        assert steps.max() < 2 * mesh.CARTILAGE_SAMPLE_MM  # no step in the centreline
+        slope = np.abs(np.diff(band["halfW"])) / steps
+        assert slope[band["tipAt"] :].max() < 0.6  # nor in the width: it tapers
 
 
 def test_a_rib_end_too_far_from_the_sternum_or_on_it_gets_no_cartilage() -> None:

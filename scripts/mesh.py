@@ -78,11 +78,16 @@ JOIN_OVERLAP_MM = 6.0  # a modelled cartilage begins this far inside its rib's e
 INSIDE_SHARE = 0.6  # of the rib's own section: the band's where it begins inside the rib
 CARTILAGE_FLAT = 2.5  # a cartilage band is this many times wider than deep
 CARTILAGE_WIDEN = 0.15  # a cartilage of ribs 1-7 is this much wider at the sternum than at its rib
-ARCH_JOIN = {8: 0.75, 9: 0.6, 10: 0.5}  # where along the cartilage above ribs 8-10 merge into it
+ARCH_JOIN = {8: 0.5, 9: 0.5, 10: 0.5}  # how far along the band above ribs 8-10 come to lie on it
 CARTILAGE_HALF_W_MM = 9.0  # a band is at most 18 mm wide, whatever its rib's end measures
 TANGENT_SHARE = 0.7  # of the rib-to-sternum span, for the cartilage curve's end tangents
-ARCH_RUN_MM = 24.0  # a band of ribs 8-10 runs on this far inside the band above, thinning out
-ARCH_THIN = 0.3  # of the band above's section: what is left of it where it ends in there
+TURN_WIDTHS = 3.0  # a band leaves its rib in a bend no tighter than this many of its half widths
+TURN_SPANS = 6.0  # and, for ribs 1-7, no wider than the way to the sternum divided by this
+ARCH_RUN_MM = 30.0  # a band of ribs 8-10 runs on this far along the band above, tapering into it
+ARCH_THIN = 0.3  # of its section: what is left of it where it ends inside the band above
+ARCH_LAP = 0.5  # of its half width: how far a band of ribs 8-10 overlaps the band above at the join
+ARCH_SLIT_MM = 4.0  # the slit a band of ribs 8-10 keeps to the band above once it lies beside it
+ARCH_NEAR = 0.5  # of its way to the join: where a band of ribs 8-10 has come that near
 ARCH_LEAVE_MM = 30.0  # of its way from its rib before a band of ribs 8-10 lies beside the one above
 ARCH_SMOOTH_MM = (
     8.0  # the band above's frame is smoothed this far along before a band is hung on it
@@ -91,7 +96,7 @@ ARCH_MIN_MM = 5.0  # a band of ribs 8-10 shorter than this is not worth laying
 CHEST_AXIS_MM = 100.0  # the chest wall faces away from an axis this far behind the sternum
 XIPHOID_SHARE = 0.7  # of the sternum's usual width: what hangs below that is the xiphoid
 NOTCH_MM = 2.0  # a cartilage keeps its full width this far into the sternum's border
-SET_BACK_MM = 1.0  # a cartilage's front face lies this far behind the sternum's, where they meet
+SET_BACK_MM = 2.5  # a cartilage's front face lies this far behind the sternum's, where they meet
 FACE_SLAB_MM = 2.5  # the sternum's front face at a height is read from this far above and below
 FACE_SPAN_MM = 6.0  # and its lean from the face this far above and below that
 CARTILAGE_VOXEL_MM = 0.9  # the bands' field is sampled this far apart, then contoured
@@ -346,6 +351,45 @@ def eased(share: np.ndarray) -> np.ndarray:
     return share**2 * (3 - 2 * share)
 
 
+def bend_from(
+    tip: np.ndarray, start: np.ndarray, end: np.ndarray, arrive: np.ndarray, radius: float,
+    count: int,
+) -> np.ndarray:  # fmt: skip
+    """The centreline (count samples) of a band from its rib's end (tip, where
+    the rib runs along the unit direction start) to end, where it arrives
+    along the unit direction arrive. It leaves in the rib's own line and
+    turns at once, in one arc of that radius, until it points at its end;
+    from there a cubic Hermite curve carries it on, with tangents
+    TANGENT_SHARE of what is left of the way. A single such curve from the
+    rib would either run on in the rib's line and hook back (long
+    tangents) or kink at the rib (short ones). The arc is tighter where the
+    way is short: its chord is never over a quarter of the span."""
+    span = float(np.linalg.norm(end - tip))
+    aim, corner, angle, side, r = (end - tip) / span, tip, 0.0, start, radius
+    for _ in range(4):  # the arc's end moves the aim a little: settle the two
+        angle = float(np.arccos(np.clip(start @ aim, -1, 1)))
+        side = aim - start * (start @ aim)
+        if angle < 1e-3 or np.linalg.norm(side) < 1e-9:
+            corner, angle = tip, 0.0
+            break
+        side = side / np.linalg.norm(side)
+        r = min(radius, 0.25 * span / np.sin(angle / 2))
+        corner = tip + r * (np.sin(angle) * start + (1 - np.cos(angle)) * side)
+        aim = (end - corner) / np.linalg.norm(end - corner)
+    rest = float(np.linalg.norm(end - corner))
+    turning = (
+        int(np.clip(round(count * r * angle / (r * angle + rest)), 1, count - 2)) if angle else 0
+    )
+    turn = np.linspace(0, angle, turning, endpoint=False)[:, None]
+    arc = tip + r * (np.sin(turn) * start + (1 - np.cos(turn)) * side)
+    leave = np.cos(angle) * start + np.sin(angle) * side
+    s = np.linspace(0, 1, count - len(arc))[:, None]
+    h00, h10 = 2 * s**3 - 3 * s**2 + 1, s**3 - 2 * s**2 + s
+    h01, h11 = -2 * s**3 + 3 * s**2, s**3 - s**2
+    reach = TANGENT_SHARE * rest
+    return np.vstack([arc, h00 * corner + h10 * leave * reach + h01 * end + h11 * arrive * reach])
+
+
 def turned(
     tangents: np.ndarray, across: np.ndarray, target: np.ndarray, weight: np.ndarray
 ) -> np.ndarray:
@@ -365,34 +409,46 @@ def turned(
 
 
 def arch_path(
-    tip: np.ndarray, start: np.ndarray, above: dict, join: int
-) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
-    """The centreline of a band of ribs 8 to 10, from its rib's end (tip,
-    where the rib runs along the unit direction start) to sample join of
-    the centreline of the band above (its "curve", "tangent" and "across"),
-    with the share (0 to 1) by which each of its samples lies beside that
-    band and that band's width direction there. The path is laid out in the
-    band above's frame: so far from its centreline along its width, and so
-    far out of its plane. The first closes smoothly to nothing at the join,
-    with no slope at either end, so the band keeps to its own side all the
-    way, bends where the band above bends, and runs into its centreline
-    along it. The second closes within ARCH_LEAVE_MM, so the two lie in one
-    plane before they overlap and neither lies over the other like a
-    shingle. Over that first stretch the path also blends out of the rib's
-    own line, so the band leaves its rib without a kink. Behind the band
-    above's first sample its line is carried on straight. None if the rib
-    ends less than ARCH_MIN_MM before the join."""
-    curve, tangent, across = above["curve"][: join + 1], above["tangent"], above["across"]
+    tip: np.ndarray, start: np.ndarray, above: dict, join: int, last: int, half_w: float
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int] | None:
+    """The centreline of a band of ribs 8 to 10 that is half_w wide, from
+    its rib's end (tip, where the rib runs along the unit direction start)
+    to where it ends inside the band above (its "curve", "tangent",
+    "across" and "halfW"), with the share (0 to 1) by which each of its
+    samples lies beside that band, that band's width direction there, the
+    share of its section it still has there, and the sample at which it
+    comes to lie on the band above. The path is laid out in the band
+    above's frame: so far from its centreline along its width, and so far
+    out of its plane.
+    - Out of the plane it closes within ARCH_LEAVE_MM, so the two lie in
+      one plane before they touch and neither lies over the other like a
+      shingle. Over that stretch it also moves clear of the band above
+      along its width, if its rib ends behind that band rather than below
+      it, and it leaves the rib's own line in one bend (bend_from), so
+      there is no kink at the rib and no hook after it.
+    - Along the width it comes within ARCH_SLIT_MM of the band above over
+      the first ARCH_NEAR of the way, then closes until at sample join of
+      the band above it lies along that band's edge, overlapping it by
+      ARCH_LAP of its own half width: the slit between the two is narrow
+      and closes there, and the band bends where the band above bends.
+    - From there to sample last it tapers to ARCH_THIN of its section and
+      sinks into the band above until its edge is that band's edge, so the
+      two edges run into one margin.
+    Behind the band above's first sample its line is carried on straight.
+    None if the rib ends less than ARCH_MIN_MM before the join."""
+    curve, tangent, across = above["curve"][: last + 1], above["tangent"], above["across"]
     along = arc_length(curve)
-    nearest = int(np.argmin(np.linalg.norm(curve - tip, axis=1)))
+    nearest = int(np.argmin(np.linalg.norm(curve[: join + 1] - tip, axis=1)))
     behind = min(float((tip - curve[0]) @ tangent[0]), 0.0) if nearest == 0 else 0.0
-    first, way = along[nearest] + behind, along[-1] - along[nearest] - behind
+    first, way = along[nearest] + behind, along[join] - along[nearest] - behind
     if way < ARCH_MIN_MM:
         return None
-    u = np.linspace(first, along[-1], int(np.ceil(1.5 * way / CARTILAGE_SAMPLE_MM)) + 1)
+    count = int(np.ceil(1.5 * way / CARTILAGE_SAMPLE_MM))
+    run = np.linspace(along[join], along[-1], int(np.ceil((last - join) * 1.5)) + 1)[1:]
+    u = np.concatenate([np.linspace(first, along[join], count + 1), run])
 
     def there(values: np.ndarray) -> np.ndarray:
-        return np.stack([np.interp(u, along, values[: join + 1, d]) for d in range(3)], 1)
+        return np.stack([np.interp(u, along, values[: last + 1, d]) for d in range(3)], 1)
 
     centre = there(curve) + np.minimum(u, 0.0)[:, None] * tangent[0]
     # The band above's frame turns unevenly (not at all inside its rib, then
@@ -404,11 +460,27 @@ def arch_path(
     out = np.cross(ndimage.gaussian_filter1d(there(tangent), spread, axis=0, mode="nearest"), wide)
     out /= np.linalg.norm(out, axis=1, keepdims=True)
     lying = eased((u - first) / min(ARCH_LEAVE_MM, way))
-    off = (tip - centre[0]) @ wide[0] * (1 - eased((u - first) / way))
+    sunk = eased((u - along[join]) / max(along[-1] - along[join], 1e-9))
+    left = 1 - (1 - ARCH_THIN) * sunk
+    off0 = float((tip - centre[0]) @ wide[0])
+    side = 1.0 if off0 > 0 else -1.0  # which edge of the band above it lies along
+    edge = np.interp(u, along, above["halfW"][: last + 1])
+    clear = side * (edge + half_w + ARCH_SLIT_MM)
+    rest = side * (edge + half_w * left * (1 - ARCH_LAP - (2 - ARCH_LAP) * sunk))
+    # Out to a slit's width from the band above while it comes into its plane,
+    # if its rib ends nearer than that; in to it over the first part of the way.
+    near = lying if abs(off0) < abs(clear[0]) else eased((u - first) / (ARCH_NEAR * way))
+    free = off0 + (clear - off0) * near
+    off = free + eased(((u - first) / way - ARCH_NEAR) / (1 - ARCH_NEAR)) * (rest - free)
     lift = (tip - centre[0]) @ out[0] * (1 - lying)
     beside = centre + off[:, None] * wide + lift[:, None] * out
-    own = tip + np.outer(u - first, start)
-    return own + lying[:, None] * (beside - own), lying, faces
+    # Out of the rib's line in one bend, onto that path where it has come
+    # to lie in the band above's plane.
+    onto = int(np.searchsorted(u, first + min(ARCH_LEAVE_MM, way)))
+    arrive = np.gradient(beside, axis=0)[onto]
+    arrive /= np.linalg.norm(arrive)
+    beside[: onto + 1] = bend_from(tip, start, beside[onto], arrive, TURN_WIDTHS * half_w, onto + 1)
+    return beside, lying, faces, left, count
 
 
 def densify(curve: np.ndarray, *profiles: np.ndarray, step: float = CARTILAGE_SAMPLE_MM) -> tuple:
@@ -665,21 +737,22 @@ def band_curves(
     - It begins out of sight inside its rib (JOIN_OVERLAP_MM behind the end,
       at INSIDE_SHARE of the rib's section) and leaves through the rib's end
       in the rib's own line with the rib's own section, so there is no step
-      or kink at the join. Within the first third of the way it takes the
-      pair's mean width (at most CARTILAGE_HALF_W_MM), so left and right
-      match.
+      or kink at the join, and turns out of that line in one bend
+      (bend_from). Within the first third of the way it takes the pair's
+      mean width (at most CARTILAGE_HALF_W_MM), so left and right match.
     - Ribs 1 to 7 turn medially and rise into the sternum (more for lower
       ribs), widening CARTILAGE_WIDEN on the way, and run into the sternum's
-      border on their own side at full width. A pair meets the sternum at
-      one height: the mean height of its two rib ends, but within the
-      sternum, never on the xiphoid (sternum_floor) and never lower than
-      clear of the pair below: by their widths, and more the steeper they
-      rise into the border, so each reaches it as a band of its own.
-    - Ribs 8 to 10 run up to the band above and merge into it ARCH_JOIN of
-      the way along it, taking its line, width, depth and face direction
-      there: the two make one smooth costal arch margin with no seam. They
-      come in at an angle (a short end tangent, ARCH_REACH) rather than
-      alongside, so the slit between the two is short and open.
+      border on their own side at full width, along the sternum's front
+      face and SET_BACK_MM behind it. A pair meets the sternum at one
+      height: the mean height of its two rib ends, but within the sternum,
+      never on the xiphoid (sternum_floor) and never lower than clear of
+      the pair below: by their widths, and more the steeper they rise into
+      the border, so each reaches it as a band of its own.
+    - Ribs 8 to 10 run up to the band above and come to lie along its lower
+      edge ARCH_JOIN of the way along it, with its face, then taper into it
+      within ARCH_RUN_MM (arch_path): the lower edges of the bands of ribs
+      7 to 10 make one costal arch margin, with a narrow slit between each
+      two that closes at the join.
     Returns the bands by rib and every rib that gets none, with the reason."""
     from scipy.spatial import cKDTree
 
@@ -765,34 +838,33 @@ def band_curves(
             if span < 1.0:
                 skipped.append((rib, "its end lies on its target"))
                 continue
-            s = np.linspace(0, 1, max(int(np.ceil(1.5 * span / CARTILAGE_SAMPLE_MM)), 8))[:, None]
-            h00, h10 = 2 * s**3 - 3 * s**2 + 1, s**3 - 2 * s**2 + s
-            h01, h11 = -2 * s**3 + 3 * s**2, s**3 - s**2
-            # Longer tangents overshoot into a hook on short spans.
-            bend = (h00 * tip + h10 * start * TANGENT_SHARE * span
-                    + h01 * p1 + h11 * t1 * TANGENT_SHARE * span)  # fmt: skip
+            # A short cartilage turns tighter, or it would dip into the one below.
+            bend = bend_from(
+                tip, start, p1, t1, min(TURN_WIDTHS * w_pair, span / TURN_SPANS),
+                max(int(np.ceil(1.5 * span / CARTILAGE_SAMPLE_MM)), 8),
+            )  # fmt: skip
         else:
             above = bands.get(rib.replace(f"_{number}", f"_{number - 1}"))
             if above is None:
                 skipped.append((rib, "no cartilage above it to join"))
                 continue
-            # Merge into the band above: beside it, in its plane, and onto
-            # its centreline with its section and its face, so the lower
-            # edges of the two flow into one arch margin.
+            # Onto the band above: beside it, in its plane, along its lower
+            # edge with its face, then tapering into it, so the lower edges
+            # of the two flow into one arch margin.
             shown = arc_length(above["curve"][above["tipAt"] : above["endAt"] + 1])
-            k = above["tipAt"] + int(np.searchsorted(shown, ARCH_JOIN[number] * shown[-1]))
-            path = arch_path(tip, start, above, k)
+            # Not up to the band above's own end, where the other side's band ends too.
+            room = shown[-1] - 2 * CARTILAGE_HALF_W_MM
+            k = above["tipAt"] + int(
+                np.searchsorted(shown, min(ARCH_JOIN[number] * shown[-1], room))
+            )
+            run = min(shown[k - above["tipAt"]] + ARCH_RUN_MM, room)
+            last = max(above["tipAt"] + int(np.searchsorted(shown, run)), k)
+            path = arch_path(tip, start, above, k, last, w_pair)
             if path is None:
                 skipped.append((rib, "its end lies on its target"))
                 continue
-            bend, lying, faces = path
-            end_w, end_d = above["halfW"][k], above["halfD"][k]
-            # Then on inside the band above, thinning out, so it ends nowhere on the surface.
-            run = shown[k - above["tipAt"]] + ARCH_RUN_MM
-            # But not up to the band above's own end, where the other side's band ends too.
-            run = min(run, shown[-1] - 2 * CARTILAGE_HALF_W_MM)
-            last = max(above["tipAt"] + int(np.searchsorted(shown, run)), k)
-            run_in = slice(k + 1, last + 1)
+            bend, lying, faces, left, at = path
+            bend, beyond = bend[: at + 1], bend[at + 1 :]
         # Out of sight inside the rib, in the rib's own line, up to its end.
         lead = JOIN_OVERLAP_MM + INSIDE_SHARE * w0
         count = int(np.ceil(lead / CARTILAGE_SAMPLE_MM))
@@ -808,18 +880,14 @@ def band_curves(
             beyond = p1 + np.outer(np.linspace(0, run_out, steps + 1)[1:], t1)
             beyond_w, beyond_d = np.full(steps, end_w), np.full(steps, end_d)
         else:
-            half_w = half_w * (1 - f**2) + f**2 * end_w
-            half_d = half_d * (1 - f**2) + f**2 * end_d
-            beyond = above["curve"][run_in]
-            thin = 1 - (1 - ARCH_THIN) * eased(np.linspace(0, 1, len(beyond) + 1)[1:])
-            beyond_w, beyond_d = above["halfW"][run_in] * thin, above["halfD"][run_in] * thin
+            beyond_w, beyond_d = half_w[-1] * left[at + 1 :], half_d[-1] * left[at + 1 :]
         curve = np.vstack([inside, bend, beyond])
         half_w = np.concatenate([shrink * w0, half_w, beyond_w])
         half_d = np.concatenate([shrink * d0, half_d, beyond_d])
         tangent, across, _ = frames(curve, across0, across1 if number <= 7 else None)
         if number > 7:  # its face turns to the band above's as it comes to lie beside it
-            faces = np.vstack([np.tile(across0, (count, 1)), faces, above["across"][run_in]])
-            lying = np.concatenate([np.zeros(count), lying, np.ones(len(beyond))])
+            faces = np.vstack([np.tile(across0, (count, 1)), faces])
+            lying = np.concatenate([np.zeros(count), lying])
             across = turned(tangent, across, faces, lying)
             across1 = across[-1]
         bands[rib] = {"curve": curve, "halfW": half_w, "halfD": half_d, "tangent": tangent,
