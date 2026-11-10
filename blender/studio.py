@@ -51,7 +51,7 @@ from twinblend.blender_env import (  # noqa: E402
 # Colours are scene-linear. Each material has a lit colour and the colour its
 # crevices and turning edges go to, so shade on bone stays warm, not grey.
 BONE, BONE_SHADE = (0.87, 0.80, 0.66), (0.38, 0.29, 0.20)
-CARTILAGE, CARTILAGE_SHADE = (0.76, 0.86, 0.96), (0.40, 0.54, 0.72)
+CARTILAGE, CARTILAGE_SHADE = (0.80, 0.88, 0.97), (0.45, 0.58, 0.76)
 BACKDROP = (0.93, 0.93, 0.92)
 HDRI_TURN = 310.0  # degrees about Z: the key lamp to the picture's left of the camera
 HDRI_TILT = 25.0  # degrees about X, after the turn: lifts the lamps in front of the bones
@@ -60,10 +60,10 @@ FILL = 0.2  # how much of the HDRI's light is kept away from its lamps
 FLOOR = 0.6  # and how much of that from below the horizon (the studio's white floor)
 EXPOSURE = 0.0
 VIEW_TRANSFORMS = ("Khronos PBR Neutral", "Standard")  # the first one this Blender has
-AO_DISTANCE = 0.03  # metres
-AO_POWER = 1.5
-EDGE = 0.5  # how far a surface turning away from the camera goes to its shade colour
-HAZE = 0.25  # how far the bones farthest from the camera fade into the backdrop
+AO_DISTANCE = 0.04  # metres
+AO_POWER = 1.75
+EDGE = 0.7  # how far a surface turning away from the camera goes to its shade colour
+HAZE = 0.4  # how far the bones farthest from the camera fade into the backdrop
 FADE = 0.08  # share of the picture's height, from the bottom, over which bones fade out
 MARGIN = 0.04  # share of the picture left free between the bones and each of its other edges
 VIEWS = {"front": (0.0, 0.0), "three-quarter": (-40.0, 8.0)}  # turn about Z, look down, degrees
@@ -233,8 +233,8 @@ def stage(skeleton: list[bpy.types.Object], hdri: str | None, samples: int) -> N
     high = Vector([max(c[i] for c in corners) for i in range(3)])
     middle, reach = (low + high) / 2, min(high.x - low.x, high.y - low.y) / 2
     fade = fading(skeleton)
-    bone = material("bone", BONE, BONE_SHADE, 0.5, 0.15, middle, reach, fade)
-    cartilage = material("cartilage", CARTILAGE, CARTILAGE_SHADE, 0.5, 0.3, middle, reach, fade)
+    bone = material("bone", BONE, BONE_SHADE, 0.55, 0.2, middle, reach, fade)
+    cartilage = material("cartilage", CARTILAGE, CARTILAGE_SHADE, 0.6, 0.35, middle, reach, fade)
     for o in skeleton:
         o.data.materials.clear()
         o.data.materials.append(cartilage if o.get("modelled") else bone)
