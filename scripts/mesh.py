@@ -41,6 +41,7 @@ import json
 import os
 import struct
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 os.environ.setdefault("VTK_SMP_BACKEND_IN_USE", "Sequential")
@@ -60,13 +61,17 @@ from structures import RULED_SETS, SETS, Structure, node_name  # noqa: E402
 # Limb bones run out of a trunk scan by design; their joint ends are what count.
 MIN_ML = 0.3  # a mask smaller than this is a stray label, not a bone (volume, not voxels)
 PADDING_HU = -1020  # at or below: a scanner's fill beyond what it scanned, never tissue
+PADDING_BLEND = 2  # voxels: resampling blends the fill into the last scanned slice this far
 SETS_OF_PIECES = {"costal_cartilages"}  # one node, several separate pieces
 MIN_PIECE_VOXELS = 150  # a piece smaller than this (0.5 ml) in a set is a loose blob
 LEVEL_STEPS = 12
 SLICE_SMOOTHED = ("sternum", "rib_", "vertebrae_", "costal_cartilages", "sacrum")
-SLICE_BLURS = ((0.5, 2.0), (0.5, 1.5), (0.25, 1.0))  # (in-plane, along slices), source voxels
+# (in-plane, along slices), in source voxels. Half a voxel in-plane left a
+# vertebral body's wall fluted: the voxel steps of each slice, drawn out along
+# the slice axis by the stronger blur there.
+SLICE_BLURS = ((1.0, 2.0), (0.5, 1.5), (0.25, 1.0))
 STERNUM_BLURS = ((1.0, 3.0), (0.75, 2.0), (0.5, 1.5))  # its ripples span several slices
-RIB_BLURS = ((0.75, 2.5), (0.5, 2.0), (0.5, 1.5))  # ribs ripple slice to slice the same way
+RIB_BLURS = ((0.75, 5.0), (0.75, 3.5), (0.75, 2.0))  # (across, along the rib) in mm: unroll()
 CARTILAGE_BLURS = ((1.0, 1.5), (0.75, 1.0), (0.5, 0.75))  # thin, lumpy segmentation
 CARTILAGE_MAX_MM = 170  # the 7th costal cartilage runs up to about 15 cm in a tall man
 JOIN_OVERLAP_MM = 6.0  # a modelled cartilage begins this far inside its rib's end, out of sight
@@ -101,6 +106,8 @@ RIB_BIN_MM = 3.0
 END_SKIP_BINS = 3  # bins of a rib's centreline at its front end that curl into a corner
 END_FIT_BINS = 7  # bins behind those (21 mm) that give the end's direction
 RIB_SMOOTH_MM = 9.0
+RIB_LEAD_MM = 30.0  # a rib's centreline runs on this far past its ends, for the blur's reach
+RIB_KEPT_SHARE = 0.9  # of a rib's volume must lie where its centreline puts it (real ribs: 0.96+)
 PAD = 2  # empty voxels around a crop, so the surface closes
 UPSAMPLE = 2
 BLUR_VOXELS = (1.0, 0.5, 0.25)  # Gaussian sigmas to try, in source voxels
@@ -833,8 +840,13 @@ def scan_outside(ct_path: Path) -> tuple[np.ndarray, np.ndarray]:
     from a tilted gantry, empty end slices). Voxels at or below PADDING_HU
     (never tissue; air is about -1000 HU with noise) in regions that survive a
     small opening and join the volume's border, grown back through the fill
-    so the thin end of a gantry wedge stays outside too. Returns the mask and
-    the CT's affine, so masks can be checked against the same grid."""
+    so the thin end of a gantry wedge stays outside too, then PADDING_BLEND
+    voxels further out: a scan resampled onto its grid blends the fill into
+    its last scanned slice over that distance (the blended voxels sit well
+    above PADDING_HU and measure nothing), so a bone ending against the
+    blend was cut by the scan's end just as one against the fill was.
+    Returns the mask and the CT's affine, so masks can be checked against
+    the same grid."""
     image = nib.load(ct_path)
     fill = np.asanyarray(image.dataobj) <= PADDING_HU
     pad = ndimage.binary_opening(fill, structure=np.ones((3, 3, 3)))
@@ -844,7 +856,8 @@ def scan_outside(ct_path: Path) -> tuple[np.ndarray, np.ndarray]:
         labels[:, :, 0].ravel(), labels[:, :, -1].ravel(),
     ])  # fmt: skip
     kept = np.isin(labels, np.setdiff1d(np.unique(border), [0]))
-    return ndimage.binary_propagation(kept, mask=fill), image.affine
+    outside = ndimage.binary_propagation(kept, mask=fill)
+    return ndimage.binary_dilation(outside, iterations=PADDING_BLEND), image.affine
 
 
 def cut_reason(path: Path, outside: tuple[np.ndarray, np.ndarray] | None = None) -> str | None:
@@ -853,8 +866,9 @@ def cut_reason(path: Path, outside: tuple[np.ndarray, np.ndarray] | None = None)
     Smaller than MIN_ML (measured with the voxel size from the affine, so the
     limit is the same at 0.8 mm and 1.5 mm), touching any face of the volume
     (the first or last slice, or the in-plane border), or touching the part of
-    the volume that was never scanned (outside, from scan_outside): the scan
-    cut it. A mask on another grid than the CT's raises ValueError.
+    the volume that was never scanned (outside, from scan_outside, blend
+    included): the scan cut it. A mask on another grid than the CT's raises
+    ValueError.
     """
     if not path.exists():
         return "not segmented"
@@ -883,29 +897,42 @@ def cut_faces(path: Path, outside: tuple[np.ndarray, np.ndarray] | None = None) 
     """The sides of the body where the scan cuts a mask: "S" or "I" (its top
     or bottom slice), "L", "R", "A" or "P" (the in-plane border), named by the
     direction each face of the volume points in RAS. Where the mask meets
-    unscanned padding (outside), the side is the direction from the mask's
-    centre to where it meets it."""
+    unscanned padding (outside), each separate patch of contact names the
+    side the padding lies on there: the direction in which most of the patch
+    is one step on from the scanned part of the mask. A clavicle the scan
+    ends through is cut at "S", however it lies, and a bone cut at both ends
+    names both."""
     image = nib.load(path)
     data = np.asanyarray(image.dataobj) > 0
     faces = set()
+    sides = []  # (axis, step, side) for the six directions of the grid
     for axis in range(3):
-        k = np.flatnonzero(data.any(tuple(a for a in range(3) if a != axis)))
-        if len(k) == 0:
-            continue
         column = image.affine[:3, axis]
         ras = int(np.argmax(np.abs(column)))
         up, down = "RAS"[ras], "LPI"[ras]  # the RAS axis's positive and negative ends
         high, low = (up, down) if column[ras] > 0 else (down, up)
+        sides += [(axis, 1, high), (axis, -1, low)]
+        k = np.flatnonzero(data.any(tuple(a for a in range(3) if a != axis)))
+        if len(k) == 0:
+            continue
         if k[0] == 0:
             faces.add(low)
         if k[-1] == data.shape[axis] - 1:
             faces.add(high)
     if outside is not None:
-        contact = np.argwhere(ndimage.binary_dilation(data) & on_grid(image, outside))
-        if len(contact):
-            towards = image.affine[:3, :3] @ (contact.mean(0) - np.argwhere(data).mean(0))
-            ras = int(np.argmax(np.abs(towards)))
-            faces.add("RAS"[ras] if towards[ras] > 0 else "LPI"[ras])
+        pad = on_grid(image, outside)
+        met = ndimage.binary_dilation(data) & pad
+        scanned = data & ~pad
+        patches, count = ndimage.label(met, structure=np.ones((3, 3, 3)))
+        contact, patch = np.argwhere(met), patches[met]
+        reached = np.zeros((count + 1, len(sides)), dtype=np.int64)
+        for k, (axis, step, _) in enumerate(sides):
+            source = contact.copy()
+            source[:, axis] -= step  # the voxel this one is a step on from
+            inside = (source[:, axis] >= 0) & (source[:, axis] < data.shape[axis])
+            inside[inside] = scanned[tuple(source[inside].T)]
+            reached[:, k] = np.bincount(patch[inside], minlength=count + 1)
+        faces |= {sides[int(np.argmax(row))][2] for row in reached[1:] if row.any()}
     return faces
 
 
@@ -962,7 +989,12 @@ def bone_kind(label: str) -> str:
     return label.split("_")[0]  # vertebrae, rib, clavicula, scapula, ...
 
 
-def settle_fragments(seg_dir: Path, labels: list[str]) -> tuple[dict[str, np.ndarray], list[dict]]:
+def settle_fragments(
+    seg_dir: Path,
+    labels: list[str],
+    left_out: list[str] | None = None,
+    given: dict[str, np.ndarray] | None = None,
+) -> tuple[dict[str, np.ndarray], list[dict]]:
     """Sorts out the detached pieces of the bones in labels before meshing.
 
     A piece of a bone's mask that is not its largest is, in order: left for
@@ -972,15 +1004,25 @@ def settle_fragments(seg_dir: Path, labels: list[str]) -> tuple[dict[str, np.nda
     segmentation gave that neighbour's voxels the wrong label; dropped when
     it is under FRAGMENT_SHARE (a chip off a process, calcified cartilage at
     a rib's end); otherwise left, and the split bone stops the build.
-    Returns the corrected masks and a note per piece moved or dropped.
+    Pieces are taken largest first, until what is still loose is within
+    MAX_DROPPED_SHARE of the bone, the noise the manifest records: several
+    chips, each under that limit, can be over it together.
+    The neighbour may be a bone in left_out, one the scan cut and the body
+    leaves out: its mislabelled piece leaves with it, and the note says so
+    ("exported": False). A mask in given (from whole_but_for_lumps) stands
+    in for the one on disk. Returns the corrected masks of the bones in
+    labels and a note per piece moved or dropped.
     """
     masks, affines = {}, {}
-    for label in labels:
+    left_out = [lab for lab in left_out or [] if lab not in labels]
+    for label in labels + left_out:
         path = seg_dir / f"{label}.nii.gz"
         if path.exists():
             image = nib.load(path)
             masks[label] = np.asanyarray(image.dataobj) > 0
             affines[label] = image.affine
+            if label in (given or {}):
+                masks[label] = given[label].copy()
     notes = []
     for label in [lab for lab in labels if lab in masks]:
         pieces, count = ndimage.label(masks[label], structure=np.ones((3, 3, 3)))
@@ -991,15 +1033,17 @@ def settle_fragments(seg_dir: Path, labels: list[str]) -> tuple[dict[str, np.nda
         spacing = np.linalg.norm(affines[label][:3, :3], axis=0)
         voxel_ml = float(np.prod(spacing)) / 1000
         main = int(np.argmax(sizes)) + 1
+        loose = 1 - sizes[main - 1] / total  # the share outside the largest piece
         for piece in sorted(set(range(1, count + 1)) - {main}, key=lambda k: -sizes[k - 1]):
             share = sizes[piece - 1] / total
-            if share <= MAX_DROPPED_SHARE:
-                continue  # noise at the limit the manifest already records
+            if loose <= MAX_DROPPED_SHARE:
+                break  # noise at the limit the manifest already records
             part = pieces == piece
             if (
                 bone_kind(label) in BRIDGEABLE
                 and bridge_gap(masks[label] & ((pieces == main) | part), spacing)[1] is not None
             ):
+                loose -= share
                 continue  # one bone with a gap: bridged when it is meshed
             grown = ndimage.binary_dilation(part)
             contact = {
@@ -1017,11 +1061,109 @@ def settle_fragments(seg_dir: Path, labels: list[str]) -> tuple[dict[str, np.nda
             if neighbour and contact[neighbour] >= NEIGHBOUR_CONTACT and share <= REASSIGN_SHARE:
                 masks[neighbour] |= part
                 masks[label] &= ~part
-                notes.append({**note, "action": "moved", "to": neighbour})
+                gone = {"exported": False} if neighbour in left_out else {}
+                notes.append({**note, "action": "moved", "to": neighbour, **gone})
+                loose -= share
             elif share < FRAGMENT_SHARE:
                 masks[label] &= ~part
                 notes.append({**note, "action": "dropped"})
-    return masks, notes
+                loose -= share
+    return {label: masks[label] for label in labels if label in masks}, notes
+
+
+def whole_but_for_lumps(
+    seg_dir: Path,
+    reasons: dict[str, str | None],
+    outside: tuple[np.ndarray, np.ndarray] | None = None,
+) -> tuple[dict[str, np.ndarray], list[dict]]:
+    """The bones the scan seems to cut only because their masks carry a lump
+    of a cut neighbour.
+
+    Where a scan ends through the spine, the segmentation may give part of
+    the vertebra above the label of the one below, joined to it by a thin
+    neck: the lump meets the scan's end, the bone itself ends well short of
+    it. For each bone in reasons that the scan cut, an opening (one voxel,
+    6-connected) takes the necks away and the largest piece, grown back, is
+    the bone. A piece left over is a neighbour's lump when it keeps a core of
+    its own through the opening, meets the scan's end and lies on a cut bone
+    of the same kind (NEIGHBOUR_CONTACT). When the lumps are within
+    REASSIGN_SHARE of the mask and the rest is clear of the scan's end, the
+    bone is whole and the lumps leave with the neighbour. A thin tip the scan
+    ends through has no core: it is the bone's own, and the bone stays cut;
+    so does a bone that is given such a lump. Returns the masks of the bones
+    found whole, and a note per lump ("neck": True, "exported": False).
+    """
+    six = ndimage.generate_binary_structure(3, 1)
+    images = {
+        label: nib.load(seg_dir / f"{label}.nii.gz")
+        for label, reason in reasons.items()
+        if (reason or "").startswith("cut by") and (seg_dir / f"{label}.nii.gz").exists()
+    }
+    masks = {label: np.asanyarray(image.dataobj) > 0 for label, image in images.items()}
+    whole, notes = {}, {}
+    for label, mask in masks.items():
+        others = [o for o in masks if o != label and bone_kind(o) == bone_kind(label)]
+        if not others:
+            continue
+        box = tuple(
+            slice(max(s.start - 2, 0), s.stop + 2)
+            for s in ndimage.find_objects(mask.astype(np.uint8))[0]
+        )  # the mask with two voxels round it, so the opening has room
+        bone = mask[box]
+        pad = np.zeros(bone.shape, bool)
+        if outside is not None:
+            pad = on_grid(images[label], outside)[box]
+        face = np.zeros(bone.shape, bool)  # the volume's own faces, where the box reaches them
+        for axis, s in enumerate(box):
+            if s.start == 0:
+                face[(slice(None),) * axis + (0,)] = True
+            if s.stop >= mask.shape[axis]:
+                face[(slice(None),) * axis + (-1,)] = True
+
+        def meets_end(part: np.ndarray, pad: np.ndarray = pad, face: np.ndarray = face) -> bool:
+            return bool((part & face).any() or (ndimage.binary_dilation(part) & pad).any())
+
+        opened = ndimage.binary_opening(bone, structure=six)
+        cores, count = ndimage.label(opened, structure=np.ones((3, 3, 3)))
+        if count < 2:
+            continue
+        main = cores == int(np.argmax(np.bincount(cores.ravel())[1:])) + 1
+        body = ndimage.binary_dilation(main, structure=six) & bone
+        rest, pieces = ndimage.label(bone & ~body, structure=np.ones((3, 3, 3)))
+        kept, lumps = bone.copy(), []
+        for piece in range(1, pieces + 1):
+            part = rest == piece
+            if not (part & opened).any() or not meets_end(part):
+                continue  # a thin tip, or a part the scan's end does not reach: the bone's own
+            grown = ndimage.binary_dilation(part)
+            contact = {o: int((grown & masks[o][box]).sum()) for o in others}
+            neighbour = max(contact, key=contact.get)
+            if contact[neighbour] >= NEIGHBOUR_CONTACT:
+                kept &= ~part
+                lumps.append((int(part.sum()), neighbour))
+        total = int(bone.sum())
+        if not lumps or sum(v for v, _ in lumps) > REASSIGN_SHARE * total or meets_end(kept):
+            continue
+        whole[label] = np.zeros_like(mask)
+        whole[label][box] = kept
+        voxel_ml = abs(float(np.linalg.det(images[label].affine[:3, :3]))) / 1000
+        notes[label] = [
+            {
+                "label": label,
+                "voxels": voxels,
+                "ml": round(voxels * voxel_ml, 2),
+                "share": round(voxels / total, 4),
+                "action": "moved",
+                "to": neighbour,
+                "neck": True,
+                "exported": False,
+            }
+            for voxels, neighbour in lumps
+        ]
+    while given := {note["to"] for label in whole for note in notes[label]} & set(whole):
+        for label in given:  # it takes a lump that meets the scan's end: cut after all
+            del whole[label]
+    return whole, [note for label in whole for note in notes[label]]
 
 
 def trim_knobs(mask: np.ndarray, voxel_ml: float) -> tuple[np.ndarray, float]:
@@ -1149,26 +1291,30 @@ def enclosed_volume(poly: vtk.vtkPolyData) -> float:
     return mass.GetVolume()
 
 
-def straighten(fine: np.ndarray, voxels_mm: np.ndarray, spacing: np.ndarray) -> np.ndarray:
-    """Removes steps along a long, thin bone (a rib) from its upsampled mask.
+def rib_axis(
+    voxels_mm: np.ndarray, spacing: np.ndarray, step: float
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    """A long, thin bone's centreline as a smooth curve sampled every step mm,
+    with a frame that does not twist: the points, and at each point two unit
+    directions across the bone (their cross product is the tangent).
 
     The centreline is found by walking the mask's voxels from one end (graph
     distance over 26 neighbours) and averaging them in RIB_BIN_MM bins, then
-    smoothed along its length (Gaussian, RIB_SMOOTH_MM). The mask is warped by
-    that smoothing's shift, interpolated along the walk distance of each fine
-    sample's nearest voxel, before it is blurred and contoured, so a sideways
-    step between scan slices (often breathing) becomes a gentle bend and the
-    surface is never sheared.
+    smoothed along its length (Gaussian, RIB_SMOOTH_MM), run on in a straight
+    line for RIB_LEAD_MM past both ends, and joined by a cubic spline. The
+    frame is carried along it by parallel transport. None when the bone is
+    too short to have a centreline.
     """
+    from scipy.interpolate import CubicSpline
     from scipy.sparse import coo_matrix
     from scipy.sparse.csgraph import dijkstra
-    from scipy.spatial import cKDTree
+    from scipy.spatial import KDTree
 
-    tree = cKDTree(voxels_mm)
+    tree = KDTree(voxels_mm)
     reach = float(np.sqrt(3) * spacing.max()) + 1e-3  # the 26-neighbourhood
     pairs = tree.query_pairs(r=reach, output_type="ndarray")
     if len(pairs) == 0:
-        return fine
+        return None
     lengths = np.linalg.norm(voxels_mm[pairs[:, 0]] - voxels_mm[pairs[:, 1]], axis=1)
     n = len(voxels_mm)
     graph = coo_matrix((lengths, (pairs[:, 0], pairs[:, 1])), shape=(n, n)).tocsr()
@@ -1180,22 +1326,87 @@ def straighten(fine: np.ndarray, voxels_mm: np.ndarray, spacing: np.ndarray) -> 
     used = count > 0
     raw = np.stack([np.bincount(bins, voxels_mm[reached][:, d]) for d in range(3)], 1)
     raw = raw[used] / count[used, None]
-    if len(raw) < 4:
-        return fine
-    shift = ndimage.gaussian_filter1d(raw, RIB_SMOOTH_MM / RIB_BIN_MM, axis=0, mode="nearest") - raw
-    stations = (np.flatnonzero(used) + 0.5) * RIB_BIN_MM
+    if len(raw) < 6:
+        return None
+    line = ndimage.gaussian_filter1d(raw, RIB_SMOOTH_MM / RIB_BIN_MM, axis=0, mode="nearest")
+    lead = np.arange(1, int(RIB_LEAD_MM / RIB_BIN_MM) + 1)[:, None] * RIB_BIN_MM
+    first, last = line[0] - line[2], line[-1] - line[-3]
+    first, last = first / np.linalg.norm(first), last / np.linalg.norm(last)
+    line = np.vstack([line[0] + lead[::-1] * first, line, line[-1] + lead * last])
+    chord = np.linalg.norm(np.diff(line, axis=0), axis=1)
+    line = line[np.concatenate([[True], chord > 1e-6])]
+    length = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(line, axis=0), axis=1))])
+    spline = CubicSpline(length, line)
+    at = np.arange(0.0, length[-1], step)
+    points, tangents = spline(at), spline(at, 1)
+    tangents /= np.linalg.norm(tangents, axis=1, keepdims=True)
+    across = np.eye(3)[int(np.argmin(np.abs(tangents[0])))]
+    normals = np.empty_like(points)
+    for i, tangent in enumerate(tangents):
+        across = across - (across @ tangent) * tangent
+        across /= np.linalg.norm(across)
+        normals[i] = across
+    return points, normals, np.cross(tangents, normals)
 
-    # Fine sample j sits at source index (j + 0.5) / UPSAMPLE - 0.5, i.e. in mm:
-    grid = np.indices(fine.shape).reshape(3, -1).T
-    mm = ((grid + 0.5) / UPSAMPLE - 0.5) * spacing
-    nearest = tree.query(mm)[1]
-    t = np.where(reached[nearest], along[nearest], stations[-1])
-    move = np.stack([np.interp(t, stations, shift[:, d]) for d in range(3)], 1)
-    # A sample at x takes the value from x - move: the shape moves by +move.
-    source = (mm - move) / spacing
-    source = (source + 0.5) * UPSAMPLE - 0.5
-    warped = ndimage.map_coordinates(fine, source.T, order=1, mode="constant")
-    return warped.reshape(fine.shape).astype(np.float32)
+
+def unroll(
+    crop: np.ndarray, spacing: np.ndarray
+) -> tuple[np.ndarray, float, Callable[[vtk.vtkPolyData], vtk.vtkPolyData]] | None:
+    """A rib's mask resampled along its own centreline: axis 0 runs along the
+    rib, axes 1 and 2 across it, all in steps of half a source voxel. Blurring
+    that volume along axis 0 smooths the rib along its length, whichever way
+    it runs through the scan; a blur along the slice axis cannot, because a
+    rib crosses the slices at a slant and is thinner than the blur. Returns
+    the volume, the step in mm, and a function that takes a surface of that
+    volume back to the crop's millimetres; or None when the bone has no
+    centreline to follow.
+
+    Every point of space is sampled only at the place on the centreline
+    nearest to it, so nothing is counted twice where the rib curls. If the
+    volume then holds less than RIB_KEPT_SHARE of the mask, the centreline
+    does not describe the bone and None is returned.
+    """
+    from scipy.spatial import KDTree
+
+    step = float(spacing.min()) / UPSAMPLE
+    voxels_mm = np.argwhere(crop > 0) * spacing
+    axis = rib_axis(voxels_mm, spacing, step)
+    if axis is None:
+        return None
+    curve, normals, binormals = axis
+    tree = KDTree(curve)
+    reach = float(tree.query(voxels_mm)[0].max() + 2 * spacing.max())
+    half = int(np.ceil(reach / step))
+    offsets = np.arange(-half, half + 1) * step
+    points = (
+        curve[:, None, None, :]
+        + offsets[None, :, None, None] * normals[:, None, None, :]
+        + offsets[None, None, :, None] * binormals[:, None, None, :]
+    ).reshape(-1, 3)
+    values = ndimage.map_coordinates(crop, (points / spacing).T, order=1, mode="constant")
+    station = np.repeat(np.arange(len(curve)), len(offsets) ** 2)
+    values[np.abs(tree.query(points)[1] - station) > 2] = 0.0
+    straight = values.reshape(len(curve), len(offsets), len(offsets)).astype(np.float32)
+    if straight.sum() * step**3 < RIB_KEPT_SHARE * (crop > 0).sum() * np.prod(spacing):
+        return None  # the bone doubles back more tightly than its centreline can follow
+
+    def back(poly: vtk.vtkPolyData) -> vtk.vtkPolyData:
+        # smoothest() puts sample j of each axis at (j - 0.5) * step.
+        index = vtk_to_numpy(poly.GetPoints().GetData()).astype(np.float64) / step + 0.5
+        along = np.clip(index[:, 0], 0, len(curve) - 1)
+        u, v = (index[:, 1] - half) * step, (index[:, 2] - half) * step
+        stations = np.arange(len(curve))
+        frame = [
+            np.stack([np.interp(along, stations, a[:, d]) for d in range(3)], 1)
+            for a in (curve, normals, binormals)
+        ]
+        moved = vtk.vtkPolyData()
+        moved.DeepCopy(poly)
+        mm = frame[0] + u[:, None] * frame[1] + v[:, None] * frame[2]
+        moved.GetPoints().SetData(numpy_to_vtk(mm, deep=True))
+        return moved
+
+    return straight, step, back
 
 
 def smoothest(
@@ -1244,6 +1455,13 @@ def surface(
     volume: a fixed 0.5 would shrink a thin bone such as a rib by up to 12%.
     A light windowed-sinc pass (Taubin-like, volume-keeping) removes the rest
     of the noise.
+
+    With along_slices the blur is stronger along the slice axis (flat bones
+    and vertebrae). With centreline (a rib) the mask is first resampled along
+    the bone's own centreline and blurred along that (RIB_BLURS, see
+    unroll()), which takes the slice-to-slice ripple off a rib wherever it
+    runs and rounds its ends; a bone too short or too curled for that is
+    surfaced as with along_slices.
     """
     image = nib.load(path)
     data = mask if mask is not None else np.asanyarray(image.dataobj) > 0
@@ -1272,15 +1490,24 @@ def surface(
         axis = int(np.argmax(np.abs(image.affine[2, :3])))
         label = path.name.removesuffix(".nii.gz")
         ladder = {"sternum": STERNUM_BLURS, "costal_cartilages": CARTILAGE_BLURS}.get(
-            label, RIB_BLURS if label.startswith("rib_") else SLICE_BLURS
+            label, SLICE_BLURS
         )
         blurs = [tuple(z if a == axis else xy for a in range(3)) for xy, z in ladder]
     else:
         blurs = list(BLUR_VOXELS)
-    if centreline:
-        fine = straighten(fine, np.argwhere(crop > 0) * spacing, spacing)
-    for blur in blurs:
-        poly = smoothest(fine, spacing, blur, target, pieces)
+    unrolled = unroll(crop, spacing) if centreline else None
+    if unrolled is not None:
+        # A rib is smoothed along its own length instead: see unroll().
+        fine, step, back = unrolled
+        samples = np.full(3, step * UPSAMPLE)  # smoothest() halves this again
+        tries = [
+            (samples, np.array([along, across, across]) / samples, back)
+            for across, along in RIB_BLURS
+        ]
+    else:
+        tries = [(spacing, blur, None) for blur in blurs]
+    for grid, blur, post in tries:
+        poly = smoothest(fine, grid, blur, target, pieces, post)
         if abs(enclosed_volume(poly) / target - 1) <= BLUR_TOLERANCE:
             break  # a thin, lobed organ (the pancreas) can need a lighter blur
     if pieces:
@@ -1477,16 +1704,29 @@ def main() -> None:
     reasons = {label: cut_reason(seg_dir / f"{label}.nii.gz", outside) for label in labels}
     settled, fragments = {}, []
     if args.set in RULED_SETS:
+        # A bone that meets the scan's end only with a cut neighbour's lump is whole.
+        unmixed, lumps = whole_but_for_lumps(seg_dir, reasons, outside)
+        reasons.update(dict.fromkeys(unmixed))
         reasons = reference_rules(reasons)
         bones = [
             s.label
             for s in SETS[args.set]
             if s.system == "skeletal" and s.label not in SETS_OF_PIECES and not reasons[s.label]
         ]  # a set of pieces (the segmented cartilage) is many pieces by nature
-        settled, fragments = settle_fragments(seg_dir, bones)
+        # A bone the scan cut is left out, and takes its mislabelled pieces along.
+        cut = [
+            s.label
+            for s in SETS[args.set]
+            if s.system == "skeletal" and s.label not in SETS_OF_PIECES
+            and (reasons[s.label] or "").startswith(("cut by", "shoulder girdle", "its pair"))
+        ]  # fmt: skip
+        settled, fragments = settle_fragments(seg_dir, bones, cut, unmixed)
+        fragments = lumps + fragments
         for note in fragments:
             print(f"{note['label']}: {note['ml']} ml {note['action']}"
-                  + (f" to {note['to']}" if note.get("to") else ""), file=sys.stderr)  # fmt: skip
+                  + (f" to {note['to']}" if note.get("to") else "")
+                  + (" (left out)" if note.get("exported") is False else ""),
+                  file=sys.stderr)  # fmt: skip
     for s in SETS[args.set]:
         bone = s.system == "skeletal"
         cap = args.max_bone_triangles if bone else args.max_triangles
@@ -1518,11 +1758,15 @@ def main() -> None:
         if reason and not bone:
             sys.exit(f"{s.label}: {reason} in {args.case}; organs must be whole")
         if reason:
-            # Never exported, never capped. The femurs and humeri are still
-            # meshed into the landmarks file for their joint centres.
+            # Never exported, never capped; the manifest says which side of
+            # the body the scan cut it at (S for a shoulder the scan ends
+            # through). The femurs and humeri are still meshed into the
+            # landmarks file for their joint centres.
             dropped.append({"label": s.label, "reason": reason})
+            faces = cut_faces(path, outside) if reason.startswith("cut by") else set()
+            if faces:
+                dropped[-1]["cut_at"] = "".join(sorted(faces))
             if s.label in LANDMARK_BONES and not reason.startswith(("absent", "not segmented")):
-                faces = cut_faces(path, outside) if reason.startswith("cut by") else set()
                 if landmark_ok(s.label, reason, faces):
                     landmarks.append(s)
                 else:
