@@ -114,8 +114,8 @@ the female s0859, both from the TotalSegmentator dataset (CC BY 4.0):
 ```
 
 [`blender/assemble.py`](blender/assemble.py) fits the CT to the body: height
-from the hip and shoulder joints, width and depth from the trunk outlines, then
-the shoulder girdle and upper thorax onto ANNY's shoulders. It reports each joint's residual and the share of every structure inside the
+from the hip and shoulder joints, width and depth from the trunk outlines. It
+reports each joint's residual and the share of every structure inside the
 skin. The CT was taken lying down and ANNY stands, so the organs sit as they do
 supine. The ages do not match either: ANNY's bodies are young adults, while
 s0903 was 88 and s0859 74 when scanned, so the organs and bones are an older
@@ -124,10 +124,18 @@ person's inside a young adult's shape. The released GLB's asset copyright credit
 meshes up and fit an atlas to a body limb by limb; `scripts/blender.py` runs
 them all.
 
+## Imaging layer (prototype)
+
+`scripts/imaging.py` cuts axial, coronal and sagittal slices through a
+reference body's own CT, tints the segmented structures and places the slices
+as textured planes inside the body. See
+[docs/imaging-layer.md](docs/imaging-layer.md).
+
 ## Self-checks
 
 ```bash
 .venv/bin/python scripts/mesh_check.py   # meshes synthetic ellipsoids; no download
+.venv/bin/python scripts/imaging_check.py   # the imaging layer's orientation
 scripts/self-check.sh                     # every Blender self-check; skips without Blender
 python3 scripts/bake_check.py             # the bake's lock, and any baked body
 ```
