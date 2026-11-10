@@ -87,10 +87,31 @@ def test_a_mask_meeting_the_unscanned_padding_is_cut(tmp_path: Path, slanted: bo
     assert mesh.cut_faces(path, outside) == {"S"}
 
 
-def test_a_mask_one_slice_below_the_padding_is_whole(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("top", "cut"), [(32, True), (31, True), (30, False)])
+def test_the_blend_at_the_fills_edge_counts_as_padding(tmp_path: Path, top: int, cut: bool) -> None:
+    # The fill starts at slice 34. Resampling blends it into the slices below,
+    # so a mask within PADDING_BLEND voxels of it, plus the one the cut test
+    # reaches, is cut; one with a clear slice beyond that is whole.
     outside = mesh.scan_outside(padded_ct(tmp_path))
-    mask = box((40, 40, 40), (12, 12, 20), (20, 20, 33))  # top slice 32; padding from 34
-    assert mesh.cut_reason(save(tmp_path / "m.nii.gz", mask), outside) is None
+    mask = box((40, 40, 40), (12, 12, 20), (20, 20, top + 1))
+    reason = mesh.cut_reason(save(tmp_path / "m.nii.gz", mask), outside)
+    assert (reason == "cut by the scan's edge (unscanned padding)") is cut
+
+
+def test_a_mask_ending_where_the_fill_blends_in_is_cut(tmp_path: Path) -> None:
+    # As a resampled scan ends: the last scanned slice, two slices blending
+    # the body into the fill (about -450 and -995 HU, neither at the fill
+    # value), then the fill. A humeral head ending on the last scanned slice
+    # was cut by the scan's end; one with a clear slice below it is whole.
+    hu = np.full((40, 40, 40), 40.0)
+    hu[:, :, 30], hu[:, :, 31], hu[:, :, 32:] = -450, -995, -1024
+    outside = mesh.scan_outside(save_ct(tmp_path / "ct.nii.gz", hu))
+    assert not outside[0][:, :, :30].any() and outside[0][:, :, 30:].all()
+    head = save(tmp_path / "head.nii.gz", box((40, 40, 40), (12, 12, 10), (20, 20, 30)))
+    assert mesh.cut_reason(head, outside) == "cut by the scan's edge (unscanned padding)"
+    assert mesh.cut_faces(head, outside) == {"S"}
+    whole = save(tmp_path / "whole.nii.gz", box((40, 40, 40), (12, 12, 10), (20, 20, 29)))
+    assert mesh.cut_reason(whole, outside) is None
 
 
 def test_air_round_the_body_is_not_padding(tmp_path: Path) -> None:
