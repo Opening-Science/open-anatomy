@@ -56,6 +56,9 @@ jobs:
       - run: .venv/bin/pytest
       - name: Mesh check
         run: .venv/bin/python scripts/mesh_check.py
+      # The lock only; baked bodies are not on the runner.
+      - name: Bake check
+        run: .venv/bin/python scripts/bake_check.py
 
   type-check:
     name: Type check

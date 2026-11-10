@@ -11,10 +11,11 @@
 
    ```bash
    uv venv .venv -p 3.12 && uv pip install --group test -e '.[mesh]'   # once
-   ruff check scripts tests && ruff format --check scripts tests
+   ruff check scripts blender tests && ruff format --check scripts blender tests
    shellcheck scripts/*.sh
    .venv/bin/pytest
    .venv/bin/python scripts/mesh_check.py
+   .venv/bin/python scripts/bake_check.py
    npx pyright@1.1.414
    python3 scripts/data_guard.py
    python3 scripts/licence_check.py

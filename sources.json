@@ -23,5 +23,23 @@
       "ct_sha256": "77b17dac577a5a0cd119024462cc1d5b51a50031ff3bc5380a601d06316dd3e8",
       "why": "all ten v0 structures present and none cut off by the scan edge; 1.5 mm isotropic"
     }
+  },
+  "bodies": {
+    "anny-adult-m": {
+      "sex": "male",
+      "made_by": "scripts/bake_anny.py male",
+      "licence": "CC0-1.0 shapes, Apache-2.0 code",
+      "file": "anny-adult-m.rigged.glb",
+      "bytes": 464852,
+      "sha256": "16d101090af7719069cd78d0a091d7d9c4975bc45df44201f23761ea89553589"
+    },
+    "anny-adult-f": {
+      "sex": "female",
+      "made_by": "scripts/bake_anny.py female",
+      "licence": "CC0-1.0 shapes, Apache-2.0 code",
+      "file": "anny-adult-f.rigged.glb",
+      "bytes": 464816,
+      "sha256": "9032bfeb29ba4be8aeb0eb38a81e72c5dd5420a38005913d907c83c4f87fdbe1"
+    }
   }
 }

@@ -1,20 +1,17 @@
 #!/usr/bin/env bash
-# Runs scripts/self_check.py in headless Blender. Set BLENDER to choose a
-# binary. Without Blender it skips and exits 0, except in CI (CI=true), where a
-# missing Blender is an error so the check cannot pass without running.
+# Runs every Blender self-check on synthetic meshes (scripts/blender.py
+# self-check). Set BLENDER_BIN, or BLENDER, to choose a binary. Without Blender
+# it skips and exits 0, except in CI (CI=true), where a missing Blender is an
+# error so the check cannot pass without running.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-blender="${BLENDER:-$(command -v blender || true)}"
+export BLENDER_BIN="${BLENDER_BIN:-${BLENDER:-}}"
+blender="${BLENDER_BIN:-$(command -v blender || true)}"
 
-if [[ -z "$blender" || ! -x "$blender" ]]; then
-  if [[ "${CI:-}" == "true" ]]; then
-    echo "self-check failed: Blender not found in CI (set BLENDER to its path)" >&2
-    exit 1
-  fi
-  echo "self-check skipped: Blender not found (set BLENDER to its path)"
-  exit 0
+if [[ "${CI:-}" == "true" && (-z "$blender" || ! -x "$blender") ]]; then
+  echo "self-check failed: Blender not found in CI (set BLENDER_BIN to its path)" >&2
+  exit 1
 fi
 
-exec "$blender" --background --factory-startup --python-exit-code 1 \
-  --python "$here/self_check.py"
+exec python3 "$here/blender.py" self-check

@@ -22,9 +22,24 @@ TotalSegmentator dataset, small subset, v2.0.1
   of 104 Anatomic Structures in CT Images. Radiology: Artificial Intelligence,
   2023. https://doi.org/10.1148/ryai.230024
 
+ANNY body model
+  ANNY, a free-to-use 3D human parametric model for all ages. NAVER LABS
+  Europe / NAVER Corporation. https://arxiv.org/abs/2511.03589
+  Licence: Apache-2.0 code over CC0-1.0 shape assets derived from MakeHuman.
+  Baked by scripts/bake_anny.py into the synthetic reference bodies; no scan of
+  any person is used. ANNY's non-commercial SMPL/SMPL-X conversion data is
+  never downloaded or used.
+
 Tools
 -----
 
 TotalSegmentator (https://github.com/wasserth/TotalSegmentator)
   Code and the weights of the "total" task: Apache License 2.0. Only tasks
   whose weights are Apache-2.0 are used; see scripts/structures.py.
+
+Ported code
+-----------
+
+blender/ and scripts/bake_anny.py are ported from twin-llm
+(https://github.com/Opening-Science/twin-llm, commit a4058fa8), Apache-2.0,
+Copyright (c) 2026 Open Science Foundation (Opening Science).
