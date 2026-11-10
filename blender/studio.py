@@ -19,8 +19,9 @@ out there instead of being cut.
 
 The front view is orthographic, framed from the top of the shoulders to the
 top of the pelvis when the hip bones are in the file, else to the lowest
-vertebra; the three-quarter view turns 35 degrees and looks down 8 degrees.
-Writes <name>.<view>.png.
+vertebra; the three-quarter view turns 40 degrees to the body's right, so
+the sternum is on the right as in Gray's plate 114, and looks down 8
+degrees. Writes <name>.<view>.png.
 """
 
 from __future__ import annotations
@@ -58,7 +59,7 @@ AO_POWER = 1.5
 EDGE = 0.5  # how far a surface turning away from the camera goes to its shade colour
 HAZE = 0.25  # how far the bones farthest from the camera fade into the backdrop
 FADE = 0.08  # share of the picture's height, from the bottom, over which bones fade out
-VIEWS = {"front": (0.0, 0.0), "three-quarter": (35.0, 8.0)}  # turn about Z, look down, degrees
+VIEWS = {"front": (0.0, 0.0), "three-quarter": (-40.0, 8.0)}  # turn about Z, look down, degrees
 RESOLUTION = (1800, 2400)
 
 
