@@ -17,7 +17,7 @@ import numpy.typing as npt
 import pytest
 
 import mesh
-from structures import ORGANS, REFERENCE, node_name
+from structures import ORGANS, REFERENCE, SYSTEMS, node_name
 
 Mask = npt.NDArray[np.bool_]
 FloatArray = npt.NDArray[np.float64]
@@ -803,6 +803,92 @@ def test_a_built_glb_follows_the_contract(tmp_path: Path, monkeypatch: pytest.Mo
     again = run_main(tmp_path, monkeypatch, {})
     assert (tmp_path / "c.reference.glb").read_bytes() == first
     assert again["nodes"] == manifest["nodes"] and again["sha256"] == manifest["sha256"]
+
+
+# The same contract on real masks: one ball per organ on a 1.5 mm grid, meshed
+# by surface() itself. Offsets are in voxels from the grid's centre, along
+# (i, j, k), which the affine turns into the body's (left, front, up). The heart
+# and the vena cava sit on the centre, the other two of their system (spleen,
+# aorta) left and right of it, and the rest balance, so the body centre is the
+# grid's centre.
+CUBIC = np.diag([-1.5, 1.5, 1.5, 1.0])
+BALL_GRID, BALL_VOXELS = 64, 7
+BALLS = {
+    "heart": (0, 0, 0),
+    "inferior_vena_cava": (0, 0, 0),
+    "spleen": (20, 0, 0),
+    "aorta": (-20, 0, 0),
+    "liver": (0, 20, 0),
+    "stomach": (0, -20, 0),
+    "kidney_left": (18, 9, -9),
+    "kidney_right": (-18, 9, -9),
+    "pancreas": (0, -9, 22),
+    "gallbladder": (0, -9, -4),
+}
+
+
+def build_balls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, out: str) -> Path:
+    seg = tmp_path / "seg"
+    if not seg.exists():
+        seg.mkdir()
+        grid = np.indices((BALL_GRID,) * 3).transpose(1, 2, 3, 0) - BALL_GRID // 2
+        for label, offset in BALLS.items():
+            radius = BALL_VOXELS + (label == "heart")
+            save(seg / f"{label}.nii.gz", ((grid - offset) ** 2).sum(-1) <= radius**2, CUBIC)
+    argv = ["mesh.py", "--case", "c", "--synthetic", "--set", "organs", "--seg-dir", str(seg),
+            "--out-dir", str(tmp_path / out)]  # fmt: skip
+    monkeypatch.setattr(sys, "argv", argv)
+    mesh.main()
+    return tmp_path / out
+
+
+def test_real_masks_build_to_the_contract(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    out = build_balls(tmp_path, monkeypatch, "a")
+    manifest: dict[str, Any] = json.loads((out / "c.organs.manifest.json").read_text())
+    gltf, positions = read_glb(out / "c.organs.glb")
+    offset = np.array(manifest["centre_offset_m"])
+    entries = {n["name"]: n for n in manifest["nodes"]}
+    names = [node_name(s.term) for s in ORGANS]
+    assert [n["name"] for n in gltf["nodes"]] == list(entries) == names
+    by_label = {}
+    for node, s in zip(gltf["nodes"], ORGANS, strict=True):
+        extras = by_label[s.label] = node["extras"]
+        assert set(extras) == CONTRACT_FIELDS
+        assert all(entries[node["name"]][field] == extras[field] for field in CONTRACT_FIELDS)
+        assert extras["system"] in SYSTEMS and extras["layer"] == "organs"
+        assert extras["modelled"] is False and extras["pieces"] == "one"
+        # Recentring: the ball's centre in the body frame is the node's
+        # translation, and translation + vertex lies on the ball there.
+        voxel = np.array(BALLS[s.label]) + BALL_GRID // 2
+        centre = (CUBIC[:3, :3] @ voxel + CUBIC[:3, 3]) @ mesh.RAS_TO_GLTF.T - offset
+        radius = (BALL_VOXELS + (s.label == "heart")) * 0.0015
+        assert node["translation"] == extras["centre"]
+        np.testing.assert_allclose(node["translation"], centre, atol=0.0003)
+        placed = positions[node["name"]] + node["translation"]
+        np.testing.assert_allclose(np.linalg.norm(placed - centre, axis=1), radius, atol=0.0015)
+        np.testing.assert_allclose(positions[node["name"]].mean(0), 0, atol=0.0005)
+        np.testing.assert_allclose(extras["bounds"], [placed.min(0), placed.max(0)], atol=2e-6)
+        assert extras["volume_ml"] == pytest.approx(4 / 3 * math.pi * radius**3 * 1e6, rel=0.03)
+    np.testing.assert_allclose(manifest["body_centre_m"], -offset + 0.048 * np.ones(3), atol=0.0005)
+
+    def explode(label: str) -> tuple[list[float], float]:
+        return by_label[label]["explode"]["direction"], by_label[label]["explode"]["distance"]
+
+    # The direction: outward from the body centre; at the centre, the system's
+    # mean, and anterior when the system's sides cancel as spleen and aorta do.
+    np.testing.assert_allclose(explode("spleen")[0], [1, 0, 0], atol=0.02)
+    np.testing.assert_allclose(explode("liver")[0], [0, 0, 1], atol=0.02)
+    np.testing.assert_allclose(explode("pancreas")[0], [0, 0.926, -0.379], atol=0.02)
+    assert explode("heart")[0] == explode("inferior_vena_cava")[0] == [0.0, 0.0, 1.0]
+    assert explode("kidney_left")[1] == explode("kidney_right")[1]
+    for a, b in itertools.combinations(manifest["nodes"], 2):
+        assert apart(moved(a), moved(b), mesh.EXPLODE_GAP_M - 1e-9), (a["name"], b["name"])
+    # The same masks give the same GLB and the same manifest, byte for byte.
+    again = build_balls(tmp_path, monkeypatch, "b")
+    assert (again / "c.organs.glb").read_bytes() == (out / "c.organs.glb").read_bytes()
+    assert (again / "c.organs.manifest.json").read_bytes() == (
+        out / "c.organs.manifest.json"
+    ).read_bytes()
 
 
 # settle_fragments: detached pieces of bones before meshing
