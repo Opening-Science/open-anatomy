@@ -103,27 +103,28 @@
       "bytes": 464816,
       "sha256": "9032bfeb29ba4be8aeb0eb38a81e72c5dd5420a38005913d907c83c4f87fdbe1"
     },
-    "anny-adult-m-w0.9-h0.5": {
+    "anny-adult-m-w0.95-h0.5": {
       "sex": "male",
-      "weight": 0.9,
+      "weight": 0.95,
       "height": 0.5,
-      "made_by": "scripts/bake_anny.py male --weight 0.9 --height 0.5",
+      "made_by": "scripts/bake_anny.py male --weight 0.95 --height 0.5",
       "licence": "CC0-1.0 shapes, Apache-2.0 code",
-      "file": "anny-adult-m-w0.9-h0.5.rigged.glb",
-      "bytes": 464828,
-      "sha256": "8cf0c271129f8ef810a288ae5ad982a02777cabb519914f5e7c40ad7fa51fe96",
+      "file": "anny-adult-m-w0.95-h0.5.rigged.glb",
+      "bytes": 464840,
+      "sha256": "9a365bc92df3789ec6a933371b1f1e2c7cea392a09fa01bf2600c26c1d5d78d9",
       "sized_by": "scripts/size_body.py --case s0667 --sex male"
     },
-    "anny-adult-m-w0.9-h0.9": {
+    "anny-adult-m-w1.0-h0.8": {
       "sex": "male",
-      "weight": 0.9,
-      "height": 0.9,
-      "made_by": "scripts/bake_anny.py male --weight 0.9 --height 0.9",
+      "weight": 1.0,
+      "height": 0.8,
+      "made_by": "scripts/bake_anny.py male --weight 1.0 --height 0.8",
       "licence": "CC0-1.0 shapes, Apache-2.0 code",
-      "file": "anny-adult-m-w0.9-h0.9.rigged.glb",
-      "bytes": 464864,
-      "sha256": "e2bfbe9c6ee7a49ce92dbf7fcc8043f8f2015e1b38a16fb4009869dcd9cebf9d",
-      "sized_by": "scripts/size_body.py --case s1086 --sex male"
+      "file": "anny-adult-m-w1.0-h0.8.rigged.glb",
+      "bytes": 464880,
+      "sha256": "94489ddd6223715760e4d80ff008909ad8790813091e19629541ddcc0d988221",
+      "sized_by": "scripts/size_body.py --case s1086 --sex male",
+      "note": "weight 1.0 is ANNY's limit: the CT's trunk (382 x 270 mm) is wider and deeper than ANNY's at this height (366 x 243 mm)"
     }
   },
   "references": {
@@ -132,8 +133,8 @@
       "case": "s0903",
       "built": {
         "file": "anny-adult-m.reference.glb",
-        "sha256": "28776eb14c8c58c89ba2a9b51838a088480749f38884e6bfa79a5a89e68775d1",
-        "ctSha256": "e63480228e8f1b5249e980ed18f5685ae9093714c537ad8e6bff7a0c7517e2b3",
+        "sha256": "b64a35640a30f5d37f2cd48ec2c4a0c9e7be4bb44927a32c62c36676209e0a08",
+        "ctSha256": "8066ab17167e0c25a7f491cd5b1051e6dec2d31b7623d94d7aab49f5374bcbaf",
         "note": "built on Linux x86_64, RTX 2080 Ti, Blender 5.2.3; GPU segmentation is not bit-exact across machines"
       }
     },
@@ -142,28 +143,28 @@
       "case": "s0859",
       "built": {
         "file": "anny-adult-f.reference.glb",
-        "sha256": "f3b60118575e00938ccf10c66a8aba2d83be5a050317ce71f3bc30ec8923c4ff",
-        "ctSha256": "be6d6118c98e66c27120ca0db3c91885381506ef6c9b43ff53544a73f6981e2c",
+        "sha256": "117059dd65a6ce7b18e2b5576de0091262dd5037d997d1aedef234893d99e19f",
+        "ctSha256": "0c8e031bb3a3ae3fc99d85b2c49acbf821f6242fa668449b3475786067c7ec21",
         "note": "built on Linux x86_64, RTX 2080 Ti, Blender 5.2.3; GPU segmentation is not bit-exact across machines"
       }
     },
-    "anny-adult-m-w0.9-h0.5.s0667": {
-      "body": "anny-adult-m-w0.9-h0.5",
+    "anny-adult-m-w0.95-h0.5.s0667": {
+      "body": "anny-adult-m-w0.95-h0.5",
       "case": "s0667",
       "built": {
-        "file": "anny-adult-m-w0.9-h0.5.s0667.reference.glb",
-        "sha256": "2c6d92566a86e46982233ad3f3e3251250a4564d48045ba57b3b159534c73874",
-        "ctSha256": "3e2538363a3a1f9569574238b5ec65709c57a436656f581e73c5fe319d12223b",
+        "file": "anny-adult-m-w0.95-h0.5.s0667.reference.glb",
+        "sha256": "3e1642d3e086434fe67da1464c136fe0e3f21c820d1974567ab50c0e675e3d2c",
+        "ctSha256": "3615cc89914db81ee75358f88193bcdcbe2b1550c7b3f06c0ed13dd914f0d57d",
         "note": "built on Linux x86_64, RTX 2080 Ti, Blender 5.2.3; GPU segmentation is not bit-exact across machines"
       }
     },
-    "anny-adult-m-w0.9-h0.9.s1086": {
-      "body": "anny-adult-m-w0.9-h0.9",
+    "anny-adult-m-w1.0-h0.8.s1086": {
+      "body": "anny-adult-m-w1.0-h0.8",
       "case": "s1086",
       "built": {
-        "file": "anny-adult-m-w0.9-h0.9.s1086.reference.glb",
-        "sha256": "5247a89a86603974fee810e1f875ff285ff50c7d8442212b011c733a95422af7",
-        "ctSha256": "1c66ddd6c4d1e4983ed21c7dd80f9b79c391fc564d53d4575e2669653803ef5b",
+        "file": "anny-adult-m-w1.0-h0.8.s1086.reference.glb",
+        "sha256": "fbb57c5d4e7da54bce2658b3ec6b068cad70f9b53c11aecb987d1001f6e5ec6e",
+        "ctSha256": "e07ba695f02310fe6fb74da0f0a7d4e3b5a0d831f8b500d3d36a72f0ad5355bc",
         "note": "built on Linux x86_64, RTX 2080 Ti, Blender 5.2.3; GPU segmentation is not bit-exact across machines"
       }
     }

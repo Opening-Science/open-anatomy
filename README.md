@@ -117,8 +117,8 @@ the female s0859, both from the TotalSegmentator dataset (CC BY 4.0):
 | --- | --- | --- | --- |
 | anny-adult-m | s0903, male, 88 | none | yes |
 | anny-adult-f | s0859, female, 74 | inflammation (thorax) | yes |
-| anny-adult-m-w0.9-h0.5.s0667 | s0667, male, 65 | none | yes |
-| anny-adult-m-w0.9-h0.9.s1086 | s1086, male, 45 | tumour (thorax, abdomen) | **no: a pathological reference** |
+| anny-adult-m-w0.95-h0.5.s0667 | s0667, male, 65 | none | yes |
+| anny-adult-m-w1.0-h0.8.s1086 | s1086, male, 45 | tumour (thorax, abdomen) | **no: a pathological reference** |
 
 The s1086 body shows tumour anatomy: the tumour may displace or change organs,
 so it must not stand in for typical anatomy. Its report says so in `case`.
@@ -129,8 +129,10 @@ the scan, arms hanging, no trauma), and `scripts/size_body.py` picks the ANNY
 weight and height whose trunk matches the case's, which `bake_anny.py` then
 bakes with `--weight` and `--height`. It searches up to ANNY's limit of 1.0,
 refines around the best in steps of 0.05 and warns when the best is on the
-edge. The two w0.9 bodies above were sized on an older grid that stopped at
-0.9, where both landed; they will be re-sized when the bodies are rebuilt.
+edge. For s0667 it picks weight 0.95 and height 0.5. For s1086 it picks weight
+1.0, ANNY's limit, at height 0.8: the CT's trunk is wider and deeper (382 x
+270 mm) than ANNY's can be at that height (366 x 243 mm), so that body is a
+little too slim ([#44](https://github.com/Opening-Science/open-anatomy/issues/44)).
 
 [`blender/assemble.py`](blender/assemble.py) fits the CT to the body: height
 from the hip and shoulder joints, width and depth from the trunk outlines, then
