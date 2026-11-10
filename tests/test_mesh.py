@@ -7,6 +7,7 @@ from __future__ import annotations
 import itertools
 import json
 import math
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -17,7 +18,7 @@ import numpy.typing as npt
 import pytest
 
 import mesh
-from structures import ORGANS, REFERENCE, SYSTEMS, node_name
+from structures import LAYERS, ORGANS, REFERENCE, SYSTEMS, layer_of, node_name
 
 Mask = npt.NDArray[np.bool_]
 FloatArray = npt.NDArray[np.float64]
@@ -931,6 +932,87 @@ def test_real_masks_build_to_the_contract(tmp_path: Path, monkeypatch: pytest.Mo
     assert (again / "c.organs.manifest.json").read_bytes() == (
         out / "c.organs.manifest.json"
     ).read_bytes()
+
+
+# docs/explode-view.md is the contract a viewer is written against, so its
+# field table, its systems, its limits and its manifest example must be the
+# ones mesh.py writes. The page comes to this branch with main; until then
+# these tests have nothing to read.
+CONTRACT_DOC = Path(mesh.__file__).resolve().parent.parent / "docs" / "explode-view.md"
+needs_contract_doc = pytest.mark.skipif(
+    not CONTRACT_DOC.exists(), reason="docs/explode-view.md is not on this branch yet"
+)
+STALE = "docs/explode-view.md is not the page that goes with this mesh.py: "
+# What main() adds to a manifest node after the contract's fields.
+BUILD_RECORD = {"triangles", "voxel_volume_ml", "volume_drift", "dropped_share",
+                "knobs_trimmed_ml", "bridged_gap_mm"}  # fmt: skip
+
+
+def doc_section(heading: str) -> str:
+    """The page's text under a heading, up to the next heading, as one line."""
+    text = CONTRACT_DOC.read_text()
+    found = re.search(rf"^#+ {re.escape(heading)}\n(.*?)(?=^#+ |\Z)", text, re.S | re.M)
+    assert found, STALE + f"it has no section {heading!r}"
+    return " ".join(found.group(1).split())
+
+
+@needs_contract_doc
+def test_the_contract_page_lists_the_fields_a_node_carries() -> None:
+    table = re.findall(r"^\| `extras\.(\w+)` \|", CONTRACT_DOC.read_text(), re.M)
+    assert len(table) == len(set(table))
+    assert set(table) == CONTRACT_FIELDS, STALE + "its field table differs"
+
+
+@needs_contract_doc
+def test_the_contract_page_names_the_closed_list_of_systems_and_the_layers() -> None:
+    systems = doc_section("Systems").split("(")[0]
+    assert tuple(re.findall(r"`(\w+)`", systems)) == SYSTEMS, STALE + "its systems differ"
+    row = re.search(r"^\| `extras\.layer` \|.*$", CONTRACT_DOC.read_text(), re.M)
+    assert row and tuple(re.findall(r"`(\w+)`", row.group(0).split("|")[3])[:5]) == LAYERS
+    spleen = next(s for s in ORGANS if s.label == "spleen")
+    assert f"goes with `{spleen.system}`" in doc_section("Systems")
+
+
+@needs_contract_doc
+def test_the_contract_page_states_the_limits_mesh_py_uses() -> None:
+    rule = doc_section("Explode direction and distance")
+    assert f"less than {mesh.AT_CENTRE_M * 100:g} cm from the body centre" in rule
+    assert f"shorter than {mesh.MEAN_DIRECTION_MIN:g} " in rule
+    assert f"plus {mesh.EXPLODE_MARGIN_M * 100:g} cm" in rule
+    assert f"{mesh.EXPLODE_GAP_M * 1000:g} mm clear" in rule
+    assert "+Z, anterior" in rule and mesh.ANTERIOR.tolist() == [0.0, 0.0, 1.0]
+    assert f"(version {mesh.CONTRACT})" in CONTRACT_DOC.read_text()
+
+
+@needs_contract_doc
+def test_the_contract_pages_manifest_example_is_a_manifest_main_could_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    block = re.search(r"```json\n(.*?)```", CONTRACT_DOC.read_text(), re.S)
+    assert block, STALE + "it has no manifest example"
+    example: dict[str, Any] = json.loads(block.group(1))
+    manifest = run_main(tmp_path, monkeypatch, {})
+    del manifest["surfaced"]  # run_main's own note, not main()'s
+    assert set(example) == set(manifest), STALE + "its manifest example has other fields"
+    assert example["contract"] == mesh.CONTRACT
+    assert example["units"] == manifest["units"] and example["axes"] == manifest["axes"]
+    assert len(example["body_centre_m"]) == len(example["centre_offset_m"]) == 3
+    (node,) = example["nodes"]
+    written = {"name"} | CONTRACT_FIELDS
+    assert written <= set(node) <= written | BUILD_RECORD, STALE + "its example node differs"
+    assert list(node)[: len(written)] == list(manifest["nodes"][0])[: len(written)]  # same order
+    assert node["name"] == node_name(node["term"])
+    assert node["system"] in SYSTEMS and node["layer"] == layer_of(node["system"])
+    assert node["pieces"] in ("one", "several")
+    assert all(isinstance(node[field], bool) for field in ("modelled", "typical"))
+    low, centre, high = (
+        np.array(v) for v in (node["bounds"][0], node["centre"], node["bounds"][1])
+    )
+    assert (low < centre).all() and (centre < high).all()
+    assert np.linalg.norm(node["explode"]["direction"]) == pytest.approx(1.0, abs=1e-5)
+    corners = np.array(list(itertools.product(*zip(low, high, strict=True))))
+    radius = np.linalg.norm(corners - centre, axis=1).max()
+    assert node["explode"]["distance"] >= radius + mesh.EXPLODE_MARGIN_M - 1e-9  # the rule's floor
 
 
 # settle_fragments: detached pieces of bones before meshing
