@@ -18,12 +18,14 @@ plate, the far half of the skeleton pales toward the backdrop with
 distance, and hip bones, which leave the picture at its bottom edge, fade
 out there instead of being cut.
 
-The front view is orthographic, framed from the top of the shoulders to the
+Both views are orthographic and framed from the top of the shoulders to the
 top of the pelvis when the hip bones are in the file, else to the lowest
-vertebra; the three-quarter view turns 40 degrees to the body's right, so
-the sternum is on the right as in Gray's plate 114, and looks down 8
-degrees. Writes <name>.<view>.png. --self-check renders blocks for bones
-and checks the colours, the haze and the fade in the picture.
+vertebra: the picture is fitted to those bones as the view sees them, with
+a small margin, so none is cut by its edge. The three-quarter view turns 40
+degrees to the body's right, so the sternum is on the right as in Gray's
+plate 114, and looks down 8 degrees. Writes <name>.<view>.png. --self-check
+renders blocks for bones and checks the colours, the haze, the fade and the
+framing of both views.
 """
 
 from __future__ import annotations
@@ -35,8 +37,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import bpy  # noqa: E402
+import numpy as np  # noqa: E402
 from mathutils import Vector  # noqa: E402
 from twinblend.blender_env import (  # noqa: E402
+    coords,
     empty_scene,
     import_glb,
     option,
@@ -61,6 +65,7 @@ AO_POWER = 1.5
 EDGE = 0.5  # how far a surface turning away from the camera goes to its shade colour
 HAZE = 0.25  # how far the bones farthest from the camera fade into the backdrop
 FADE = 0.08  # share of the picture's height, from the bottom, over which bones fade out
+MARGIN = 0.04  # share of the picture left free between the bones and each of its other edges
 VIEWS = {"front": (0.0, 0.0), "three-quarter": (-40.0, 8.0)}  # turn about Z, look down, degrees
 RESOLUTION = (1800, 2400)
 
@@ -227,8 +232,7 @@ def stage(skeleton: list[bpy.types.Object], hdri: str | None, samples: int) -> N
     low = Vector([min(c[i] for c in corners) for i in range(3)])
     high = Vector([max(c[i] for c in corners) for i in range(3)])
     middle, reach = (low + high) / 2, min(high.x - low.x, high.y - low.y) / 2
-    # Only a file with hip bones runs out of the picture's bottom edge.
-    fade = FADE if any("hip bone" in o.get("name", "") for o in skeleton) else 0.0
+    fade = fading(skeleton)
     bone = material("bone", BONE, BONE_SHADE, 0.5, 0.15, middle, reach, fade)
     cartilage = material("cartilage", CARTILAGE, CARTILAGE_SHADE, 0.5, 0.3, middle, reach, fade)
     for o in skeleton:
@@ -265,7 +269,6 @@ def look_check() -> int:
     above the picture's bottom edge and has faded into the backdrop on it."""
     import tempfile
 
-    import numpy as np
     from bpy_extras.object_utils import world_to_camera_view
 
     empty_scene()
@@ -309,6 +312,31 @@ def look_check() -> int:
         0,
         min(int(world_to_camera_view(scene, scene.camera, bones[3].location).x * width), width - 1),
     ]
+
+    def placed(view: str) -> np.ndarray:
+        """Where the blocks' corners inside the box to frame land in the picture."""
+        aim(bones, view)
+        bpy.context.view_layer.update()
+        floor = frame(bones)[0].z
+        corners = [o.matrix_world @ Vector(c) for o in bones for c in o.bound_box]
+        at = [world_to_camera_view(scene, scene.camera, c) for c in corners if c.z > floor]
+        return np.array([(a.x, a.y) for a in at])
+
+    def held(at: np.ndarray) -> bool:
+        """Margins at the sides and the top, the fade's band free below."""
+        slack = 0.005
+        return bool(
+            at[:, 0].min() > MARGIN - slack
+            and at.max() < 1 - MARGIN + slack
+            and at[:, 1].min() > FADE - slack
+        )
+
+    def filled(at: np.ndarray) -> bool:
+        """The bones reach the margins across the picture or up and down it."""
+        across, upward = np.ptp(at, axis=0)
+        return bool(across > 1 - 2 * MARGIN - 0.01 or upward > 1 - MARGIN - FADE - 0.01)
+
+    views = {view: placed(view) for view in VIEWS}
     checks = {
         "the backdrop is light": paper.min() > 0.85,
         "the backdrop is neutral": paper.max() - paper.min() < 0.03,
@@ -318,6 +346,8 @@ def look_check() -> int:
         "a far bone is paler than a near one": apart(far, paper) < apart(near, paper) - 0.02,
         "a hip bone shows above the picture's bottom edge": apart(hip, paper) > 0.1,
         "a hip bone has faded into the backdrop on the edge": apart(edge, paper) < 0.05,
+        "each view holds the bones above the hips with a margin": all(map(held, views.values())),
+        "and is filled by them": all(map(filled, views.values())),
     }
     for name, ok in checks.items():
         print(("ok   " if ok else "FAIL ") + name)
@@ -352,29 +382,47 @@ def frame(objects: list[bpy.types.Object]) -> tuple[Vector, Vector]:
     return lo, hi
 
 
+def fading(objects: list[bpy.types.Object]) -> float:
+    """The share of the picture's height over which bones fade out at its
+    bottom edge: FADE when some reach below the box to frame, else none."""
+    floor = frame(objects)[0].z
+    lowest = min((o.matrix_world @ Vector(c)).z for o in objects for c in o.bound_box)
+    return FADE if lowest < floor - 1e-4 else 0.0
+
+
+def aim(objects: list[bpy.types.Object], view: str) -> None:
+    """Turns the camera to the view and fits the picture to the bones as it
+    sees them: everything inside the box to frame, with MARGIN free on each
+    side and above. Below, bones that go on under the box fade out over a
+    band of their own, so nothing inside the box is faded or cut."""
+    turn, tilt = (math.radians(v) for v in VIEWS[view])
+    camera = bpy.context.scene.camera
+    camera.data.type = "ORTHO"
+    camera.rotation_euler = (math.pi / 2 - tilt, 0, turn)
+    right, up, back = (np.array(axis) for axis in camera.rotation_euler.to_matrix().transposed())
+    lo, hi = (np.array(corner) for corner in frame(objects))
+    points = np.concatenate([
+        coords(o) @ np.array(o.matrix_world.to_3x3()).T + np.array(o.matrix_world.translation)
+        for o in objects
+    ])  # fmt: skip
+    points = points[np.all((points >= lo - 1e-4) & (points <= hi + 1e-4), axis=1)]
+    across, upward, toward = points @ right, points @ up, points @ back
+    wide, tall = np.ptp(across), np.ptp(upward)
+    below = fading(objects) or MARGIN
+    aspect = RESOLUTION[0] / RESOLUTION[1]
+    height = max(tall / (1 - MARGIN - below), wide / (1 - 2 * MARGIN) / aspect)
+    spare = height * (1 - MARGIN - below) - tall  # when the width decides: shared above and below
+    middle = upward.min() - below * height - spare / 2 + height / 2
+    # ortho_scale spans the picture's longer side.
+    camera.data.ortho_scale = height * max(1.0, aspect)
+    camera.location = Vector(
+        (across.min() + across.max()) / 2 * right + middle * up + (toward.max() + 1.0) * back
+    )
+
+
 def render(objects: list[bpy.types.Object], view: str, path: Path) -> None:
     scene = bpy.context.scene
-    turn, tilt = (math.radians(v) for v in VIEWS[view])
-    lo, hi = frame(objects)
-    centre = (lo + hi) / 2
-    extent = hi - lo
-    camera = scene.camera
-    width, height = RESOLUTION
-    camera.data.type = "ORTHO"
-    # ortho_scale spans the render's longer side; fit both the skeleton's
-    # width as seen from this view and its height.
-    across = extent.x if view == "front" else math.hypot(extent.x, extent.y)
-    tall = extent.z
-    aspect = width / height
-    span = max(tall, across / aspect) if aspect < 1 else max(across, tall * aspect)
-    camera.data.ortho_scale = 1.04 * span
-    distance = 3.0
-    camera.location = centre + Vector((
-        distance * math.sin(turn) * math.cos(tilt),
-        -distance * math.cos(turn) * math.cos(tilt),
-        distance * math.sin(tilt),
-    ))  # fmt: skip
-    camera.rotation_euler = (math.pi / 2 - tilt, 0, turn)
+    aim(objects, view)
     scene.render.filepath = str(path)
     bpy.ops.render.render(write_still=True)
 
