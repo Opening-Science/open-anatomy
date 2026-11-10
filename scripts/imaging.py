@@ -138,7 +138,7 @@ def srgb(linear) -> np.ndarray:
 
 
 def canonical(path: Path) -> nib.Nifti1Image:
-    return nib.as_closest_canonical(nib.load(path))  # voxel axes along R, A, S
+    return nib.as_closest_canonical(nib.Nifti1Image.from_filename(path))  # voxel axes along R, A, S
 
 
 def lanczos_weights(size: int, factor: int, taps: int = LANCZOS_TAPS) -> np.ndarray:
@@ -292,7 +292,9 @@ def png(rgba: np.ndarray) -> bytes:
     )
 
 
-def to_reference(ras: np.ndarray, centre: np.ndarray, scale: np.ndarray, shift: np.ndarray):
+def to_reference(
+    ras: np.ndarray, centre: np.ndarray, scale: np.ndarray | float, shift: np.ndarray
+) -> np.ndarray:
     """RAS millimetres to the reference body's glTF frame, as mesh.py and assemble.py do."""
     gltf = ras @ RAS_TO_GLTF.T - centre  # mesh.py
     blender = np.c_[gltf[:, 0], -gltf[:, 2], gltf[:, 1]]  # Blender's glTF import
@@ -302,7 +304,7 @@ def to_reference(ras: np.ndarray, centre: np.ndarray, scale: np.ndarray, shift: 
 
 def slice_image(ct, labels, body, axis: int, index: int, window) -> tuple[np.ndarray, list]:
     """RGBA image of one slice: rows superior first (axial: anterior first)."""
-    take = [slice(None)] * 3
+    take: list[slice | int] = [slice(None)] * 3
     take[axis] = index
     hu, lab, inside = (np.asarray(v[tuple(take)]) for v in (ct, labels, body))
     width, level = window
@@ -416,7 +418,7 @@ def write_glb(path: Path, planes: list[dict]) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     parser.add_argument("body", nargs="?", default="anny-adult-m")
     parser.add_argument("--window", choices=WINDOWS, default="soft")
     args = parser.parse_args()
@@ -430,6 +432,8 @@ def main() -> None:
 
     ct_image = canonical(ROOT / "data" / "cases" / case / "ct.nii.gz")
     affine = ct_image.affine
+    if affine is None:
+        sys.exit("the CT has no affine")
     ct = np.asanyarray(ct_image.dataobj).astype(np.float32)
     labels = np.zeros(ct.shape, dtype=np.uint8)
     for i, s in enumerate(REFERENCE, start=1):
