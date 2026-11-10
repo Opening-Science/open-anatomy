@@ -67,6 +67,22 @@ def task_labels(task: str) -> list[str]:
     return list(class_map[task].values())
 
 
+def tasks_for(which: str) -> list[str]:
+    """The tasks a set runs, in their order; stops before any that is not Apache-2.0."""
+    tasks = [
+        TASK,
+        *([HEAD_TASK] if which == EVERYTHING else []),
+        *([BODY_TASK] if which in RULED_SETS else []),
+    ]
+    for task in tasks:
+        if task not in ALLOWED_TASKS:
+            sys.exit(
+                f'TotalSegmentator task "{task}" is not Apache-2.0; only these tasks may run: '
+                + ", ".join(sorted(ALLOWED_TASKS))
+            )
+    return tasks
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--case", required=True)
@@ -80,12 +96,7 @@ def main() -> None:
     structures = SETS[args.set]
     if not structures:
         sys.exit(f'the "{args.set}" set has no structures yet')
-    for task in (TASK, HEAD_TASK, BODY_TASK):
-        if task not in ALLOWED_TASKS:
-            sys.exit(
-                f'TotalSegmentator task "{task}" is not Apache-2.0; only these tasks may run: '
-                + ", ".join(sorted(ALLOWED_TASKS))
-            )
+    tasks = tasks_for(args.set)
 
     from totalsegmentator.python_api import totalsegmentator
 
@@ -102,12 +113,12 @@ def main() -> None:
         device=args.device,
         quiet=True,
     )
-    if everything:
+    if HEAD_TASK in tasks:
         # The head task has no fast model. It crops to the skull first, so a
         # scan without one gets empty masks, not an error.
         totalsegmentator(case_dir / "ct.nii.gz", out, task=HEAD_TASK, device=args.device,
                          quiet=True)  # fmt: skip
-    if args.set in RULED_SETS:
+    if BODY_TASK in tasks:
         # The trunk outline (body_trunc) is used only to measure the body for the
         # fit in blender/assemble.py; it is never exported.
         totalsegmentator(
@@ -115,11 +126,6 @@ def main() -> None:
             quiet=True,
         )  # fmt: skip
 
-    tasks = [
-        TASK,
-        *([HEAD_TASK] if everything else []),
-        *([BODY_TASK] if args.set in RULED_SETS else []),
-    ]
     labels = (
         task_labels(TASK) + task_labels(HEAD_TASK) if everything else [s.label for s in structures]
     )
