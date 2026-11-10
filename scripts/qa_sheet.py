@@ -26,7 +26,7 @@ OK = (120, 200, 120)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     parser.add_argument("--qa-dir", type=Path, required=True)
     parser.add_argument("--rows", type=int, default=12)
     parser.add_argument("--title", default="")
