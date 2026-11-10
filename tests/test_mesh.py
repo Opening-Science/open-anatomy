@@ -87,10 +87,31 @@ def test_a_mask_meeting_the_unscanned_padding_is_cut(tmp_path: Path, slanted: bo
     assert mesh.cut_faces(path, outside) == {"S"}
 
 
-def test_a_mask_one_slice_below_the_padding_is_whole(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("top", "cut"), [(32, True), (31, True), (30, False)])
+def test_the_blend_at_the_fills_edge_counts_as_padding(tmp_path: Path, top: int, cut: bool) -> None:
+    # The fill starts at slice 34. Resampling blends it into the slices below,
+    # so a mask within PADDING_BLEND voxels of it, plus the one the cut test
+    # reaches, is cut; one with a clear slice beyond that is whole.
     outside = mesh.scan_outside(padded_ct(tmp_path))
-    mask = box((40, 40, 40), (12, 12, 20), (20, 20, 33))  # top slice 32; padding from 34
-    assert mesh.cut_reason(save(tmp_path / "m.nii.gz", mask), outside) is None
+    mask = box((40, 40, 40), (12, 12, 20), (20, 20, top + 1))
+    reason = mesh.cut_reason(save(tmp_path / "m.nii.gz", mask), outside)
+    assert (reason == "cut by the scan's edge (unscanned padding)") is cut
+
+
+def test_a_mask_ending_where_the_fill_blends_in_is_cut(tmp_path: Path) -> None:
+    # As a resampled scan ends: the last scanned slice, two slices blending
+    # the body into the fill (about -450 and -995 HU, neither at the fill
+    # value), then the fill. A humeral head ending on the last scanned slice
+    # was cut by the scan's end; one with a clear slice below it is whole.
+    hu = np.full((40, 40, 40), 40.0)
+    hu[:, :, 30], hu[:, :, 31], hu[:, :, 32:] = -450, -995, -1024
+    outside = mesh.scan_outside(save_ct(tmp_path / "ct.nii.gz", hu))
+    assert not outside[0][:, :, :30].any() and outside[0][:, :, 30:].all()
+    head = save(tmp_path / "head.nii.gz", box((40, 40, 40), (12, 12, 10), (20, 20, 30)))
+    assert mesh.cut_reason(head, outside) == "cut by the scan's edge (unscanned padding)"
+    assert mesh.cut_faces(head, outside) == {"S"}
+    whole = save(tmp_path / "whole.nii.gz", box((40, 40, 40), (12, 12, 10), (20, 20, 29)))
+    assert mesh.cut_reason(whole, outside) is None
 
 
 def test_air_round_the_body_is_not_padding(tmp_path: Path) -> None:
@@ -289,6 +310,83 @@ def test_a_humerus_cut_at_its_head_is_not_a_landmark(
     assert "humerus_right" in manifest["surfaced"]
 
 
+def test_a_cut_bone_says_which_side_the_scan_cut_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cut = {"clavicula_left": "cut by the scan's edge (unscanned padding)"}
+    notes = {d["label"]: d for d in run_main(tmp_path, monkeypatch, cut, faces={"S"})["dropped"]}
+    assert notes["clavicula_left"]["cut_at"] == "S"
+    assert "cut_at" not in notes["scapula_right"]  # dropped by the girdle rule, not cut
+    assert notes["scapula_right"]["reason"] == "shoulder girdle dropped: clavicula_left cut"
+
+
+def test_bones_the_scan_cut_are_offered_as_neighbours_for_loose_pieces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, list[str]] = {}
+
+    def fake_settle(
+        seg_dir: Path,
+        labels: list[str],
+        left_out: list[str] | None = None,
+        given: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], list[Any]]:
+        seen["labels"], seen["left_out"] = labels, left_out or []
+        return {}, []
+
+    monkeypatch.setattr(mesh, "settle_fragments", fake_settle)
+    cut = {
+        "vertebrae_T1": "cut by the scan's edge (unscanned padding)",
+        "rib_left_4": "cut by the scan's edge (axis 0)",
+        "vertebrae_C3": "absent or a stray label",
+    }
+    run_main(tmp_path, monkeypatch, cut)
+    assert {"vertebrae_T1", "rib_left_4", "rib_right_4"} <= set(seen["left_out"])
+    assert "vertebrae_C3" not in seen["left_out"]  # not in the scan: no neighbour
+    assert not set(seen["left_out"]) & set(seen["labels"])
+    assert "vertebrae_T2" in seen["labels"]
+
+
+def test_a_bone_cut_only_by_a_neighbours_lump_is_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # T1 and C7 both meet the scan's end, T1 only with a lump of C7 on a thin
+    # neck. T1 stays in the body, meshed from its mask without the lump; C7 is
+    # left out; the manifest notes the lump.
+    body = box((8, 8, 8), (2, 2, 2), (6, 6, 6))
+    note = {"label": "vertebrae_T1", "voxels": 9, "ml": 0.03, "action": "moved",
+            "to": "vertebrae_C7", "neck": True, "exported": False}  # fmt: skip
+    seen: dict[str, Any] = {}
+
+    def fake_lumps(
+        seg_dir: Path, reasons: dict[str, str | None], outside: object = None
+    ) -> tuple[dict[str, Any], list[Any]]:
+        seen["cut"] = sorted(label for label, reason in reasons.items() if reason)
+        return {"vertebrae_T1": body}, [note]
+
+    def fake_settle(
+        seg_dir: Path,
+        labels: list[str],
+        left_out: list[str] | None = None,
+        given: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], list[Any]]:
+        seen["labels"], seen["left_out"], seen["given"] = labels, left_out, given
+        return dict(given or {}), []
+
+    monkeypatch.setattr(mesh, "whole_but_for_lumps", fake_lumps)
+    monkeypatch.setattr(mesh, "settle_fragments", fake_settle)
+    cut = dict.fromkeys(
+        ("vertebrae_C7", "vertebrae_T1"), "cut by the scan's edge (unscanned padding)"
+    )
+    manifest = run_main(tmp_path, monkeypatch, cut)
+    assert seen["cut"] == ["vertebrae_C7", "vertebrae_T1"]
+    assert set(dropped(manifest)) == {"vertebrae_C7"}
+    assert "vertebrae_T1" in manifest["surfaced"] and "vertebrae_C7" not in manifest["surfaced"]
+    assert "vertebrae_T1" in seen["labels"] and "vertebrae_C7" in seen["left_out"]
+    assert seen["given"]["vertebrae_T1"] is body
+    assert manifest["fragments"] == [note]
+
+
 @pytest.mark.parametrize(
     ("label", "reason", "faces", "ok"),
     [
@@ -326,6 +424,61 @@ def test_cut_faces_names_the_side_in_ras(
     else:
         mask[z, 10, 10] = True  # reaches the low or high x index
     assert mesh.cut_faces(save(tmp_path / "m.nii.gz", mask)) == {expected}
+
+
+def capped_ct(tmp_path: Path, shape: tuple[int, int, int] = (60, 40, 40)) -> Path:
+    """A CT that was never scanned above slice 34 or below slice 4: with the
+    blend, the padding starts at slice 32 and ends at slice 5."""
+    hu = np.full(shape, 40.0)
+    hu[:, :, 34:], hu[:, :, :4] = -1024, -1024
+    return save_ct(tmp_path / "ct.nii.gz", hu)
+
+
+def test_a_bone_lying_across_the_body_is_cut_where_the_padding_is(tmp_path: Path) -> None:
+    # A clavicle runs across the body and its outer end rises to the scan's
+    # last slice. The padding lies above it, so it is cut at S, although the
+    # contact is far to the side of the bone's middle and only a little above.
+    outside = mesh.scan_outside(capped_ct(tmp_path))
+    clavicle = box((60, 40, 40), (5, 15, 24), (50, 20, 28))
+    clavicle |= box((60, 40, 40), (44, 15, 24), (50, 20, 32))
+    path = save(tmp_path / "m.nii.gz", clavicle)
+    assert mesh.cut_reason(path, outside) == "cut by the scan's edge (unscanned padding)"
+    assert mesh.cut_faces(path, outside) == {"S"}
+
+
+def test_a_bone_cut_by_padding_at_both_ends_names_both(tmp_path: Path) -> None:
+    # A humerus running out of the scan at both ends: its head is cut, so it
+    # cannot give a joint centre, whichever end meets more padding.
+    outside = mesh.scan_outside(capped_ct(tmp_path))
+    shaft = box((60, 40, 40), (20, 16, 6), (24, 20, 32))
+    shaft |= box((60, 40, 40), (16, 12, 26), (28, 24, 32))  # the head, wider than the shaft
+    path = save(tmp_path / "m.nii.gz", shaft)
+    assert mesh.cut_faces(path, outside) == {"S", "I"}
+    assert not mesh.landmark_ok("humerus_left", "cut by the scan's edge (unscanned padding)",
+                                mesh.cut_faces(path, outside))  # fmt: skip
+
+
+@pytest.mark.parametrize(("top", "bottom", "expected"), [(34, 10, {"S"}), (20, 3, {"I"})])
+def test_a_mask_reaching_into_the_padding_is_cut_on_that_side(
+    tmp_path: Path, top: int, bottom: int, expected: set[str]
+) -> None:
+    # The segmentation may label a slice or two of the blend. The side is
+    # still where the scanned part of the mask goes over into the padding.
+    outside = mesh.scan_outside(capped_ct(tmp_path))
+    mask = box((60, 40, 40), (20, 16, bottom), (23, 19, top))  # thin, like a rib's tip
+    assert mesh.cut_faces(save(tmp_path / "m.nii.gz", mask), outside) == expected
+
+
+def test_padding_at_the_side_is_named_in_ras(tmp_path: Path) -> None:
+    # FLIPPED runs x towards the right as the index falls: padding at low x
+    # indices (a field of view narrower than the grid) cuts a bone at R.
+    hu = np.full((40, 40, 40), 40.0)
+    hu[:6] = -1024
+    outside = mesh.scan_outside(save_ct(tmp_path / "ct.nii.gz", hu))
+    mask = box((40, 40, 40), (8, 12, 12), (20, 20, 20))
+    assert mesh.cut_faces(save(tmp_path / "m.nii.gz", mask), outside) == {"R"}
+    clear = box((40, 40, 40), (10, 12, 12), (20, 20, 20))
+    assert mesh.cut_reason(save(tmp_path / "c.nii.gz", clear), outside) is None
 
 
 def test_trim_knobs_takes_off_a_lump_on_a_thin_neck_and_keeps_thin_rib() -> None:
@@ -754,6 +907,42 @@ def test_a_piece_on_the_neighbour_is_moved_to_it(tmp_path: Path) -> None:
     assert mesh.ndimage.label(masks["vertebrae_T2"], structure=np.ones((3, 3, 3)))[1] == 1
 
 
+def test_a_piece_on_a_neighbour_the_scan_cut_leaves_with_it(tmp_path: Path) -> None:
+    # T2 is cut by the scan and left out of the body. T1's piece lying on it
+    # is T2's bone under the wrong label: it goes too, and T1 is one piece.
+    seg = vertebra_pair(tmp_path, chip=(15, 25, 20), moved=True)
+    masks, notes = mesh.settle_fragments(seg, ["vertebrae_T1"], ["vertebrae_T2"])
+    assert [(n["action"], n["to"], n["exported"]) for n in notes] == [
+        ("moved", "vertebrae_T2", False)
+    ]
+    assert set(masks) == {"vertebrae_T1"} and masks["vertebrae_T1"].sum() == 1000
+    # Without knowing of T2 the piece, 9% of T1, is no fragment: the build stops on it.
+    masks, notes = mesh.settle_fragments(seg, ["vertebrae_T1"])
+    assert notes == [] and masks["vertebrae_T1"].sum() == 1100
+
+
+def test_chips_under_the_noise_limit_are_settled_when_together_they_are_over_it(
+    tmp_path: Path,
+) -> None:
+    # Three chips of T1's label lie on T2: 49, 36 and 25 voxels, each under 2%
+    # of T1 and 2.7% together. The largest goes to T2; the 1.5% left is noise.
+    shape = (40, 40, 60)
+    t1 = box(shape, (10, 10, 30), (30, 30, 40))
+    t1 |= box(shape, (10, 10, 28), (17, 17, 29))
+    t1 |= box(shape, (20, 10, 28), (26, 16, 29))
+    t1 |= box(shape, (10, 20, 28), (15, 25, 29))
+    save(tmp_path / "vertebrae_T1.nii.gz", t1)
+    save(tmp_path / "vertebrae_T2.nii.gz", box(shape, (10, 10, 18), (30, 30, 28)))
+    masks, notes = mesh.settle_fragments(tmp_path, ["vertebrae_T1", "vertebrae_T2"])
+    assert [(n["voxels"], n["action"], n["to"]) for n in notes] == [(49, "moved", "vertebrae_T2")]
+    assert masks["vertebrae_T1"].sum() == 4000 + 36 + 25
+    assert masks["vertebrae_T2"].sum() == 4000 + 49
+    # Two of them alone, 1.5%, are left as they are.
+    t1[10:17, 10:17, 28] = False
+    save(tmp_path / "vertebrae_T1.nii.gz", t1)
+    assert mesh.settle_fragments(tmp_path, ["vertebrae_T1", "vertebrae_T2"])[1] == []
+
+
 def test_a_small_far_chip_is_dropped(tmp_path: Path) -> None:
     seg = vertebra_pair(tmp_path, chip=(5, 5, 50), moved=False)  # 8 voxels, touching nothing
     # 8 of 1008 is under 2%, so it is only noise the manifest records; make it bigger.
@@ -780,6 +969,131 @@ def test_pieces_in_line_are_left_for_bridging(tmp_path: Path) -> None:
     save(tmp_path / "rib_left_5.nii.gz", rib)
     masks, notes = mesh.settle_fragments(tmp_path, ["rib_left_5"])
     assert notes == [] and masks["rib_left_5"].sum() == rib.sum()
+
+
+def test_a_mask_already_corrected_stands_in_for_the_one_on_disk(tmp_path: Path) -> None:
+    seg = vertebra_pair(tmp_path, chip=(15, 25, 20), moved=True)
+    body = box((40, 40, 60), (15, 15, 30), (25, 25, 40))
+    given = {"vertebrae_T1": body}
+    masks, notes = mesh.settle_fragments(seg, ["vertebrae_T1", "vertebrae_T2"], None, given)
+    assert notes == [] and masks["vertebrae_T1"].sum() == 1000
+    assert masks["vertebrae_T1"] is not body  # a copy: the caller's mask is left alone
+
+
+# whole_but_for_lumps: a cut neighbour's bone under a whole bone's label
+
+SPINE = (40, 40, 60)
+NECK = box(SPINE, (19, 19, 40), (21, 21, 44))  # two voxels across, from T1's top to the lump
+LUMP = box(SPINE, (15, 15, 44), (25, 25, 52))  # 800 voxels, up to the padding
+C7 = box(SPINE, (25, 15, 44), (31, 25, 52))  # beside the lump, and cut by the scan's end
+PADDING_CUT = "cut by the scan's edge (unscanned padding)"
+
+
+def spine_at_the_scans_end(
+    tmp_path: Path, extra: Mask, others: dict[str, Mask]
+) -> tuple[tuple[Any, Any], dict[str, str | None]]:
+    """T1, a 16 x 16 x 20 block ending at slice 39, in a scan that was never
+    scanned from slice 54 up: the padding, blend included, starts at slice 52.
+    extra goes into T1's mask; others are its neighbours. Returns the padding
+    and each label's cut reason."""
+    hu = np.full(SPINE, 40.0)
+    hu[:, :, 54:] = -1024
+    outside = mesh.scan_outside(save_ct(tmp_path / "ct.nii.gz", hu))
+    masks = {"vertebrae_T1": box(SPINE, (12, 12, 20), (28, 28, 40)) | extra, **others}
+    for label, mask in masks.items():
+        save(tmp_path / f"{label}.nii.gz", mask)
+    labels = ["vertebrae_C6", "vertebrae_C7", "vertebrae_T1"]
+    return outside, {lab: mesh.cut_reason(tmp_path / f"{lab}.nii.gz", outside) for lab in labels}
+
+
+def test_a_cut_neighbours_lump_on_a_thin_neck_does_not_cut_the_bone(tmp_path: Path) -> None:
+    outside, reasons = spine_at_the_scans_end(tmp_path, NECK | LUMP, {"vertebrae_C7": C7})
+    assert reasons["vertebrae_T1"] == reasons["vertebrae_C7"] == PADDING_CUT
+    whole, notes = mesh.whole_but_for_lumps(tmp_path, reasons, outside)
+    assert set(whole) == {"vertebrae_T1"}
+    t1 = whole["vertebrae_T1"]
+    assert t1.shape == SPINE and t1.sum() == 16 * 16 * 20 + 8  # the block and the neck's foot
+    assert np.flatnonzero(t1.any((0, 1))).max() == 41
+    assert notes == [
+        {"label": "vertebrae_T1", "voxels": 808, "ml": pytest.approx(0.78, abs=0.006),
+         "share": pytest.approx(808 / 5936, abs=1e-4), "action": "moved", "to": "vertebrae_C7",
+         "neck": True, "exported": False}
+    ]  # fmt: skip
+
+
+def test_a_thin_tip_the_scan_ends_through_is_the_bones_own(tmp_path: Path) -> None:
+    # A plate two voxels thin rises from T1 to the padding and lies on C7: the
+    # opening leaves no core of it, so it is T1's own process, and T1 is cut.
+    # (The knob under T1 has a core, but the scan's end is nowhere near it.)
+    plate = box(SPINE, (19, 12, 40), (21, 28, 52))
+    knob = box(SPINE, (19, 19, 14), (21, 21, 20)) | box(SPINE, (16, 16, 6), (24, 24, 14))
+    c7 = box(SPINE, (21, 12, 44), (27, 28, 52))
+    outside, reasons = spine_at_the_scans_end(tmp_path, plate | knob, {"vertebrae_C7": c7})
+    assert reasons["vertebrae_T1"] == PADDING_CUT
+    assert mesh.whole_but_for_lumps(tmp_path, reasons, outside) == ({}, [])
+
+
+@pytest.mark.parametrize("neighbour", [None, box(SPINE, (25, 15, 42), (31, 25, 48))])
+def test_a_lump_with_no_cut_neighbour_under_it_leaves_the_bone_cut(
+    tmp_path: Path, neighbour: Mask | None
+) -> None:
+    # No C7 at all, or a whole one that ends clear of the padding: the lump
+    # cannot be shown to be another bone's, so T1 is cut as the test found it.
+    others = {} if neighbour is None else {"vertebrae_C7": neighbour}
+    outside, reasons = spine_at_the_scans_end(tmp_path, NECK | LUMP, others)
+    assert reasons["vertebrae_T1"] == PADDING_CUT
+    assert reasons["vertebrae_C7"] == ("not segmented" if neighbour is None else None)
+    assert mesh.whole_but_for_lumps(tmp_path, reasons, outside) == ({}, [])
+
+
+def test_a_lump_over_a_quarter_of_the_mask_leaves_the_bone_cut(tmp_path: Path) -> None:
+    lump = box(SPINE, (11, 11, 44), (29, 29, 52))  # with its end of the neck, 2600 of 7728
+    c7 = box(SPINE, (29, 15, 44), (35, 25, 52))
+    outside, reasons = spine_at_the_scans_end(tmp_path, NECK | lump, {"vertebrae_C7": c7})
+    assert mesh.whole_but_for_lumps(tmp_path, reasons, outside) == ({}, [])
+
+
+def test_a_bone_that_meets_the_scans_end_itself_stays_cut(tmp_path: Path) -> None:
+    # Besides the lump, a thick process of T1's own runs up into the padding
+    # from the block's side, clear of the lump.
+    process = box(SPINE, (6, 18, 30), (10, 22, 52)) | box(SPINE, (10, 18, 30), (12, 22, 34))
+    outside, reasons = spine_at_the_scans_end(tmp_path, NECK | LUMP | process, {"vertebrae_C7": C7})
+    assert mesh.whole_but_for_lumps(tmp_path, reasons, outside) == ({}, [])
+
+
+def test_a_bone_given_a_lump_that_meets_the_scans_end_is_cut_after_all(tmp_path: Path) -> None:
+    # T1 carries a lump lying on C7's mask; C7's own block is clear of the
+    # scan's end, and the part of its mask that reaches it is a lump lying on
+    # C6. T1 is whole. C7 would be, but T1's lump is C7's bone and meets the
+    # scan's end: C7 is cut.
+    t1_lump = box(SPINE, (15, 15, 44), (25, 21, 52))
+    c7 = box(SPINE, (30, 10, 16), (39, 30, 40))  # its block, beside T1's
+    c7 |= box(SPINE, (32, 19, 40), (34, 21, 44))  # a neck from it to its lump
+    c7 |= box(SPINE, (25, 15, 44), (35, 25, 52))  # the lump, between T1's lump and C6
+    c6 = box(SPINE, (25, 25, 44), (35, 31, 52))
+    outside, reasons = spine_at_the_scans_end(
+        tmp_path, NECK | t1_lump, {"vertebrae_C7": c7, "vertebrae_C6": c6}
+    )
+    assert set(reasons.values()) == {PADDING_CUT}
+    whole, notes = mesh.whole_but_for_lumps(tmp_path, reasons, outside)
+    assert set(whole) == {"vertebrae_T1"}
+    assert [(n["label"], n["to"]) for n in notes] == [("vertebrae_T1", "vertebrae_C7")]
+
+
+def test_a_lump_reaching_the_volumes_own_face_counts_as_meeting_the_scans_end(
+    tmp_path: Path,
+) -> None:
+    # No CT to say where the scan ends: the lump and C7 run to the last slice.
+    shape = (40, 40, 52)
+    t1 = box(shape, (12, 12, 20), (28, 28, 40)) | NECK[:, :, :52] | LUMP[:, :, :52]
+    save(tmp_path / "vertebrae_T1.nii.gz", t1)
+    save(tmp_path / "vertebrae_C7.nii.gz", C7[:, :, :52])
+    reasons = {lab: mesh.cut_reason(tmp_path / f"{lab}.nii.gz")
+               for lab in ("vertebrae_C7", "vertebrae_T1")}  # fmt: skip
+    assert set(reasons.values()) == {"cut by the scan's edge (axis 2)"}
+    whole, notes = mesh.whole_but_for_lumps(tmp_path, reasons)
+    assert set(whole) == {"vertebrae_T1"} and whole["vertebrae_T1"].sum() == 16 * 16 * 20 + 8
+    assert [n["to"] for n in notes] == ["vertebrae_C7"]
 
 
 def test_rounded_ends_keep_the_length_and_round_both_tips() -> None:
