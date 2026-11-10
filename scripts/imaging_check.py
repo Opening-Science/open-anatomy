@@ -21,9 +21,11 @@ Checks that the head guard (face_free_top and apply_head_guard)
 and that a body mask cut by the guard keeps no voxel of a synthetic face, for a
 head far above C7, a bowed head with the face level with C7, and a head just
 above the margin at the scan's bottom; and that the 2x display upsample keeps
-flat regions flat, the mask binary and in place, and adds no dark fringe at
-the body's edge, also for an odd image size, a diagonal edge, a one-voxel strip
-and gap, and a tinted structure at the edge.
+flat regions flat, anti-aliases the body's edge one source voxel in (dropping
+the air rim) and adds no dark fringe there, also for an odd image size, a
+diagonal edge, a one-voxel strip and gap, and a tinted structure at the edge;
+that alpha rises monotonically across a diagonal edge with no staircase; and
+that colour does not wrap round from one border of the image to the other.
 """
 
 from __future__ import annotations
@@ -43,6 +45,7 @@ from imaging import (  # noqa: E402
     face_free_top,
     guard_margin,
     quad_corners,
+    shrink,
     slice_image,
     to_reference,
     upsample,
@@ -227,12 +230,15 @@ def main() -> int:
     image[:, 10:, 3] = 255
     big = upsample(image, 2)
     check(big.shape == (40, 60, 4), "the display image is twice the size")
-    check(set(np.unique(big[..., 3])) <= {0, 255}, "the display mask stays binary")
+    edge = big[5, 18:26, 3].astype(int)
+    check(bool((np.diff(edge) >= 0).all()) and 0 < edge[3] < 255,
+          "the display edge is anti-aliased: alpha rises smoothly across it")  # fmt: skip
     # Lanczos-3 rings for up to 6 display pixels beside an edge; beyond that, flat.
     check(bool((big[:, 27:, :3] == 180).all()), "a flat region stays flat")
     check(int(big[:, 20:22, :3].min()) >= 170, "no dark fringe where the body meets the air")
-    check(bool((big[:, :20, 3] == 0).all() and (big[:, 20:, 3] == 255).all()),
-          "the body's edge stays at the same place")  # fmt: skip
+    check(bool((big[:, :19, 3] == 0).all() and (big[:, 25:, 3] == 255).all()
+               and big[:, 21, 3].max() < 128 <= big[:, 22, 3].min()),
+          "the display edge sits one source voxel in, half alpha at 21-22")  # fmt: skip
 
     # The hard cases: an odd size, a diagonal edge (a staircase of corners), a
     # one-voxel strip of body and a one-voxel gap, and a tinted structure right
@@ -247,17 +253,47 @@ def main() -> int:
     big = upsample(hard, 2)
     native_mask = np.repeat(np.repeat(inside, 2, 0), 2, 1)
     check(big.shape == (42, 66, 4), "an odd-sized image is upsampled to exactly twice its size")
-    check(bool((big[..., 3] == native_mask * 255).all()),
-          "diagonal, strip and gap: the display mask is the native mask, in place")  # fmt: skip
-    check(bool((big[native_mask, :3] == 180).all()),
+    half = big[..., 3] >= 128
+    check(not (half & ~native_mask).any() and not (shrink(native_mask, 3) & ~half).any(),
+          "diagonal, strip, gap: the edge sits inside the native mask, one voxel in")  # fmt: skip
+    check(bool((big[big[..., 3] > 0, :3] == 180).all()),
           "diagonal, strip and gap: a flat body stays exactly flat up to its edge")  # fmt: skip
     tinted = hard.copy()
     band = (c > r + 3) & (c < r + 8)  # a structure along the diagonal edge
     tinted[band, :3] = (200, 80, 60)
     big = upsample(tinted, 2)
-    shown = big[native_mask, :3].astype(int)
+    shown = big[big[..., 3] > 0, :3].astype(int)
     check(bool((shown >= (180, 80, 60)).all() and (shown <= (200, 180, 180)).all()),
           "a structure tinted at the edge: no ring or fringe leaves its colours")  # fmt: skip
+
+    # A diagonal edge: the binary mask is a staircase (its edge moves 0, 2, 0, 2
+    # display pixels per row); the anti-aliased alpha must rise monotonically
+    # across it and its half-alpha contour must move evenly, one pixel per row.
+    height, width = 20, 30
+    r, c = np.mgrid[:height, :width]
+    diagonal = np.zeros((height, width, 4), dtype=np.uint8)
+    diagonal[..., :3], diagonal[..., 3] = 180, (c > r + 3) * 255
+    alpha = upsample(diagonal, 2)[..., 3].astype(float) / 255
+    check(bool((np.diff(alpha, axis=1) >= 0).all() and (np.diff(alpha, axis=0) <= 0).all()),
+          "a diagonal edge: alpha is monotonic across it, along rows and columns")  # fmt: skip
+    crossing = []
+    for row in alpha[4:36]:
+        x = int(np.flatnonzero(row >= 0.5)[0])
+        crossing.append(x - 1 + (0.5 - row[x - 1]) / (row[x] - row[x - 1]))
+    steps = np.diff(crossing)
+    check(bool((np.abs(steps - 1) < 0.25).all()),
+          f"a diagonal edge: no staircase, the contour moves {steps.min():.2f}-"
+          f"{steps.max():.2f} pixels per row")  # fmt: skip
+
+    # A body touching the image's top and right borders: no colour may wrap
+    # round to the bottom or left border, and the border itself is not an edge.
+    corner = np.zeros((20, 30, 4), dtype=np.uint8)
+    corner[:10, 15:, :3], corner[:10, 15:, 3] = 180, 255
+    big = upsample(corner, 2)
+    check(int(big[-1, :, :3].max()) == 0 and int(big[:, 0, :3].max()) == 0,
+          "a body at the top and right borders: no colour wraps to the bottom or left")  # fmt: skip
+    check(bool((big[0, 40:, 3] == 255).all() and (big[:10, -1, 3] == 255).all()),
+          "a body at the image's border is not faded there")  # fmt: skip
 
     print("imaging check passed" if not failures else f"imaging check failed: {len(failures)}")
     return 1 if failures else 0

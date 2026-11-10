@@ -12,8 +12,8 @@ writes, in data/imaging/<body>/:
   bone (W1800/L400) window, the segmented structures tinted in their display
   colours, and the air outside the body transparent, one pixel per voxel, for
   measurement;
-- the same at twice the size (axial@2x.png and so on), Lanczos-3 upsampled, for
-  display only: the GLB's textures;
+- the same at twice the size (axial@2x.png and so on), Lanczos-3 upsampled
+  with an anti-aliased edge, for display only: the GLB's textures;
 - <body>.imaging.glb: three double-sided, unlit quads carrying those textures,
   each where its slice lies in the reference body (the trunk fit, not the
   girdle step), so the GLB can be loaded together with <body>.reference.glb;
@@ -55,6 +55,8 @@ SOURCE_LICENCE = "CC-BY-4.0"
 GUARD_MARGIN_MM = 20.0  # how far below the head or neck the guard cuts
 DISPLAY_FACTOR = 2  # the GLB textures are upsampled by this for display
 LANCZOS_TAPS = 3
+EDGE_SOFTNESS = 0.7  # display pixels of Gaussian on the body mask's edge (display only)
+EDGE_BLEED = 5  # display pixels of colour bled across the edge band and the soft fringe
 WEIGHT_ONE = 4096  # Lanczos weights are fixed point, in steps of 1/4096
 
 
@@ -167,17 +169,18 @@ def fixed_point(matrix: np.ndarray) -> np.ndarray:
 
 
 def upsample(rgba: np.ndarray, factor: int = 2) -> np.ndarray:
-    """Lanczos upsample of the colour for display; the mask is the native one.
+    """Lanczos upsample of the colour for display, with an anti-aliased edge.
 
     Colour is filtered premultiplied by the native mask, so clear pixels add no
-    dark fringe: a flat colour stays exactly flat up to any edge. The display
-    mask is the native mask with each pixel repeated factor x factor times, so
-    it stays binary and exactly in place at corners, diagonals and one-voxel
-    features. The filter runs in integers (fixed-point weights, integer
-    products and sums), so the result does not depend on the BLAS build or the
-    thread count; the one float step before that, computing the weights,
-    would have to land within a rounding error of a 1/8192 boundary to change
-    a byte.
+    dark fringe: a flat colour stays exactly flat up to any edge. The edge
+    starts from the native mask with each pixel repeated factor x factor times
+    (in place at corners, diagonals and one-voxel features), is pulled in by
+    one source voxel and blurred slightly; so the display drops any part of
+    the body two voxels wide or less (see docs/imaging-layer.md). The filter
+    runs in integers (fixed-point weights, integer products and sums) and the
+    blur in a fixed order, so the result does not depend on the BLAS build or
+    the thread count; the float steps before that, computing the weights,
+    would have to land within a rounding error of a boundary to change a byte.
     """
     inside = rgba[..., 3] >= 128
     premultiplied = np.dstack([rgba[..., :3] * inside[..., None], inside * 255]).astype(np.int64)
@@ -197,7 +200,14 @@ def upsample(rgba: np.ndarray, factor: int = 2) -> np.ndarray:
     low, high = (np.repeat(np.repeat(v, factor, 0), factor, 1) for v in (low, high))
     rgb = np.clip(rgb, np.minimum(low, nearest), np.maximum(high, nearest))
     mask = np.repeat(np.repeat(inside, factor, 0), factor, 1)
-    return np.round(np.dstack([np.clip(rgb, 0, 1), mask]) * 255).astype(np.uint8)
+    # The edge is anti-aliased: the native mask is pulled in by one source voxel
+    # (the trunk mask's outermost voxel is often air at the skin, a dark rim)
+    # and blurred slightly, and colour from inside that is bled outwards under
+    # the soft fringe, so the edge shows the slice's own edge colour, not black.
+    core = shrink(mask, factor)
+    soft = np.clip(blur(core.astype(np.float64), EDGE_SOFTNESS), 0, 1)
+    rgb = bleed(np.clip(rgb, 0, 1), core, steps=EDGE_BLEED)
+    return np.round(np.dstack([rgb, soft]) * 255).astype(np.uint8)
 
 
 def neighbourhood_range(rgb: np.ndarray, inside: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -213,6 +223,56 @@ def neighbourhood_range(rgb: np.ndarray, inside: np.ndarray) -> tuple[np.ndarray
         np.min([low[dy : dy + height, dx : dx + width] for dy, dx in shifts], 0),
         np.max([high[dy : dy + height, dx : dx + width] for dy, dx in shifts], 0),
     )
+
+
+def shrink(mask: np.ndarray, steps: int) -> np.ndarray:
+    """Erodes a 2D mask by `steps` pixels (4-neighbourhood)."""
+    for _ in range(steps):
+        p = np.pad(mask, 1, mode="edge")  # the image border is not an edge of the body
+        mask = mask & p[:-2, 1:-1] & p[2:, 1:-1] & p[1:-1, :-2] & p[1:-1, 2:]
+    return mask
+
+
+def blur(image: np.ndarray, sigma: float) -> np.ndarray:
+    """Separable Gaussian blur of a 2D array, edges clamped. Written as a sum of
+    shifted copies in a fixed order, not a convolution, so no BLAS is involved
+    and the result is the same on every machine."""
+    radius = max(1, int(np.ceil(3 * sigma)))
+    x = np.arange(-radius, radius + 1)
+    kernel = np.exp(-(x**2) / (2 * sigma**2))
+    kernel /= kernel.sum()
+    height, width = image.shape
+    padded = np.pad(image, radius, mode="edge")
+    zero = np.zeros(())  # starts each sum as an array; adding it changes no value
+    rows = sum((k * padded[:, i : i + width] for i, k in enumerate(kernel)), zero)
+    return sum((k * rows[i : i + height] for i, k in enumerate(kernel)), zero)
+
+
+def shifted(array: np.ndarray, dy: int, dx: int, fill) -> np.ndarray:
+    """array moved by (dy, dx) pixels (|dy|, |dx| <= 1), as np.roll would, but
+    with the uncovered border filled with `fill` instead of wrapping round."""
+    pad = [(1, 1), (1, 1)] + [(0, 0)] * (array.ndim - 2)
+    padded = np.pad(array, pad, constant_values=fill)
+    height, width = array.shape[:2]
+    return padded[1 - dy : 1 - dy + height, 1 - dx : 1 - dx + width]
+
+
+def bleed(rgb: np.ndarray, valid: np.ndarray, steps: int) -> np.ndarray:
+    """Extends colour from valid pixels into their neighbours, `steps` pixels out."""
+    rgb, valid = rgb.copy(), valid.copy()
+    for _ in range(steps):
+        total = np.zeros_like(rgb)
+        count = np.zeros(valid.shape)
+        for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            # Padded, not rolled: a pixel on one border must not take colour
+            # from the opposite border.
+            neighbour = shifted(valid, dy, dx, False)
+            total += shifted(rgb, dy, dx, 0.0) * neighbour[..., None]
+            count += neighbour
+        grow = ~valid & (count > 0)
+        rgb[grow] = total[grow] / count[grow, None]
+        valid |= grow
+    return rgb
 
 
 def png(rgba: np.ndarray) -> bytes:
@@ -320,6 +380,12 @@ def write_glb(path: Path, planes: list[dict]) -> None:
         gltf["materials"].append({
             "name": f"imaging-{plane['plane']}",
             "pbrMetallicRoughness": {"baseColorTexture": {"index": i}, "metallicFactor": 0.0},
+            # MASK, not BLEND: the three quads cut through each other, and a
+            # BLEND material is sorted per object and drawn without depth
+            # writes (three.js's GLTFLoader), so one plane would be drawn over
+            # another wrongly. The soft alpha in the texture still gives a
+            # smooth cutoff contour under bilinear filtering, and a viewer that
+            # turns on alpha-to-coverage gets the soft edge too.
             "alphaMode": "MASK", "alphaCutoff": 0.5, "doubleSided": True,
             "extensions": {"KHR_materials_unlit": {}},
         })  # fmt: skip
@@ -442,7 +508,7 @@ def main() -> None:
             "display": {
                 "image": f"{plane}@{DISPLAY_FACTOR}x.png",
                 "pixels": [int(v) * DISPLAY_FACTOR for v in image.shape[1::-1]],
-                "resampling": f"Lanczos-{LANCZOS_TAPS}, premultiplied, fixed point; native mask",
+                "resampling": f"Lanczos-{LANCZOS_TAPS}; edge one voxel in, anti-aliased",
                 "sha256": hashlib.sha256(display).hexdigest(),
             },
             "structures": [REFERENCE[i - 1].term for i in shown],
