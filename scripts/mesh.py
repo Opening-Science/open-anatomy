@@ -7,14 +7,22 @@ structure, named by its UBERON ID, plus a manifest.
 
 For each structure: crop the mask, extract a closed surface with discrete
 flying edges and smooth it (windowed sinc, VTK), keep the largest connected
-piece, decimate to at most
---max-triangles, and orient the normals outward. The share of the volume in
-the other pieces goes into the manifest, and above MAX_DROPPED_SHARE the run
-stops: a structure in two pieces is a segmentation problem, not noise. Coordinates go from the CT's
-RAS millimetres to glTF metres (+Y up, +Z anterior, +X the body's left), and
-the whole set is moved so its bounding box is centred on the origin.
+piece, decimate it to at most --max-triangles (organs) or --max-bone-triangles
+(bones) while it stays closed, and orient the normals outward. The share of
+the volume in the other pieces goes into the manifest, and above
+MAX_DROPPED_SHARE the run stops for an organ: an organ in two pieces is a
+segmentation problem, not noise. Coordinates go from the CT's RAS millimetres
+to glTF metres (+Y up, +Z anterior, +X the body's left), and the whole set is
+moved so its bounding box is centred on the origin.
 
-Writes data/work/<case>/<case>.organs.glb and manifest.json with each node's
+--set organs (the default) needs every organ; --set reference adds the trunk
+skeleton and lists, rather than meshes, a bone the scan misses or cuts (the
+femurs and humeri may be cut). An organ that is empty, cut by the scan or
+split always stops the run; a bone in pieces only warns. With body_trunc.nii.gz in the masks it also
+writes <case>.outline.glb, the trunk outline in the same frame, which
+assemble.py measures and never releases.
+
+Writes data/work/<case>/<case>.<set>.glb and <case>.<set>.manifest.json with each node's
 UBERON ID, system, licence, triangle count, volume and dropped share, and the
 GLB's SHA-256. The GLB's asset.copyright and asset.extras credit the source
 dataset's creator, DOI and case, so a GLB copied on its own keeps its
@@ -43,9 +51,12 @@ from vtkmodules.util.numpy_support import numpy_to_vtk, vtk_to_numpy  # noqa: E4
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from structures import STRUCTURES, Structure, node_name  # noqa: E402
+from structures import SETS, Structure, node_name  # noqa: E402
 
 # RAS millimetres to glTF metres: X = -R (the body's left), Y = S, Z = A.
+# Limb bones run out of a trunk scan by design; their joint ends are what count.
+CUT_ALLOWED = {"femur_left", "femur_right", "humerus_left", "humerus_right"}
+OUTLINE = Structure("body_trunc", "outline", "trunk outline", "outline", (0.8, 0.8, 0.8))
 RAS_TO_GLTF = np.array([[-1, 0, 0], [0, 0, 1], [0, 1, 0]], dtype=np.float64) * 0.001
 SOURCE_LICENCE = "CC-BY-4.0"
 SOURCES = json.loads((ROOT / "sources.json").read_text())
@@ -56,6 +67,43 @@ MAX_DROPPED_SHARE = 0.02
 
 def triangles_of(poly: vtk.vtkPolyData) -> np.ndarray:
     return vtk_to_numpy(poly.GetPolys().GetConnectivityArray()).reshape(-1, 3)
+
+
+def decimate(poly: vtk.vtkPolyData, max_triangles: int) -> vtk.vtkPolyData:
+    """Reduces to about max_triangles, keeping the surface closed and manifold.
+
+    Either decimator can open a thin or holed bone (a rib, the sacrum), so each
+    result is checked: quadric first, then DecimatePro, each at the target and
+    then at 1.5 and 2.25 times it. If none stays closed the surface is kept whole.
+    """
+    for target in (max_triangles, max_triangles * 1.5, max_triangles * 2.25):
+        reduction = 1 - target / poly.GetNumberOfCells()
+        if reduction <= 0:
+            break
+        quadric = vtk.vtkQuadricDecimation()
+        quadric.SetTargetReduction(reduction)
+        quadric.VolumePreservationOn()
+        pro = vtk.vtkDecimatePro()
+        pro.SetTargetReduction(reduction)
+        pro.PreserveTopologyOn()
+        pro.SplittingOff()
+        pro.BoundaryVertexDeletionOff()
+        for decimator in (quadric, pro):
+            decimator.SetInputData(poly)
+            decimator.Update()
+            out = decimator.GetOutput()
+            if not open_edges(triangles_of(out)):
+                return out
+    return poly
+
+
+def cut_by_scan(path: Path) -> bool:
+    """True if the mask is empty or touches the scan's first or last axial slice."""
+    data = np.asanyarray(nib.Nifti1Image.from_filename(path).dataobj) > 0
+    if not data.any():
+        return True
+    k = np.flatnonzero(data.any((0, 1)))
+    return bool(k[0] == 0 or k[-1] == data.shape[2] - 1)
 
 
 def enclosed_volume(poly: vtk.vtkPolyData) -> float:
@@ -115,15 +163,7 @@ def surface(path: Path, max_triangles: int) -> tuple[np.ndarray, np.ndarray, flo
     dropped = 1 - enclosed_volume(poly) / whole if whole else 0.0
 
     if poly.GetNumberOfCells() > max_triangles:
-        # DecimatePro with topology preserved keeps the surface closed.
-        decimate = vtk.vtkDecimatePro()
-        decimate.SetInputData(poly)
-        decimate.SetTargetReduction(1 - max_triangles / poly.GetNumberOfCells())
-        decimate.PreserveTopologyOn()
-        decimate.SplittingOff()
-        decimate.BoundaryVertexDeletionOff()
-        decimate.Update()
-        poly = decimate.GetOutput()
+        poly = decimate(poly, max_triangles)
 
     points = vtk_to_numpy(poly.GetPoints().GetData()).astype(np.float64)
     triangles = triangles_of(poly)
@@ -246,7 +286,7 @@ def write_glb(path: Path, parts: list[dict], attribution: dict | None = None) ->
         )
         gltf["meshes"].append(
             {
-                "name": node_name(s.uberon),
+                "name": node_name(s.term),
                 "primitives": [
                     {
                         "attributes": {"POSITION": position, "NORMAL": normal},
@@ -258,10 +298,10 @@ def write_glb(path: Path, parts: list[dict], attribution: dict | None = None) ->
         )
         gltf["nodes"].append(
             {
-                "name": node_name(s.uberon),
+                "name": node_name(s.term),
                 "mesh": i,
                 "extras": {
-                    "uberon": s.uberon,
+                    "term": s.term,
                     "name": s.name,
                     "system": s.system,
                     "licence": SOURCE_LICENCE,
@@ -286,7 +326,9 @@ def main() -> None:
     parser.add_argument("--case", required=True)
     parser.add_argument("--seg-dir", type=Path, help="default: data/work/<case>/seg")
     parser.add_argument("--out-dir", type=Path, help="default: data/work/<case>")
-    parser.add_argument("--max-triangles", type=int, default=40000)
+    parser.add_argument("--set", choices=SETS, default="organs", help="structures to mesh")
+    parser.add_argument("--max-triangles", type=int, default=40000, help="per organ")
+    parser.add_argument("--max-bone-triangles", type=int, default=6000, help="per bone")
     parser.add_argument(
         "--synthetic", action="store_true", help="test masks with no source to credit"
     )
@@ -300,14 +342,38 @@ def main() -> None:
     work = args.out_dir or ROOT / "data" / "work" / args.case
     work.mkdir(parents=True, exist_ok=True)
     seg_dir = args.seg_dir or work / "seg"
-    parts = []
-    for s in STRUCTURES:
-        ras, triangles, dropped = surface(seg_dir / f"{s.label}.nii.gz", args.max_triangles)
+    parts, missing = [], []
+    for s in SETS[args.set]:
+        bone = s.system == "skeletal"
+        cap = args.max_bone_triangles if bone else args.max_triangles
+        path = seg_dir / f"{s.label}.nii.gz"
+        if args.set == "reference" and s.label not in CUT_ALLOWED and cut_by_scan(path):
+            # A bone the scan covers only partly (an upper cervical vertebra) would
+            # be a fragment; it is listed instead. Every organ must be whole.
+            if not bone:
+                sys.exit(
+                    f"{s.label}: empty or cut by the scan in {args.case}; organs must be whole"
+                )
+            missing.append(s.label)
+            continue
+        try:
+            ras, triangles, dropped = surface(path, cap)
+        except ValueError:
+            if not bone:
+                sys.exit(f"{s.label}: the mask is empty in {args.case}; organs must be whole")
+            missing.append(s.label)
+            continue
         if dropped > MAX_DROPPED_SHARE:
-            sys.exit(
+            message = (
                 f"{s.label}: {dropped:.1%} of its volume is outside its largest piece "
-                f"(at most {MAX_DROPPED_SHARE:.0%} may be dropped)"
+                f"(at most {MAX_DROPPED_SHARE:.0%} may be dropped from an organ)"
             )
+            if not bone:
+                sys.exit(message)
+            # A segmented bone often comes in pieces (a vertebra's processes, a
+            # humerus leaving and re-entering the scan); its share is recorded
+            # in the manifest and said here, not silently dropped.
+            print(f"warning: {message}", file=sys.stderr)
         parts.append({
             "structure": s, "vertices": ras @ RAS_TO_GLTF.T, "triangles": triangles,
             "dropped": dropped,
@@ -324,10 +390,20 @@ def main() -> None:
         if signed_volume(p["vertices"], p["triangles"]) <= 0:
             sys.exit(f"{name}: the normals point inward")
 
-    glb = work / f"{args.case}.organs.glb"
+    glb = work / f"{args.case}.{args.set}.glb"
     write_glb(glb, parts, attribution)
+    outline_path = seg_dir / "body_trunc.nii.gz"
+    if args.set == "reference" and outline_path.exists():
+        # The trunk outline, in the same frame, for assemble.py to measure. It is
+        # the outer surface of a person's trunk, so it is never released.
+        ras, triangles, _ = surface(outline_path, args.max_triangles)
+        vertices = (ras @ RAS_TO_GLTF.T - centre).astype(np.float32)
+        triangles, normals = outward(vertices, triangles)
+        outline = {"structure": OUTLINE, "vertices": vertices, "triangles": triangles}
+        write_glb(work / f"{args.case}.outline.glb", [{**outline, "normals": normals}], attribution)
     manifest = {
         "case": args.case,
+        "set": args.set,
         "file": glb.name,
         "sha256": hashlib.sha256(glb.read_bytes()).hexdigest(),
         "attribution": attribution["copyright"],
@@ -337,8 +413,8 @@ def main() -> None:
         "seg_dir": str(seg_dir.relative_to(ROOT)) if seg_dir.is_relative_to(ROOT) else str(seg_dir),
         "nodes": [
             {
-                "name": node_name(p["structure"].uberon),
-                "uberon": p["structure"].uberon,
+                "name": node_name(p["structure"].term),
+                "term": p["structure"].term,
                 "label": p["structure"].name,
                 "system": p["structure"].system,
                 "licence": SOURCE_LICENCE,
@@ -349,7 +425,10 @@ def main() -> None:
             for p in parts
         ],
     }
-    (work / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    manifest["missing"] = missing
+    (work / f"{args.case}.{args.set}.manifest.json").write_text(
+        json.dumps(manifest, indent=2) + "\n"
+    )
     for node in manifest["nodes"]:
         print(f"{node['name']}  {node['label']:20} {node['triangles']:>6} tris  "
               f"{node['volume_ml']:>8} ml")  # fmt: skip

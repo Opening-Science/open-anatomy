@@ -17,10 +17,18 @@ TotalSegmentator dataset, small subset, v2.0.1
   Licence: CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/)
   File: Totalsegmentator_dataset_small_v201.zip
   SHA-256: 6c47636d9727cd97048616383365dd5a588d0bbc5723b5eb0fa736ed08480ffc
-  Used: case s1086 (CT and reference segmentations)
+  Used: cases s1086 (organ demo), s0903 (male reference body) and s0859
+  (female reference body): CT and reference segmentations
   Please also cite: Wasserthal J. et al. TotalSegmentator: Robust Segmentation
   of 104 Anatomic Structures in CT Images. Radiology: Artificial Intelligence,
   2023. https://doi.org/10.1148/ryai.230024
+
+TotalSegmentator dataset v2.0.1 (full)
+  Jakob Wasserthal. Zenodo, 2023. https://doi.org/10.5281/zenodo.10047292
+  Licence: CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/)
+  File: Totalsegmentator_dataset_v201.zip
+  SHA-256: 741dbc911a768e2ac2671c66d55332f7302ad624c915a57d08b142d8bdf0ca26
+  Downloaded and checked for later cases; no released asset uses it yet.
 
 ANNY body model
   ANNY, a free-to-use 3D human parametric model for all ages. NAVER LABS

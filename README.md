@@ -78,7 +78,7 @@ for a quick segmentation (a CPU works, slowly).
 uv venv .venv -p 3.12 && uv pip install --python .venv/bin/python -e '.[pipeline]'
 .venv/bin/python scripts/fetch.py               # 3.2 GB subset, checked, then case s1086
 .venv/bin/python scripts/segment.py --case s1086
-.venv/bin/python scripts/mesh.py --case s1086   # data/work/s1086/s1086.organs.glb
+.venv/bin/python scripts/mesh.py --case s1086   # data/work/s1086/s1086.organs.glb and its manifest
 blender --background --factory-startup --python scripts/render.py -- \
   --in data/work/s1086/s1086.organs.glb --out data/renders/s1086-organs-front.png
 ```
@@ -103,9 +103,26 @@ uv run --script scripts/bake_anny.py female data/bodies/anny-adult-f.rigged.glb
 ```
 
 The bake is pinned by SHA-256 in [sources.json](sources.json);
-`python3 scripts/bake_check.py --bake` bakes both again and compares. Headless
-Blender 5.2.x scripts in [`blender/`](blender/) clean meshes up and fit an
-atlas to a body limb by limb; run them through `scripts/blender.py`.
+`python3 scripts/bake_check.py --bake` bakes both again and compares.
+
+Each reference body puts one CT's organs and trunk skeleton inside an ANNY
+body and attaches every structure to ANNY's skeleton. The male uses case s0903,
+the female s0859, both from the TotalSegmentator dataset (CC BY 4.0):
+
+```bash
+.venv/bin/python scripts/reference.py --render   # data/reference/, data/renders/
+```
+
+[`blender/assemble.py`](blender/assemble.py) fits the CT to the body: height
+from the hip and shoulder joints, width and depth from the trunk outlines. It
+reports each joint's residual and the share of every structure inside the
+skin. The CT was taken lying down and ANNY stands, so the organs sit as they do
+supine. The ages do not match either: ANNY's bodies are young adults, while
+s0903 was 88 and s0859 74 when scanned, so the organs and bones are an older
+person's inside a young adult's shape. The released GLB's asset copyright credits the TotalSegmentator dataset
+(creator, DOI, case) and ANNY. Other headless Blender 5.2.x scripts in [`blender/`](blender/) clean
+meshes up and fit an atlas to a body limb by limb; `scripts/blender.py` runs
+them all.
 
 ## Self-checks
 

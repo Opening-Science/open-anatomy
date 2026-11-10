@@ -80,7 +80,7 @@ def read_glb(path: Path) -> tuple[dict, dict[str, np.ndarray], dict[str, float]]
 
 def main() -> int:
     failures = []
-    by_label = {s.label: node_name(s.uberon) for s in STRUCTURES}
+    by_label = {s.label: node_name(s.term) for s in STRUCTURES}
     with tempfile.TemporaryDirectory() as tmp:
         seg = Path(tmp) / "seg"
         seg.mkdir()
@@ -94,16 +94,16 @@ def main() -> int:
             if s.label == "stomach":
                 mask[4:7, 4:7, 4:7] = True  # a stray blob far from the stomach
             nib.save(nib.Nifti1Image(mask.astype(np.uint8), AFFINE), seg / f"{s.label}.nii.gz")
-            expected[node_name(s.uberon)] = 4 / 3 * math.pi * radii.prod() / 1000  # ml
+            expected[node_name(s.term)] = 4 / 3 * math.pi * radii.prod() / 1000  # ml
             centres_mm[s.label] = centre
 
         run(seg, Path(tmp) / "a")
         run(seg, Path(tmp) / "b")
-        first = json.loads((Path(tmp) / "a" / "manifest.json").read_text())
-        second = json.loads((Path(tmp) / "b" / "manifest.json").read_text())
+        first = json.loads((Path(tmp) / "a" / "synthetic.organs.manifest.json").read_text())
+        second = json.loads((Path(tmp) / "b" / "synthetic.organs.manifest.json").read_text())
         gltf, centres, volumes = read_glb(Path(tmp) / "a" / first["file"])
         names = [n["name"] for n in first["nodes"]]
-        if names != [node_name(s.uberon) for s in STRUCTURES]:
+        if names != [node_name(s.term) for s in STRUCTURES]:
             failures.append(f"node names {names}")
         for name, volume in volumes.items():
             error = abs(volume - expected[name]) / expected[name]

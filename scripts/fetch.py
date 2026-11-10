@@ -3,12 +3,13 @@ Downloads a pinned source from its official record into data/sources/, checks
 it against sources.json, and unpacks one CT case into data/cases/<case>/.
 
   python scripts/fetch.py [--source totalsegmentator-small-v201] [--case s1086]
-  python scripts/fetch.py --pick   # list cases that contain every v0 structure
+  python scripts/fetch.py --pick   # list cases that contain every organ
 
 A source is only used when its MD5 (from the record) and SHA-256 (ours) both
 match sources.json, and a case only when its CT matches the ct_sha256 pinned
-there; a case with no pin is refused. A partial download is resumed. The case's ct.nii.gz and its
-reference segmentations of the v0 structures are extracted; nothing else is.
+there; a case with no pin is refused. A partial download is resumed. The
+case's ct.nii.gz and its reference segmentations of the reference set (organs
+and trunk skeleton) are extracted; nothing else is.
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from structures import STRUCTURES  # noqa: E402
+from structures import ORGANS, REFERENCE  # noqa: E402
 
 SOURCES = json.loads((ROOT / "sources.json").read_text())
 
@@ -57,7 +58,7 @@ def fetch_source(name: str) -> Path:
 
 
 def members(archive: zipfile.ZipFile, case: str) -> list[str]:
-    wanted = {f"{case}/ct.nii.gz"} | {f"{case}/segmentations/{s.label}.nii.gz" for s in STRUCTURES}
+    wanted = {f"{case}/ct.nii.gz"} | {f"{case}/segmentations/{s.label}.nii.gz" for s in REFERENCE}
     names = [n for n in archive.namelist() if n.split("/", 1)[-1] in wanted or n in wanted]
     if len(names) != len(wanted):
         sys.exit(f"{case}: expected {len(wanted)} files in the archive, found {len(names)}")
@@ -86,7 +87,7 @@ def extract_case(zip_path: Path, case: str) -> Path:
 
 
 def pick(zip_path: Path) -> None:
-    """Prints the cases whose reference segmentations contain every v0 structure."""
+    """Prints the cases whose reference segmentations contain every organ."""
     import nibabel as nib
     import numpy as np
 
@@ -94,7 +95,7 @@ def pick(zip_path: Path) -> None:
         cases = sorted({n.split("/")[-3] for n in archive.namelist() if "/segmentations/" in n})
         for case in cases:
             counts = []
-            for s in STRUCTURES:
+            for s in ORGANS:
                 data = gzip.decompress(archive.read(_member(archive, case, s.label)))
                 image = nib.Nifti1Image.from_bytes(data)
                 counts.append(int(np.count_nonzero(np.asanyarray(image.dataobj))))
