@@ -114,8 +114,8 @@ the female s0859, both from the TotalSegmentator dataset (CC BY 4.0):
 ```
 
 [`blender/assemble.py`](blender/assemble.py) fits the CT to the body: height
-from the hip and shoulder joints, width and depth from the trunk outlines. It
-reports each joint's residual and the share of every structure inside the
+from the hip and shoulder joints, width and depth from the trunk outlines, then
+the shoulder girdle and upper thorax onto ANNY's shoulders. It reports each joint's residual and the share of every structure inside the
 skin. The CT was taken lying down and ANNY stands, so the organs sit as they do
 supine. The ages do not match either: ANNY's bodies are young adults, while
 s0903 was 88 and s0859 74 when scanned, so the organs and bones are an older
