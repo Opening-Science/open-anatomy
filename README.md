@@ -146,10 +146,18 @@ DOI, case) and ANNY. Other headless Blender 5.2.x scripts in [`blender/`](blende
 meshes up and fit an atlas to a body limb by limb; `scripts/blender.py` runs
 them all.
 
+## Imaging layer (prototype)
+
+`scripts/imaging.py` cuts axial, coronal and sagittal slices through a
+reference body's own CT, tints the segmented structures and places the slices
+as textured planes inside the body. See
+[docs/imaging-layer.md](docs/imaging-layer.md).
+
 ## Self-checks
 
 ```bash
 .venv/bin/python scripts/mesh_check.py   # meshes synthetic ellipsoids; no download
+.venv/bin/python scripts/imaging_check.py   # the imaging layer's orientation and head guard
 scripts/self-check.sh                     # every Blender self-check; skips without Blender
 python3 scripts/bake_check.py             # the bake's lock, and any baked body
 ```

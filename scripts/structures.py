@@ -102,6 +102,10 @@ SKELETON: tuple[Structure, ...] = (
     Structure("femur_right", "FMA:24474", "right femur", "skeletal", BONE),
 )  # fmt: skip
 
+# Segmented only to keep faces out of every output (imaging.py's head guard);
+# never meshed or released.
+HEAD_GUARD = ("skull", "brain")
+
 STRUCTURES = ORGANS
 REFERENCE = ORGANS + SKELETON
 SETS = {"organs": ORGANS, "reference": REFERENCE}
