@@ -6,13 +6,18 @@ Studio renders of a skeleton GLB, framed like a textbook plate. Blender
       --in <glb> --hdri <hdr> --out-dir <dir> --name <stem> [--views front,three-quarter]
       [--samples 256]
 
-Lighting is a soft CC0 studio HDRI (lighting only; the camera sees a light
-neutral backdrop). Bone is a warm material with slight subsurface
-scattering and ambient occlusion in its crevices; nodes marked modelled
-(the costal cartilages) are pale blue-white. The front view is orthographic,
-framed from the top of the shoulders to the top of the pelvis when the hip
-bones are in the file, else to the lowest vertebra; the three-quarter view
-turns 35 degrees and looks down 8 degrees. Writes <name>.<view>.png.
+Lighting is a CC0 studio HDRI, turned and tilted so that its key lamp
+stands to the upper left of the camera, with the rest of the studio turned
+down to a fill; the camera sees a plain light neutral backdrop, not the
+HDRI. Bone is a warm ivory with slight subsurface scattering, going to a
+warm brown in its crevices (ambient occlusion) and on edges that turn away;
+nodes marked modelled (the costal cartilages) are pale blue-white. The view
+transform is neutral, so the picture shows those colours.
+
+The front view is orthographic, framed from the top of the shoulders to the
+top of the pelvis when the hip bones are in the file, else to the lowest
+vertebra; the three-quarter view turns 35 degrees and looks down 8 degrees.
+Writes <name>.<view>.png.
 """
 
 from __future__ import annotations
@@ -33,42 +38,116 @@ from twinblend.blender_env import (  # noqa: E402
     script_args,
 )
 
-BONE = (0.93, 0.86, 0.76)
-CARTILAGE = (0.82, 0.88, 0.92)
-BACKDROP = (0.94, 0.94, 0.93)
+# Colours are scene-linear. Each material has a lit colour and the colour its
+# crevices and turning edges go to, so shade on bone stays warm, not grey.
+BONE, BONE_SHADE = (0.87, 0.80, 0.66), (0.38, 0.29, 0.20)
+CARTILAGE, CARTILAGE_SHADE = (0.76, 0.86, 0.96), (0.40, 0.54, 0.72)
+BACKDROP = (0.93, 0.93, 0.92)
+HDRI_TURN = 310.0  # degrees about Z: the key lamp to the picture's left of the camera
+HDRI_TILT = 25.0  # degrees about X, after the turn: lifts the lamps in front of the bones
+HDRI_STRENGTH = 2.0
+FILL = 0.2  # how much of the HDRI's light is kept away from its lamps
+FLOOR = 0.6  # and how much of that from below the horizon (the studio's white floor)
+EXPOSURE = 0.0
+VIEW_TRANSFORMS = ("Khronos PBR Neutral", "Standard")  # the first one this Blender has
+AO_DISTANCE = 0.03  # metres
+AO_POWER = 1.5
+EDGE = 0.5  # how far a surface turning away from the camera goes to its shade colour
 VIEWS = {"front": (0.0, 0.0), "three-quarter": (35.0, 8.0)}  # turn about Z, look down, degrees
 RESOLUTION = (1800, 2400)
 
 
 def material(
-    name: str, colour: tuple[float, float, float], subsurface: float
+    name: str,
+    colour: tuple[float, float, float],
+    shade: tuple[float, float, float],
+    roughness: float,
+    subsurface: float,
 ) -> bpy.types.Material:
+    """A Principled surface whose colour runs from `shade` in crevices
+    (ambient occlusion) and on edges turning away from the camera to
+    `colour` in the open, with subsurface scattering."""
     mat = bpy.data.materials.new(name)
     mat.use_nodes = True
     nodes, links = mat.node_tree.nodes, mat.node_tree.links
     bsdf = nodes["Principled BSDF"]
+
+    def math_node(operation: str, *values: float) -> bpy.types.Node:
+        node = nodes.new("ShaderNodeMath")
+        node.operation = operation
+        for i, value in enumerate(values, start=1):
+            node.inputs[i].default_value = value
+        return node
+
     ao = nodes.new("ShaderNodeAmbientOcclusion")
-    ao.inputs["Distance"].default_value = 0.025
-    ao.inputs["Color"].default_value = (*colour, 1.0)
-    ao.samples = 8
-    links.new(ao.outputs["Color"], bsdf.inputs["Base Color"])
-    bsdf.inputs["Roughness"].default_value = 0.55
+    ao.inputs["Distance"].default_value = AO_DISTANCE
+    ao.samples = 16
+    open_ = math_node("POWER", AO_POWER)
+    links.new(ao.outputs["AO"], open_.inputs[0])
+    facing = nodes.new("ShaderNodeLayerWeight")
+    facing.inputs["Blend"].default_value = 0.35
+    edge = math_node("MULTIPLY_ADD", -EDGE, 1.0)  # 1 - EDGE * facing
+    links.new(facing.outputs["Facing"], edge.inputs[0])
+    lit = math_node("MULTIPLY")
+    lit.use_clamp = True
+    links.new(open_.outputs[0], lit.inputs[0])
+    links.new(edge.outputs[0], lit.inputs[1])
+    tone = nodes.new("ShaderNodeMix")
+    tone.data_type = "RGBA"
+    tone.inputs["A"].default_value = (*shade, 1.0)
+    tone.inputs["B"].default_value = (*colour, 1.0)
+    links.new(lit.outputs[0], tone.inputs["Factor"])
+    links.new(tone.outputs["Result"], bsdf.inputs["Base Color"])
+    bsdf.inputs["Roughness"].default_value = roughness
+    bsdf.inputs["Specular IOR Level"].default_value = 0.35
     bsdf.inputs["Subsurface Weight"].default_value = subsurface
-    bsdf.inputs["Subsurface Radius"].default_value = (0.004, 0.002, 0.0012)
-    bsdf.inputs["Subsurface Scale"].default_value = 0.5
+    bsdf.inputs["Subsurface Radius"].default_value = (1.0, 0.8, 0.6)
+    bsdf.inputs["Subsurface Scale"].default_value = 0.003
     return mat
 
 
 def world(hdri: str) -> None:
+    """The HDRI lights the bones, turned and tilted so that its key lamp
+    stands to the upper left of the camera; the camera sees the plain
+    backdrop."""
     scene = bpy.context.scene
     w = bpy.data.worlds.new("studio")
     w.use_nodes = True
     nodes, links = w.node_tree.nodes, w.node_tree.links
+    coords = nodes.new("ShaderNodeTexCoord")
+    turn = nodes.new("ShaderNodeMapping")
+    turn.inputs["Rotation"].default_value = (math.radians(HDRI_TILT), 0.0, math.radians(HDRI_TURN))
+    links.new(coords.outputs["Generated"], turn.inputs["Vector"])
     env = nodes.new("ShaderNodeTexEnvironment")
     env.image = bpy.data.images.load(hdri)
+    links.new(turn.outputs["Vector"], env.inputs["Vector"])
+    # The lamps keep their light; the rest of the studio (its white wall, and
+    # more so its white floor) is turned down, so the bones are modelled by a
+    # key light and keep some shade on their undersides.
+    brightness = nodes.new("ShaderNodeRGBToBW")
+    links.new(env.outputs["Color"], brightness.inputs["Color"])
+    lamps = nodes.new("ShaderNodeMapRange")
+    lamps.inputs["From Min"].default_value = 1.5
+    lamps.inputs["From Max"].default_value = 6.0
+    lamps.inputs["To Min"].default_value = FILL
+    lamps.inputs["To Max"].default_value = 1.0
+    links.new(brightness.outputs["Val"], lamps.inputs["Value"])
+    up = nodes.new("ShaderNodeSeparateXYZ")
+    links.new(coords.outputs["Generated"], up.inputs[0])
+    floor = nodes.new("ShaderNodeMapRange")
+    floor.interpolation_type = "SMOOTHSTEP"
+    floor.inputs["From Min"].default_value = -0.25
+    floor.inputs["From Max"].default_value = 0.1
+    floor.inputs["To Min"].default_value = HDRI_STRENGTH * FLOOR
+    floor.inputs["To Max"].default_value = HDRI_STRENGTH
+    links.new(up.outputs["Z"], floor.inputs["Value"])
+    strength = nodes.new("ShaderNodeMath")
+    strength.operation = "MULTIPLY"
+    links.new(lamps.outputs["Result"], strength.inputs[0])
+    links.new(floor.outputs["Result"], strength.inputs[1])
     light = nodes["Background"]
-    light.inputs["Strength"].default_value = 1.2
     links.new(env.outputs["Color"], light.inputs["Color"])
+    links.new(strength.outputs[0], light.inputs["Strength"])
     backdrop = nodes.new("ShaderNodeBackground")
     backdrop.inputs["Color"].default_value = (*BACKDROP, 1.0)
     mix = nodes.new("ShaderNodeMixShader")
@@ -149,7 +228,8 @@ def main() -> None:
     skeleton = [o for o in objects if o.get("system") == "skeletal"]
     for o in objects:
         o.hide_render = o not in skeleton
-    bone, cartilage = material("bone", BONE, 0.12), material("cartilage", CARTILAGE, 0.3)
+    bone = material("bone", BONE, BONE_SHADE, 0.5, 0.15)
+    cartilage = material("cartilage", CARTILAGE, CARTILAGE_SHADE, 0.5, 0.3)
     for o in skeleton:
         o.data.materials.clear()
         o.data.materials.append(cartilage if o.get("modelled") else bone)
@@ -160,11 +240,16 @@ def main() -> None:
     scene.cycles.use_denoising = True
     scene.render.resolution_x, scene.render.resolution_y = RESOLUTION
     scene.render.film_transparent = False
-    try:
-        scene.view_settings.view_transform = "Filmic"  # gentle highlights on the bone
-    except TypeError:
-        scene.view_settings.view_transform = "Standard"
+    # A neutral view transform: the picture shows the colours set above, with
+    # only the highlights eased, where Filmic and AgX wash the bone out.
+    for transform in VIEW_TRANSFORMS:
+        try:
+            scene.view_settings.view_transform = transform
+            break
+        except TypeError:
+            continue
     scene.view_settings.look = "None"
+    scene.view_settings.exposure = EXPOSURE
     world(hdri)
     camera = bpy.data.objects.new("camera", bpy.data.cameras.new("camera"))
     scene.collection.objects.link(camera)
