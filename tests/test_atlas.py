@@ -1,4 +1,4 @@
-"""Tests for atlas.py's pure parts: the side-by-side sheet and the case check."""
+"""Tests for atlas.py's pure parts: the side-by-side sheet, the scope and the case check."""
 
 from __future__ import annotations
 
@@ -29,3 +29,25 @@ def test_an_unpinned_case_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "argv", ["atlas.py", "s9999"])
     with pytest.raises(SystemExit, match="s9999 is not pinned"):
         atlas.main()
+
+
+def test_stage_1_says_it_is_the_thorax_without_the_girdle() -> None:
+    assert "thorax only" in atlas.SCOPE
+    assert "girdle is not part of Stage 1" in atlas.SCOPE
+
+
+def test_girdle_left_out_lists_only_the_girdle_bones_the_build_dropped() -> None:
+    cut = "cut by the scan's edge (unscanned padding)"
+    manifest = {
+        "dropped": [
+            {"label": "vertebrae_C7", "reason": cut},
+            {"label": "clavicula_left", "reason": cut, "cut_at": "S"},
+            {"label": "scapula_right", "reason": cut},
+            {"label": "humerus_left", "reason": "its pair is cut"},
+            {"label": "rib_left_12", "reason": cut},
+        ]
+    }
+    left_out = atlas.girdle_left_out(manifest)
+    assert [d["label"] for d in left_out] == ["clavicula_left", "scapula_right", "humerus_left"]
+    assert left_out[0]["cut_at"] == "S"
+    assert atlas.girdle_left_out({}) == []
