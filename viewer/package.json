@@ -1,0 +1,10 @@
+{
+  "name": "open-anatomy-viewer",
+  "private": true,
+  "type": "module",
+  "description": "Marks the viewer's .js files as ES modules for node --test. Not a package: the page has no npm dependencies.",
+  "scripts": {
+    "test": "node --test 'test/*.test.js'",
+    "test:screenshots": "node --test --test-timeout=300000 test/screenshots.test.mjs"
+  }
+}
