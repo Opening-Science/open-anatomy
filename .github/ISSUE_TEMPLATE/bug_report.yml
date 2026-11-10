@@ -1,0 +1,47 @@
+name: Bug report
+description: Report a reproducible non-security defect.
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report security vulnerabilities here. Follow SECURITY.md instead.
+        Do not attach scans, CT volumes, meshes from real people, or credentials.
+        Point to the source record and SHA-256 instead of uploading data.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: The actual behaviour and its effect. Add a render if a model looks wrong.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: The smallest set of commands and inputs that shows it.
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Commit, OS, Python, Blender and TotalSegmentator versions, and the input's SHA-256.
+    validations:
+      required: true
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional context
+      description: Logs, error messages or links.
