@@ -6,14 +6,26 @@
    you tested it. Attach a render when a model changes.
 4. Sign and sign off your commits (`git commit -S -s`). `main` accepts signed
    commits only.
-5. Before you push:
+5. Before you push, run what CI runs (Lint, Unit tests, Type check, Blender
+   self-check, Secret scan, Data guard, Licence check):
 
    ```bash
-   ruff check scripts blender
-   ruff format --check scripts blender
-   python scripts/mesh_check.py
-   scripts/self-check.sh   # needs Blender 5.2+; skips without it
+   uv venv .venv -p 3.12 && uv pip install --group test -e '.[mesh]'   # once
+   ruff check scripts blender tests && ruff format --check scripts blender tests
+   shellcheck scripts/*.sh
+   .venv/bin/pytest
+   .venv/bin/python scripts/mesh_check.py
+   .venv/bin/python scripts/bake_check.py
+   npx pyright@1.1.414
+   python3 scripts/data_guard.py
+   python3 scripts/licence_check.py
+   gitleaks detect --source . --config .gitleaks.toml --redact
+   scripts/self-check.sh   # needs Blender 5.2+; skips without it, fails in CI
    ```
+
+   Put tests in `tests/test_*.py`; they can import modules from `scripts/`.
+   Scripts that import `bpy` are not type checked: list them under
+   `[tool.pyright] exclude` in `pyproject.toml` (a test enforces this).
 
 ## Data
 

@@ -1,0 +1,8 @@
+# Gitleaks config for Opening-Science/open-anatomy, used by the Secret scan job
+# in .github/workflows/ci.yml. It runs the default rules; add an allowlist entry
+# here, with a comment saying why, only for a proven false positive.
+
+title = "open-anatomy"
+
+[extend]
+useDefault = true

@@ -48,7 +48,10 @@ def find_blender() -> str | None:
 def version(blender: str) -> tuple[int, int, int] | None:
     out = subprocess.run([blender, "--version"], capture_output=True, text=True).stdout
     match = re.search(r"^Blender (\d+)\.(\d+)(?:\.(\d+))?", out, re.M)
-    return tuple(int(g or 0) for g in match.groups()) if match else None
+    if match is None:
+        return None
+    major, minor, patch = (int(g or 0) for g in match.groups())
+    return major, minor, patch
 
 
 def run(blender: str, script: Path, args: list[str]) -> int:
@@ -94,7 +97,7 @@ def guard_check() -> list[str]:
 def main() -> int:
     task, args = (sys.argv[1], sys.argv[2:]) if len(sys.argv) > 1 else ("", [])
     if task not in ("self-check", "cleanup", "fit", "assemble", "qa"):
-        print(__doc__.split("\n\n")[1], file=sys.stderr)
+        print((__doc__ or "").split("\n\n")[1], file=sys.stderr)
         return 2
     if task == "self-check":
         if failures := guard_check():

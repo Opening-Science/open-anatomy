@@ -11,6 +11,12 @@ mesh = ["nibabel==5.4.2", "numpy==2.5.4", "scipy==1.18.1", "vtk==9.7.2"]
 # fetch.py, segment.py and mesh.py
 pipeline = ["open-anatomy[mesh]", "TotalSegmentator==2.18.0"]
 
+# Tools for the unit tests and the type check. Install with
+#   pip install --group test   (pip 25.1+)   or   uv pip install --group test
+# scipy ships no type information; scipy-stubs gives the type check its types.
+[dependency-groups]
+test = ["pytest==9.2.0", "scipy-stubs==1.18.1.1"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
@@ -22,3 +28,31 @@ select = ["E", "F", "W", "I", "B", "UP"]
 
 [tool.setuptools]
 py-modules = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers", "--import-mode=importlib"]
+
+# Pyright checks scripts/ and tests/ in standard mode, and in strict mode the
+# paths listed under strict: every new or changed script goes on that list,
+# and older scripts join it one at a time as they get their annotations.
+# Scripts that run inside Blender import bpy, bmesh or mathutils, which exist
+# only there, so each such script is listed under exclude. tests/test_repo_config.py fails when a
+# Blender script is missing from this list. Keep Blender-only code in those
+# scripts and put pure-Python logic in modules that are type checked.
+[tool.pyright]
+include = ["scripts", "tests"]
+exclude = ["scripts/render.py", "scripts/self_check.py"]
+strict = [
+  "scripts/data_guard.py",
+  "scripts/licence_check.py",
+  "tests/conftest.py",
+  "tests/test_data_guard.py",
+  "tests/test_licence_check.py",
+  "tests/test_repo_config.py",
+]
+extraPaths = ["scripts"]
+pythonVersion = "3.11"
+typeCheckingMode = "standard"
+venvPath = "."
+venv = ".venv"
