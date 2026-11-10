@@ -11,6 +11,9 @@ mesh.py on them twice, and checks that:
   ellipsoid's exact volume;
 - the spleen's ellipsoid, placed off-centre towards the body's left, lands on
   +X in the GLB, at the expected distance from the liver's;
+- every node is written about its centre: its translation is the centre of
+  its vertices' bounds in the body frame, its extras carry the contract's
+  fields, and at full separation no two nodes' bounds overlap;
 - a small stray blob next to the stomach is dropped and its share recorded,
   and a gallbladder split into two halves stops the run;
 - the GLB carries an asset.copyright;
@@ -55,8 +58,14 @@ def run(seg: Path, out: Path, check: bool = True) -> subprocess.CompletedProcess
     )  # fmt: skip
 
 
+CONTRACT_FIELDS = ("term", "label", "plain", "about", "system", "layer", "licence", "modelled",
+                   "typical", "pieces", "centre", "bounds", "volume_ml", "explode")  # fmt: skip
+
+
 def read_glb(path: Path) -> tuple[dict, dict[str, np.ndarray], dict[str, float]]:
-    """Returns (glTF JSON, bounding-box centre per node in m, enclosed volume per node in ml)."""
+    """Returns (glTF JSON, bounding-box centre per node in the body frame in m,
+    enclosed volume per node in ml). The vertices are relative to the node's
+    translation, so the translation is added back."""
     data = path.read_bytes()
     length = struct.unpack_from("<I", data, 12)[0]
     gltf = json.loads(data[20 : 20 + length])
@@ -74,8 +83,18 @@ def read_glb(path: Path) -> tuple[dict, dict[str, np.ndarray], dict[str, float]]
         triangles = array(primitive["indices"], np.uint32)
         a, b, c = (vertices[triangles[:, i]] for i in range(3))
         volumes[node["name"]] = float(np.einsum("ij,ij->i", a, np.cross(b, c)).sum() / 6) * 1e6
-        centres[node["name"]] = (vertices.min(0) + vertices.max(0)) / 2
+        translation = np.array(node.get("translation", [0.0, 0.0, 0.0]))
+        centres[node["name"]] = (vertices.min(0) + vertices.max(0)) / 2 + translation
     return gltf, centres, volumes
+
+
+def apart(a: dict, b: dict) -> bool:
+    """Whether two manifest nodes' bounds are apart at full separation."""
+    boxes = []
+    for node in (a, b):
+        shift = np.array(node["explode"]["direction"]) * node["explode"]["distance"]
+        boxes.append(np.array(node["bounds"]) + shift)
+    return bool((boxes[0][1] < boxes[1][0]).any() or (boxes[1][1] < boxes[0][0]).any())
 
 
 def main() -> int:
@@ -119,6 +138,24 @@ def main() -> int:
               f"(expected {shift * 1000:+.1f})")  # fmt: skip
         if abs(found - shift) > 0.001:
             failures.append(f"spleen at {found * 1000:+.1f} mm along X, not {shift * 1000:+.1f}")
+
+        # An ellipsoid's volume centroid is its bounds' centre, so the node's
+        # translation must be where its vertices' bounds are centred.
+        for node in gltf["nodes"]:
+            extras = node.get("extras", {})
+            if any(field not in extras for field in CONTRACT_FIELDS):
+                failures.append(f"{node['name']} lacks contract fields: {sorted(extras)}")
+            translation = np.array(node.get("translation", [0.0, 0.0, 0.0]))
+            off = np.linalg.norm(translation - centres[node["name"]])
+            if off > 0.001 or node.get("translation") is None:
+                failures.append(f"{node['name']} is written {off * 1000:.1f} mm off its centre")
+        nodes = first["nodes"]
+        pairs = [(a, b) for i, a in enumerate(nodes) for b in nodes[i + 1 :]]
+        together = [f"{a['name']} and {b['name']}" for a, b in pairs if not apart(a, b)]
+        print(f"{len(pairs)} pairs of bounds checked at full separation, {len(together)} overlap")
+        failures += [f"bounds overlap at full separation: {t}" for t in together]
+        if any(n["explode"]["distance"] <= 0 for n in nodes):
+            failures.append("an explode distance is not positive")
 
         stomach = next(n for n in first["nodes"] if n["name"] == by_label["stomach"])
         print(f"stomach's stray blob: {stomach['dropped_share']:.2%} dropped")
