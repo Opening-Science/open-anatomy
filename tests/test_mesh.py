@@ -843,15 +843,16 @@ def test_sources_json_marks_its_tumour_case_not_typical() -> None:
 # The same contract on real masks: one ball per organ on a 1.5 mm grid, meshed
 # by surface() itself. Offsets are in voxels from the grid's centre, along
 # (i, j, k), which the affine turns into the body's (left, front, up). The heart
-# and the vena cava sit on the centre, the other two of their system (spleen,
-# aorta) left and right of it, and the rest balance, so the body centre is the
-# grid's centre.
+# and the spleen sit on the centre. The other two of the heart's system (vena
+# cava, aorta) lie left and right of it and cancel; the spleen's (liver,
+# stomach, pancreas, gallbladder) do not. The rest balance, so the body centre
+# is the grid's centre.
 CUBIC = np.diag([-1.5, 1.5, 1.5, 1.0])
 BALL_GRID, BALL_VOXELS = 64, 7
 BALLS = {
     "heart": (0, 0, 0),
-    "inferior_vena_cava": (0, 0, 0),
-    "spleen": (20, 0, 0),
+    "spleen": (0, 0, 0),
+    "inferior_vena_cava": (20, 0, 0),
     "aorta": (-20, 0, 0),
     "liver": (0, 20, 0),
     "stomach": (0, -20, 0),
@@ -909,12 +910,18 @@ def test_real_masks_build_to_the_contract(tmp_path: Path, monkeypatch: pytest.Mo
     def explode(label: str) -> tuple[list[float], float]:
         return by_label[label]["explode"]["direction"], by_label[label]["explode"]["distance"]
 
-    # The direction: outward from the body centre; at the centre, the system's
-    # mean, and anterior when the system's sides cancel as spleen and aorta do.
-    np.testing.assert_allclose(explode("spleen")[0], [1, 0, 0], atol=0.02)
+    # The direction: outward from the body centre. At the centre, the mean of
+    # the system's other directions, as for the spleen; and anterior when the
+    # system's sides cancel, as the vena cava and the aorta do for the heart.
+    np.testing.assert_allclose(explode("inferior_vena_cava")[0], [1, 0, 0], atol=0.02)
     np.testing.assert_allclose(explode("liver")[0], [0, 0, 1], atol=0.02)
     np.testing.assert_allclose(explode("pancreas")[0], [0, 0.926, -0.379], atol=0.02)
-    assert explode("heart")[0] == explode("inferior_vena_cava")[0] == [0.0, 0.0, 1.0]
+    assert explode("heart")[0] == [0.0, 0.0, 1.0]
+    others = [explode(label)[0] for label in ("liver", "stomach", "pancreas", "gallbladder")]
+    mean = np.mean(others, axis=0)
+    assert np.linalg.norm(mean) > mesh.MEAN_DIRECTION_MIN
+    np.testing.assert_allclose(explode("spleen")[0], mean / np.linalg.norm(mean), atol=1e-5)
+    np.testing.assert_allclose(explode("spleen")[0], [0, 0.373, -0.928], atol=0.02)
     assert explode("kidney_left")[1] == explode("kidney_right")[1]
     for a, b in itertools.combinations(manifest["nodes"], 2):
         assert apart(moved(a), moved(b), mesh.EXPLODE_GAP_M - 1e-9), (a["name"], b["name"])

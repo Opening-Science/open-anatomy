@@ -11,8 +11,8 @@ Ontology Lookup Service.
 
 SYSTEMS is the closed list a node's `system` may take under the GLB contract
 (a new system is a contract change), and layer_of() maps a system to the
-contract's layer. The spleen filters the blood, so with no lymphoid system
-in the list it goes with the heart and vessels.
+contract's layer. The spleen is a lymphoid organ; with no lymphoid system in
+the list it goes with the digestive organs it lies among.
 """
 
 from __future__ import annotations
@@ -63,7 +63,7 @@ ORGANS: tuple[Structure, ...] = (
     Structure("gallbladder", "UBERON:0002110", "gallbladder", "digestive", (0.18, 0.40, 0.12)),
     Structure("stomach", "UBERON:0000945", "stomach", "digestive", (0.80, 0.45, 0.40)),
     Structure("pancreas", "UBERON:0001264", "pancreas", "digestive", (0.85, 0.65, 0.35)),
-    Structure("spleen", "UBERON:0002106", "spleen", "cardiovascular", (0.35, 0.08, 0.20)),
+    Structure("spleen", "UBERON:0002106", "spleen", "digestive", (0.35, 0.08, 0.20)),
     Structure("kidney_left", "UBERON:0004538", "left kidney", "urinary", (0.55, 0.20, 0.15)),
     Structure("kidney_right", "UBERON:0004539", "right kidney", "urinary", (0.55, 0.20, 0.15)),
     Structure("heart", "UBERON:0000948", "heart", "cardiovascular", (0.42, 0.14, 0.13)),
