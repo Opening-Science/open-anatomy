@@ -506,6 +506,70 @@ def test_trim_knobs_takes_off_a_lump_on_a_thin_neck_and_keeps_thin_rib() -> None
     assert mask.sum() - trimmed.sum() >= 27
 
 
+def flat_rib(slant: int = 0) -> Mask:
+    """A straight rib along x, 144 mm long, 16 mm wide (y) and 6 mm thick (z),
+    its front end at high x; with a slant, that end leans back by so many
+    voxels from one border to the other."""
+    mask = box((210, 60, 24), (10, 20, 10), (190, 40, 14))
+    for row in range(20):
+        mask[190 - round(slant * row / 19) :, 20 + row] = False
+    return mask
+
+
+FRONT = np.array([1.0, 0.0, 0.0])
+
+
+def test_even_end_fills_a_neck_behind_the_end_plate_and_takes_a_lump_off() -> None:
+    mask = flat_rib()
+    mask[160:182, 28:40] = False  # the thin bone the segmentation missed: a neck 6 mm wide
+    mask[183:189, 24:30, 14:22] = True  # a lump standing 6 to 12 mm out of the rib's face
+    evened, filled_ml, lumps_ml = mesh.even_end(mask, SPACING, FRONT)
+    voxel_ml = SPACING.prod() / 1000
+    assert evened[162:180, 23:37, 11:13].all()  # the neck is the rib's own width again
+    assert not evened[183:189, 24:30, 17:22].any()  # the lump is gone
+    assert not evened[192:].any()  # nothing is added beyond the rib's own end (190)
+    assert evened[187, 23:37, 11:13].all()  # and the rib is as long as it was
+    assert (evened[:150] == mask[:150]).all()  # behind the end zone nothing changes
+    assert filled_ml == pytest.approx((evened & ~mask).sum() * voxel_ml)
+    assert lumps_ml == pytest.approx((mask & ~evened).sum() * voxel_ml)
+    assert filled_ml > 0.8 * 22 * 12 * 4 * voxel_ml
+    assert 0.6 * 6 * 6 * 5 * voxel_ml < lumps_ml < 1.2 * 6 * 6 * 8 * voxel_ml
+
+
+@pytest.mark.parametrize("slant", [0, 10])
+def test_even_end_leaves_a_sound_end_as_it_is_and_a_slanting_end_slanting(slant: int) -> None:
+    mask = flat_rib(slant)
+    evened, filled_ml, lumps_ml = mesh.even_end(mask, SPACING, FRONT)
+    changed = (evened != mask).sum()
+    assert changed < 0.01 * mask.sum()
+    assert not evened[191:].any()
+    if slant:
+        assert not evened[182:, 38:40].any()  # the short border is not run on to the tip
+
+
+def test_even_end_leaves_a_rib_too_short_to_tell_its_section_alone() -> None:
+    mask = box((90, 60, 24), (10, 20, 10), (80, 40, 14))  # 56 mm long
+    mask[60:72, 28:40] = False
+    evened, filled_ml, lumps_ml = mesh.even_end(mask, SPACING, FRONT)
+    assert (evened == mask).all()
+    assert (filled_ml, lumps_ml) == (0.0, 0.0)
+
+
+def test_what_evening_a_ribs_end_fills_and_takes_off_is_in_the_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mask = flat_rib()
+    mask[160:182, 28:40] = False
+    mask[183:189, 24:30, 14:22] = True
+    (tmp_path / "seg").mkdir()
+    for rib in ("rib_left_5", "rib_left_11"):  # FLIPPED has the body's front along +y
+        save(tmp_path / "seg" / f"{rib}.nii.gz", mask.transpose(1, 0, 2))
+    nodes = {n["label"]: n for n in run_main(tmp_path, monkeypatch, {})["nodes"]}
+    fifth, eleventh = nodes["left fifth rib"], nodes["left eleventh rib"]
+    assert fifth["end_filled_ml"] > 0.8 and fifth["end_lumps_trimmed_ml"] > 0.1
+    assert "end_filled_ml" not in eleventh and "end_lumps_trimmed_ml" not in eleventh
+
+
 @pytest.mark.parametrize(
     ("cut", "partner"), [("rib_left_3", "rib_right_3"), ("rib_right_11", "rib_left_11")]
 )
