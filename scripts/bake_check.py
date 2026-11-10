@@ -56,7 +56,7 @@ def body_failures(path: Path, body: dict) -> list[str]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     parser.add_argument("--bake", action="store_true", help="bake every body again and compare")
     args = parser.parse_args()
     failures = lock_failures()
