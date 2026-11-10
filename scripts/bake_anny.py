@@ -30,7 +30,10 @@ bodies (gender 0 or 1, age 2/3 "young", every other phenotype 0.5; 1.914 m and
 
 Ported from twin-llm (scripts/anatomy/bake-anny-rigged.py, a4058fa8, Apache-2.0).
 
-    uv run --script scripts/bake_anny.py <male|female> <out.glb>
+    uv run --script scripts/bake_anny.py <male|female> <out.glb> [--weight w] [--height h]
+
+--weight and --height (0 to 1, ANNY's own phenotype scale) give the bodies of
+other sizes; without them the bake is the pinned default body, byte for byte.
 
 It refuses to run, or to write, if ANNY's non-commercial SMPL/SMPL-X bundle is
 in its cache: only the CC0 shapes are used.
@@ -68,6 +71,8 @@ PHENOTYPES = {
     "male": {"gender": 0.0, "age": 2 / 3},
     "female": {"gender": 1.0, "age": 2 / 3},
 }
+# Phenotypes a reference body may set (0 to 1); left out, ANNY uses 0.5.
+BODY_SIZE = ("weight", "height")
 ARM_DROP_DEG = 30.0
 ELBOW_FLEX_DEG = 15.0
 INFLUENCES = 4
@@ -108,12 +113,12 @@ def pad4(data: bytes, fill: bytes = b"\x00") -> bytes:
     return data + fill * ((4 - len(data) % 4) % 4)
 
 
-def bake(sex: str) -> bytes:
+def bake(sex: str, extra: dict[str, float] | None = None) -> bytes:
     torch.set_default_dtype(torch.float64)
     model = anny.Anny(rig="anny").to(torch.float64)
     labels = model.bone_labels
     parents = model.bone_parents
-    out = bind_pose(model, PHENOTYPES[sex])
+    out = bind_pose(model, {**PHENOTYPES[sex], **(extra or {})})
 
     verts = out["vertices"][0]
     floor = float(verts[:, 2].min())
@@ -269,19 +274,30 @@ def noncommercial_data() -> pathlib.Path | None:
 
 
 def main() -> int:
-    if len(sys.argv) != 3 or sys.argv[1] not in PHENOTYPES:
-        sys.stderr.write("Usage: bake_anny.py <male|female> <out.glb>\n")
+    args = sys.argv[1:]
+    extra = {}
+    for name in BODY_SIZE:
+        if f"--{name}" in args:
+            at = args.index(f"--{name}")
+            value = float(args[at + 1])
+            if not 0 <= value <= 1:
+                sys.stderr.write(f"--{name} must be between 0 and 1\n")
+                return 2
+            extra[name] = value
+            del args[at : at + 2]
+    if len(args) != 2 or args[0] not in PHENOTYPES:
+        sys.stderr.write("Usage: bake_anny.py <male|female> <out.glb> [--weight w] [--height h]\n")
         return 2
     # The bake needs only ANNY's CC0 shapes. The non-commercial bundle maps ANNY
     # to SMPL and SMPL-X, which this project never uses: refuse if it is present.
     if noncommercial_data():
         sys.stderr.write(f"ANNY's non-commercial SMPL data is at {noncommercial_data()}.\n")
         return 1
-    body = bake(sys.argv[1])
+    body = bake(args[0], extra)
     if noncommercial_data():
         sys.stderr.write("The bake downloaded ANNY's non-commercial SMPL data; not writing.\n")
         return 1
-    with open(sys.argv[2], "wb") as handle:
+    with open(args[1], "wb") as handle:
         handle.write(body)
     return 0
 

@@ -113,14 +113,36 @@ the female s0859, both from the TotalSegmentator dataset (CC BY 4.0):
 .venv/bin/python scripts/reference.py --render   # data/reference/, data/renders/
 ```
 
+| Reference | Case | Recorded pathology | Typical anatomy |
+| --- | --- | --- | --- |
+| anny-adult-m | s0903, male, 88 | none | yes |
+| anny-adult-f | s0859, female, 74 | inflammation (thorax) | yes |
+| anny-adult-m-w0.95-h0.5.s0667 | s0667, male, 65 | none | yes |
+| anny-adult-m-w1.0-h0.8.s1086 | s1086, male, 45 | tumour (thorax, abdomen) | **no: a pathological reference** |
+
+The s1086 body shows tumour anatomy: the tumour may displace or change organs,
+so it must not stand in for typical anatomy. Its report says so in `case`.
+
+More bodies come from the full dataset. `scripts/select_cases.py` lists the
+cases that qualify (every organ whole, no head, the hip and shoulder joints in
+the scan, arms hanging, no trauma), and `scripts/size_body.py` picks the ANNY
+weight and height whose trunk matches the case's, which `bake_anny.py` then
+bakes with `--weight` and `--height`. It searches up to ANNY's limit of 1.0,
+refines around the best in steps of 0.05 and warns when the best is on the
+edge. For s0667 it picks weight 0.95 and height 0.5. For s1086 it picks weight
+1.0, ANNY's limit, at height 0.8: the CT's trunk is wider and deeper (382 x
+270 mm) than ANNY's can be at that height (366 x 243 mm), so that body is a
+little too slim ([#44](https://github.com/Opening-Science/open-anatomy/issues/44)).
+
 [`blender/assemble.py`](blender/assemble.py) fits the CT to the body: height
-from the hip and shoulder joints, width and depth from the trunk outlines. It
-reports each joint's residual and the share of every structure inside the
+from the hip and shoulder joints, width and depth from the trunk outlines, then
+the shoulder girdle and upper thorax onto ANNY's shoulders. It reports each joint's residual and the share of every structure inside the
 skin. The CT was taken lying down and ANNY stands, so the organs sit as they do
 supine. The ages do not match either: ANNY's bodies are young adults, while
-s0903 was 88 and s0859 74 when scanned, so the organs and bones are an older
-person's inside a young adult's shape. The released GLB's asset copyright credits the TotalSegmentator dataset
-(creator, DOI, case) and ANNY. Other headless Blender 5.2.x scripts in [`blender/`](blender/) clean
+the people scanned were 45 to 88 (s0903 88, s0859 74, s0667 65, s1086 45), so
+the organs and bones are an older person's inside a young adult's shape. The
+released GLB's asset copyright credits the TotalSegmentator dataset (creator,
+DOI, case) and ANNY. Other headless Blender 5.2.x scripts in [`blender/`](blender/) clean
 meshes up and fit an atlas to a body limb by limb; `scripts/blender.py` runs
 them all.
 
