@@ -146,20 +146,37 @@ CARDIOVASCULAR: tuple[Structure, ...] = (
 
 RESPIRATORY: tuple[Structure, ...] = ()
 
-# Digestive: the gut from the oesophagus to the colon with the liver,
-# gallbladder and pancreas. The spleen is a lymphoid organ; it goes with the
-# digestive organs it lies among, as the systems have no lymphoid list.
+# Digestive: the gut in the order food takes (oesophagus, stomach, duodenum,
+# small intestine, colon), then the liver, gallbladder and pancreas. The
+# "small_bowel" label is the small intestine after the duodenum, which has a
+# label of its own. The spleen is a lymphoid organ; it goes with the digestive
+# organs it lies among, as the systems have no lymphoid list.
 
 DIGESTIVE: tuple[Structure, ...] = (
+    Structure("esophagus", "UBERON:0001043", "esophagus", "digestive", (0.66, 0.34, 0.38),
+              "food pipe",
+              "The muscular tube that carries swallowed food from the throat down to the stomach."),
+    Structure("stomach", "UBERON:0000945", "stomach", "digestive", (0.80, 0.45, 0.40),
+              "stomach",
+              "A muscular bag that churns food with acid and passes it on to the gut."),
+    Structure("duodenum", "UBERON:0002114", "duodenum", "digestive", (0.90, 0.48, 0.22),
+              "first part of the small bowel",
+              "The short first bend of the gut after the stomach, where bile and pancreatic juice "
+              "meet the food."),
+    Structure("small_bowel", "UBERON:0002108", "small intestine", "digestive", (0.90, 0.62, 0.58),
+              "small bowel",
+              "The long coiled tube after the duodenum, where most of the food's nutrients pass "
+              "into the blood."),
+    Structure("colon", "UBERON:0001155", "colon", "digestive", (0.60, 0.40, 0.26),
+              "large bowel",
+              "The wide last stretch of the gut; it takes back water and salts and forms the "
+              "stool."),
     Structure("liver", "UBERON:0002107", "liver", "digestive", (0.45, 0.12, 0.08),
               "liver",
               "Processes what the gut absorbs, stores energy and clears the blood of toxins."),
     Structure("gallbladder", "UBERON:0002110", "gallbladder", "digestive", (0.18, 0.40, 0.12),
               "gallbladder",
               "A small bag under the liver that stores bile and releases it to digest fat."),
-    Structure("stomach", "UBERON:0000945", "stomach", "digestive", (0.80, 0.45, 0.40),
-              "stomach",
-              "A muscular bag that churns food with acid and passes it on to the gut."),
     Structure("pancreas", "UBERON:0001264", "pancreas", "digestive", (0.85, 0.65, 0.35),
               "pancreas",
               "Makes digestive juices for the gut and hormones such as insulin for the blood."),
