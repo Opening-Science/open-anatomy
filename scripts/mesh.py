@@ -61,6 +61,7 @@ from structures import RULED_SETS, SETS, Structure, node_name  # noqa: E402
 # Limb bones run out of a trunk scan by design; their joint ends are what count.
 MIN_ML = 0.3  # a mask smaller than this is a stray label, not a bone (volume, not voxels)
 PADDING_HU = -1020  # at or below: a scanner's fill beyond what it scanned, never tissue
+PADDING_BLEND = 2  # voxels: resampling blends the fill into the last scanned slice this far
 SETS_OF_PIECES = {"costal_cartilages"}  # one node, several separate pieces
 MIN_PIECE_VOXELS = 150  # a piece smaller than this (0.5 ml) in a set is a loose blob
 LEVEL_STEPS = 12
@@ -73,14 +74,37 @@ STERNUM_BLURS = ((1.0, 3.0), (0.75, 2.0), (0.5, 1.5))  # its ripples span severa
 RIB_BLURS = ((0.75, 5.0), (0.75, 3.5), (0.75, 2.0))  # (across, along the rib) in mm: unroll()
 CARTILAGE_BLURS = ((1.0, 1.5), (0.75, 1.0), (0.5, 0.75))  # thin, lumpy segmentation
 CARTILAGE_MAX_MM = 170  # the 7th costal cartilage runs up to about 15 cm in a tall man
-JOIN_OVERLAP_MM = 6.0  # a modelled cartilage starts this far inside its rib's end
+JOIN_OVERLAP_MM = 6.0  # a modelled cartilage begins this far inside its rib's end, out of sight
+INSIDE_SHARE = 0.6  # of the rib's own section: the band's where it begins inside the rib
 CARTILAGE_FLAT = 2.5  # a cartilage band is this many times wider than deep
-ARCH_JOIN = {8: 0.75, 9: 0.6, 10: 0.5}  # where along the cartilage above ribs 8-10 join it
-START_DIP = 0.25  # a cartilage leaves its rib no more steeply downward than this (sine)
+CARTILAGE_WIDEN = 0.15  # a cartilage of ribs 1-7 is this much wider at the sternum than at its rib
+ARCH_JOIN = {8: 0.75, 9: 0.6, 10: 0.5}  # where along the cartilage above ribs 8-10 merge into it
 CARTILAGE_HALF_W_MM = 9.0  # a band is at most 18 mm wide, whatever its rib's end measures
 TANGENT_SHARE = 0.7  # of the rib-to-sternum span, for the cartilage curve's end tangents
+ARCH_RUN_MM = 24.0  # a band of ribs 8-10 runs on this far inside the band above, thinning out
+ARCH_THIN = 0.3  # of the band above's section: what is left of it where it ends in there
+ARCH_LEAVE_MM = 30.0  # of its way from its rib before a band of ribs 8-10 lies beside the one above
+ARCH_SMOOTH_MM = (
+    8.0  # the band above's frame is smoothed this far along before a band is hung on it
+)
+ARCH_MIN_MM = 5.0  # a band of ribs 8-10 shorter than this is not worth laying
+CHEST_AXIS_MM = 100.0  # the chest wall faces away from an axis this far behind the sternum
+XIPHOID_SHARE = 0.7  # of the sternum's usual width: what hangs below that is the xiphoid
+NOTCH_MM = 2.0  # a cartilage keeps its full width this far into the sternum's border
+CARTILAGE_VOXEL_MM = 0.9  # the bands' field is sampled this far apart, then contoured
+FIELD_REACH_MM = 3.0  # the field tells inside from outside up to this far from a band's surface
+UNION_BLEND_MM = 3.0  # bands nearer each other than about half this run together in a fillet
+CARTILAGE_BLUR_MM = 0.5  # a light Gaussian blur of the field before it is contoured
+EVEN_ROUNDS = 10  # rounds of evening out the contoured cartilage's triangles
+EVEN_SLOPE = 0.5  # mm of depth per mm: below it the bands' field has no clear slope to follow
+MIN_HALF_DEPTH_MM = 2.0  # neither a rib end nor a band is taken to be thinner than 4 mm
+CARTILAGE_SAMPLE_MM = 0.5  # centreline samples this far apart decide which voxels a band holds
+CARTILAGE_SQUARE = 3.0  # the band's section: 2 is an ellipse, 3 a flatter face with rounded edges
+UP = np.array([0.0, 0.0, 1.0])  # RAS superior
 KNOB_MAX_ML = 1.0  # a lump the opening separates from a rib is taken off below this volume
 RIB_BIN_MM = 3.0
+END_SKIP_BINS = 3  # bins of a rib's centreline at its front end that curl into a corner
+END_FIT_BINS = 7  # bins behind those (21 mm) that give the end's direction
 RIB_SMOOTH_MM = 9.0
 RIB_LEAD_MM = 30.0  # a rib's centreline runs on this far past its ends, for the blur's reach
 RIB_KEPT_SHARE = 0.9  # of a rib's volume must lie where its centreline puts it (real ribs: 0.96+)
@@ -139,95 +163,110 @@ def decimate(poly: vtk.vtkPolyData, max_triangles: int) -> vtk.vtkPolyData:
     return poly
 
 
-def rib_end(path: Path) -> dict | None:
-    """rib_end_of the rib's mask, or of the mask after a small opening when that
-    takes a knob off its tip: the opened rib keeps at least 85% of its voxels,
-    its tip moves under 20 mm, and its tip is wider than the raw one's."""
-    image = nib.load(path)
-    mask = np.asanyarray(image.dataobj) > 0
-    raw = rib_end_of(mask, image.affine)
-    opened = ndimage.binary_opening(mask, structure=ndimage.generate_binary_structure(3, 1))
-    labels, count = ndimage.label(opened, structure=np.ones((3, 3, 3)))
-    if raw is None or count == 0:
-        return raw
-    largest = labels == int(np.argmax(np.bincount(labels.ravel())[1:])) + 1
-    cleaned = rib_end_of(largest, image.affine)
-    if (
-        cleaned is not None
-        and largest.sum() >= 0.85 * mask.sum()
-        and np.linalg.norm(cleaned["tip"] - raw["tip"]) < 20
-        and cleaned["halfWidth"] > raw["halfWidth"]
-    ):
-        return cleaned
-    return raw
-
-
-def rib_end_of(mask: np.ndarray, affine: np.ndarray) -> dict | None:
-    """A rib's front end in RAS mm: its tip, the unit direction it runs in
-    there, and its cross-section just behind the tip (3 to 10 mm back): the
-    direction across its width and its half-width and half-thickness. From
-    the rib's centreline (the mask walked from its far end in 3 mm bins)."""
+def rib_end_of(vertices: np.ndarray, triangles: np.ndarray) -> dict | None:
+    """The front end of a rib's meshed surface (RAS mm vertices, triangles):
+    its tip, the unit direction the rib runs in there, and the surface's
+    points 3 to 10 mm behind the tip, centred and flattened across the rib
+    ("section"), with the direction across their width and the half-width
+    and half-thickness along that. The rib's centreline is its surface
+    walked along the mesh from its back end in RIB_BIN_MM bins; the walk's
+    last bins curl into a corner of a blunt end (and its first ones fan out
+    from one, which is why it starts at the back), so the direction comes
+    from the END_FIT_BINS before the last END_SKIP_BINS, fitted again
+    through slices cut straight across it, and the tip is where the surface
+    ends along it, on the rib's own axis. Measured on the mesh, the end is
+    the one the body shows, whatever was trimmed or smoothed away."""
     from scipy.sparse import coo_matrix
     from scipy.sparse.csgraph import dijkstra
-    from scipy.spatial import cKDTree
 
-    pieces, count = ndimage.label(mask, structure=np.ones((3, 3, 3)))
-    if count > 1:  # a chip off the rib would make a false far end
-        mask = pieces == int(np.argmax(np.bincount(pieces.ravel())[1:])) + 1
-    voxels = np.argwhere(mask)
-    if len(voxels) * abs(np.linalg.det(affine[:3, :3])) / 1000 < MIN_ML:
-        return None
-    ras = voxels @ affine[:3, :3].T + affine[:3, 3]
-    spacing = np.linalg.norm(affine[:3, :3], axis=0)
-    pairs = cKDTree(ras).query_pairs(r=float(np.sqrt(3) * spacing.max()) + 1e-3,
-                                      output_type="ndarray")  # fmt: skip
-    graph = coo_matrix(
-        (np.linalg.norm(ras[pairs[:, 0]] - ras[pairs[:, 1]], axis=1), (pairs[:, 0], pairs[:, 1])),
-        shape=(len(ras), len(ras)),
-    ).tocsr()
-    start = int(np.argmax(np.linalg.norm(ras - ras.mean(0), axis=1)))
-    along = dijkstra(graph, directed=False, indices=start)
+    edges = np.unique(
+        np.sort(np.vstack([triangles[:, [0, 1]], triangles[:, [1, 2]], triangles[:, [2, 0]]]), 1),
+        axis=0,
+    )
+    lengths = np.linalg.norm(vertices[edges[:, 0]] - vertices[edges[:, 1]], axis=1)
+    graph = coo_matrix((lengths, (edges[:, 0], edges[:, 1])), shape=(len(vertices),) * 2).tocsr()
+    used = np.unique(triangles)
+    start = used[np.argmax(np.linalg.norm(vertices[used] - vertices[used].mean(0), axis=1))]
+    along = dijkstra(graph, directed=False, indices=int(start))
+    far = used[np.argmax(np.where(np.isfinite(along[used]), along[used], -1.0))]
+    if vertices[start, 1] > vertices[far, 1]:  # RAS +A is the front: walk from the back end
+        along = dijkstra(graph, directed=False, indices=int(far))
     ok = np.isfinite(along)
+    ok[np.setdiff1d(np.arange(len(vertices)), used)] = False
     bins = (along[ok] // RIB_BIN_MM).astype(int)
     count = np.bincount(bins)
-    used = count > 0
-    line = (
-        np.stack([np.bincount(bins, ras[ok][:, d]) for d in range(3)], 1)[used] / count[used, None]
-    )
-    if len(line) < 6:
+    filled = count > 0
+    line = np.stack([np.bincount(bins, vertices[ok][:, d]) for d in range(3)], 1)
+    line = line[filled] / count[filled, None]
+    if len(line) < END_SKIP_BINS + 3:
         return None
     line = ndimage.gaussian_filter1d(line, 1.5, axis=0, mode="nearest")
-    if line[0, 1] > line[-1, 1]:  # RAS +A is the front: the front end is the last point
-        line = line[::-1]
-    tip = line[-1]
-    direction = line[-1] - line[-4]
+    anchor = line[-1 - END_SKIP_BINS]
+    direction = anchor - line[max(len(line) - 1 - END_SKIP_BINS - END_FIT_BINS, 0)]
     direction /= np.linalg.norm(direction)
-    back = (ras - tip) @ direction
-    slab = ras[(back > -10) & (back < -3)]
-    if len(slab) < 10:
+    near = vertices[ok][
+        np.linalg.norm(vertices[ok] - anchor, axis=1) < (END_SKIP_BINS + 6) * RIB_BIN_MM
+    ]
+    # The walk ends in a corner, and its centreline leans toward it. Slices cut
+    # straight across that line have their middles on the rib's axis whichever
+    # way it leans, so the direction is fitted again through them.
+    ahead = (near - anchor) @ direction
+    slices = ((float(ahead.max()) - ahead) // RIB_BIN_MM).astype(int)
+    middles = [near[slices == i].mean(0) for i in range(1, END_FIT_BINS + 1) if (slices == i).any()]
+    if len(middles) >= 3:
+        fitted = np.linalg.svd(np.array(middles) - np.mean(middles, 0), full_matrices=False)[2][0]
+        direction = fitted if fitted @ direction > 0 else -fitted
+    ahead = (near - anchor) @ direction
+    reach = float(ahead.max())
+    ring = near[(ahead > reach - 10) & (ahead < reach - 3)]
+    if len(ring) < 10:
         return None
-    flat = slab - np.outer((slab - tip) @ direction, direction)
-    flat -= flat.mean(0)
+    flat = ring - np.outer((ring - anchor) @ direction, direction)
+    centre = flat.mean(0)
+    flat -= centre
     _, _, vt = np.linalg.svd(flat, full_matrices=False)
     across = vt[0] - direction * (vt[0] @ direction)
     across /= np.linalg.norm(across)
-    deep = np.cross(direction, across)
-    half_voxel = spacing.mean() / 2
-    width = float(np.ptp(np.percentile(flat @ across, [5, 95]))) / 2 + half_voxel
-    depth = float(np.ptp(np.percentile(flat @ deep, [5, 95]))) / 2 + half_voxel
-    return {"tip": tip, "direction": direction, "across": across,
-            "halfWidth": max(width, 3.0), "halfDepth": max(depth, 2.0)}  # fmt: skip
+    width, depth = extents(flat, across, np.cross(direction, across))
+    return {"tip": centre + direction * reach, "direction": direction, "across": across,
+            "halfWidth": width, "halfDepth": depth, "section": flat}  # fmt: skip
 
 
-def sweep(curve: np.ndarray, start_across: np.ndarray, half_w: np.ndarray, half_d: np.ndarray,
-          sides: int = 24) -> tuple[np.ndarray, np.ndarray]:  # fmt: skip
-    """A closed tube of elliptical section along a curve: a rotation-minimising
-    frame (double reflection) carries the section's width direction from the
-    start, and both ends are capped."""
+def extents(section: np.ndarray, across: np.ndarray, deep: np.ndarray) -> tuple[float, float]:
+    """A rib end's half-width and half-depth along across and deep: half the
+    2nd-to-98th percentile spread of its section's surface points, and never
+    under 3 mm and MIN_HALF_DEPTH_MM."""
+    width = float(np.ptp(np.percentile(section @ across, [2, 98]))) / 2
+    depth = float(np.ptp(np.percentile(section @ deep, [2, 98]))) / 2
+    return max(width, 3.0), max(depth, MIN_HALF_DEPTH_MM)
+
+
+def wall_across(tangent: np.ndarray, outward: np.ndarray) -> np.ndarray:
+    """The unit direction of a band's width where the band runs along tangent
+    in a chest wall that faces outward: at right angles to both, pointing up
+    where it can, so the band lies flat in the wall with its broad face
+    looking out of the chest (forward, beside the sternum)."""
+    across = np.cross(outward, tangent)
+    if np.linalg.norm(across) < 1e-6:  # running straight out of the chest: width upward
+        across = UP - tangent * (UP @ tangent)
+    across = across / np.linalg.norm(across)
+    return -across if across[2] < 0 else across
+
+
+def frames(
+    curve: np.ndarray, start_across: np.ndarray, end_across: np.ndarray | None = None
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Orthonormal frames along a curve: unit tangents, the width direction
+    (across) and the depth direction (deep = tangent x across). A
+    rotation-minimising frame (double reflection) carries start_across along
+    the curve. With end_across, the twist left between the frame's last
+    across and it (or its opposite, which is the same band) is spread evenly
+    over the arc length, so a band ends with its face turned the way the
+    structure it joins is, without a kink."""
     tangents = np.gradient(curve, axis=0)
     tangents /= np.linalg.norm(tangents, axis=1, keepdims=True)
-    across = [start_across - tangents[0] * (start_across @ tangents[0])]
-    across[0] /= np.linalg.norm(across[0])
+    first = start_across - tangents[0] * (start_across @ tangents[0])
+    across = [first / np.linalg.norm(first)]
     for i in range(len(curve) - 1):
         v1 = curve[i + 1] - curve[i]
         c1 = v1 @ v1
@@ -238,24 +277,17 @@ def sweep(curve: np.ndarray, start_across: np.ndarray, half_w: np.ndarray, half_
         r = r - (2 / c2) * (v2 @ r) * v2 if c2 > 1e-12 else r
         across.append(r / np.linalg.norm(r))
     across = np.array(across)
-    deep = np.cross(tangents, across)
-    angle = np.linspace(0, 2 * np.pi, sides, endpoint=False)
-    rings = (curve[:, None, :]
-             + (half_w[:, None] * np.cos(angle))[..., None] * across[:, None, :]
-             + (half_d[:, None] * np.sin(angle))[..., None] * deep[:, None, :])  # fmt: skip
-    vertices = np.vstack([rings.reshape(-1, 3), curve[0], curve[-1]])
-    n, triangles = len(curve), []
-    for i in range(n - 1):
-        for k in range(sides):
-            a, b = i * sides + k, i * sides + (k + 1) % sides
-            c, d = a + sides, b + sides
-            triangles += [(a, c, b), (b, c, d)]
-    first, last = n * sides, n * sides + 1
-    for k in range(sides):
-        triangles.append((first, k, (k + 1) % sides))
-        a, b = (n - 1) * sides + k, (n - 1) * sides + (k + 1) % sides
-        triangles.append((last, b, a))
-    return vertices, np.array(triangles, dtype=np.uint32)
+    if end_across is not None:
+        target = end_across - tangents[-1] * (end_across @ tangents[-1])
+        target /= np.linalg.norm(target)
+        if target @ across[-1] < 0:
+            target = -target
+        twist = float(np.arctan2(np.cross(across[-1], target) @ tangents[-1], across[-1] @ target))
+        length = arc_length(curve)
+        angle = twist * length / max(float(length[-1]), 1e-9)
+        across = (across * np.cos(angle)[:, None]
+                  + np.cross(tangents, across) * np.sin(angle)[:, None])  # fmt: skip
+    return tangents, across, np.cross(tangents, across)
 
 
 def rounded_ends(
@@ -297,134 +329,509 @@ def rounded_ends(
     return points, widths, depths
 
 
-def modelled_cartilage(
-    seg_dir: Path, kept_ribs: list[str]
-) -> tuple[np.ndarray, np.ndarray, list[tuple[str, str]]]:
-    """Costal cartilages modelled, not segmented, for ribs 1 to 10 in left-right
-    pairs, as flat bands (about CARTILAGE_FLAT times wider than deep). Each
-    leaves its rib along the rib's own end direction with the rib's own
-    cross-section (no step at the join), then takes the pair's mean section so
-    left and right match. Ribs 1 to 7 turn medially and rise into the sternum
-    (more for lower ribs), widening about 15% on the way, and end against
-    the sternum's edge on their own side, just inside it as a notch would
-    hold them. Ribs 8 to 10 run in under the cartilage above them and meet
-    its lower edge with their upper edge (ARCH_JOIN says where), which makes
-    the costal arch; bands touch and never pass through each other, so the
-    set has no faces crossing each other.
-    Returns RAS mm vertices and triangles, and each kept rib that gets no
-    cartilage with the reason; the manifest marks the node as modelled."""
+def arc_length(curve: np.ndarray) -> np.ndarray:
+    """The length along a polyline up to each of its points."""
+    return np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(curve, axis=0), axis=1))])
+
+
+def eased(share: np.ndarray) -> np.ndarray:
+    """A share clipped to 0..1 and eased in and out (smoothstep)."""
+    share = np.clip(share, 0, 1)
+    return share**2 * (3 - 2 * share)
+
+
+def turned(
+    tangents: np.ndarray, across: np.ndarray, target: np.ndarray, weight: np.ndarray
+) -> np.ndarray:
+    """Width directions turned about their tangents toward target directions,
+    by weight (0 to 1) of the angle between them. The target's opposite is
+    the same band, so the target is taken the way round that needs less
+    turning where the weight is greatest."""
+    flat = target - tangents * np.einsum("ij,ij->i", target, tangents)[:, None]
+    flat /= np.maximum(np.linalg.norm(flat, axis=1, keepdims=True), 1e-9)
+    if flat[np.argmax(weight)] @ across[np.argmax(weight)] < 0:
+        flat = -flat
+    angle = weight * np.arctan2(
+        np.einsum("ij,ij->i", np.cross(across, flat), tangents),
+        np.einsum("ij,ij->i", across, flat),
+    )
+    return across * np.cos(angle)[:, None] + np.cross(tangents, across) * np.sin(angle)[:, None]
+
+
+def arch_path(
+    tip: np.ndarray, start: np.ndarray, above: dict, join: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    """The centreline of a band of ribs 8 to 10, from its rib's end (tip,
+    where the rib runs along the unit direction start) to sample join of
+    the centreline of the band above (its "curve", "tangent" and "across"),
+    with the share (0 to 1) by which each of its samples lies beside that
+    band and that band's width direction there. The path is laid out in the
+    band above's frame: so far from its centreline along its width, and so
+    far out of its plane. The first closes smoothly to nothing at the join,
+    with no slope at either end, so the band keeps to its own side all the
+    way, bends where the band above bends, and runs into its centreline
+    along it. The second closes within ARCH_LEAVE_MM, so the two lie in one
+    plane before they overlap and neither lies over the other like a
+    shingle. Over that first stretch the path also blends out of the rib's
+    own line, so the band leaves its rib without a kink. Behind the band
+    above's first sample its line is carried on straight. None if the rib
+    ends less than ARCH_MIN_MM before the join."""
+    curve, tangent, across = above["curve"][: join + 1], above["tangent"], above["across"]
+    along = arc_length(curve)
+    nearest = int(np.argmin(np.linalg.norm(curve - tip, axis=1)))
+    behind = min(float((tip - curve[0]) @ tangent[0]), 0.0) if nearest == 0 else 0.0
+    first, way = along[nearest] + behind, along[-1] - along[nearest] - behind
+    if way < ARCH_MIN_MM:
+        return None
+    u = np.linspace(first, along[-1], int(np.ceil(1.5 * way / CARTILAGE_SAMPLE_MM)) + 1)
+
+    def there(values: np.ndarray) -> np.ndarray:
+        return np.stack([np.interp(u, along, values[: join + 1, d]) for d in range(3)], 1)
+
+    centre = there(curve) + np.minimum(u, 0.0)[:, None] * tangent[0]
+    # The band above's frame turns unevenly (not at all inside its rib, then
+    # at once), and a path held out from it on a long arm would kink with
+    # it: the directions it is held along are smoothed along the way.
+    faces, spread = there(across), ARCH_SMOOTH_MM / (u[1] - u[0])
+    wide = ndimage.gaussian_filter1d(faces, spread, axis=0, mode="nearest")
+    wide /= np.linalg.norm(wide, axis=1, keepdims=True)
+    out = np.cross(ndimage.gaussian_filter1d(there(tangent), spread, axis=0, mode="nearest"), wide)
+    out /= np.linalg.norm(out, axis=1, keepdims=True)
+    lying = eased((u - first) / min(ARCH_LEAVE_MM, way))
+    off = (tip - centre[0]) @ wide[0] * (1 - eased((u - first) / way))
+    lift = (tip - centre[0]) @ out[0] * (1 - lying)
+    beside = centre + off[:, None] * wide + lift[:, None] * out
+    own = tip + np.outer(u - first, start)
+    return own + lying[:, None] * (beside - own), lying, faces
+
+
+def densify(curve: np.ndarray, *profiles: np.ndarray, step: float = CARTILAGE_SAMPLE_MM) -> tuple:
+    """The curve, and each per-sample profile with it, resampled (linearly)
+    by arc length every step mm."""
+    length = arc_length(curve)
+    s = np.linspace(0.0, float(length[-1]), int(np.ceil(length[-1] / step)) + 1)
+    points = np.stack([np.interp(s, length, curve[:, d]) for d in range(3)], 1)
+    return points, *(np.interp(s, length, p) for p in profiles)
+
+
+def laid_out(band: dict) -> dict:
+    """A band ready to be measured against: both ends rounded (rounded_ends),
+    the centreline resampled every CARTILAGE_SAMPLE_MM ("curve") with its
+    half widths and depths ("halfW", "halfD") and its frames ("tangent",
+    "across": the band's own width directions where it has them, or
+    frames() from the directions it starts and ends with)."""
+    points, half_w, half_d = rounded_ends(band["curve"], band["halfW"], band["halfD"])
+    points, half_w, half_d = densify(points, half_w, half_d)
+    tangents, across, _ = frames(points, band["across0"], band.get("across1"))
+    if "across" in band:  # laid out by band_curves: its own width directions, by arc length
+        old, new = arc_length(band["curve"]), arc_length(points)
+        own = np.stack([np.interp(new, old, band["across"][:, d]) for d in range(3)], 1)
+        across = turned(tangents, across, own, np.ones(len(points)))
+    return {"curve": points, "halfW": half_w, "halfD": half_d, "tangent": tangents,
+            "across": across}  # fmt: skip
+
+
+def band_field(band: dict, points: np.ndarray, reach: float) -> np.ndarray:
+    """How deep inside a laid-out band (laid_out) each point lies, in mm:
+    positive inside, zero on the band's surface, negative outside, and -1e3
+    for a point over reach mm from the centreline. In the frame at the
+    nearest centreline point (interpolated between samples, so nothing
+    steps where the nearest sample changes along a twisting band) a point
+    lies u across and v deep, and the surface is where
+    (|u| / half_w)^n + (|v| / half_d)^n = 1 with n = CARTILAGE_SQUARE: a
+    flat-faced band with rounded edges. The depth is measured along the line
+    from the centreline through the point. Past the band's two tips a point
+    is outside."""
     from scipy.spatial import cKDTree
 
-    sternum_image = nib.load(seg_dir / "sternum.nii.gz")
-    sternum = np.argwhere(np.asanyarray(sternum_image.dataobj) > 0)
-    sternum = sternum @ sternum_image.affine[:3, :3].T + sternum_image.affine[:3, 3]
+    curve, tangents, across = band["curve"], band["tangent"], band["across"]
+    half_w, half_d = band["halfW"], band["halfD"]
+    depth = np.full(len(points), -1e3)
+    distance, k = cKDTree(curve).query(points, distance_upper_bound=reach)
+    hit = np.isfinite(distance)
+    k = k[hit]
+    offset = points[hit] - curve[k]
+    w = np.einsum("ij,ij->i", offset, tangents[k])
+    j = np.clip(k + np.where(w < 0, -1, 1), 0, len(curve) - 1)
+    step = np.linalg.norm(curve[j] - curve[k], axis=1)
+    t = np.clip(np.abs(w) / np.maximum(step, 1e-9), 0, 1)[:, None]
+    offset = offset - t * (curve[j] - curve[k])
+    wide = across[k] + t * (across[j] - across[k])
+    wide /= np.linalg.norm(wide, axis=1, keepdims=True)
+    thick = np.cross(tangents[k] + t * (tangents[j] - tangents[k]), wide)
+    thick /= np.linalg.norm(thick, axis=1, keepdims=True)
+    half_wide = half_w[k] + t[:, 0] * (half_w[j] - half_w[k])
+    half_thick = half_d[k] + t[:, 0] * (half_d[j] - half_d[k])
+    u = np.einsum("ij,ij->i", offset, wide)
+    v = np.einsum("ij,ij->i", offset, thick)
+    n = CARTILAGE_SQUARE
+    scale = (np.abs(u / half_wide) ** n + np.abs(v / half_thick) ** n) ** (1 / n)
+    out = np.hypot(u, v)  # the surface lies out / scale from the centreline on this line
+    inside = np.where(scale > 1e-6, out / np.maximum(scale, 1e-6) - out, half_thick)
+    past = j == k  # beyond either tip: outside by the distance along the curve
+    depth[hit] = np.where(past, np.minimum(inside, -np.abs(w)), inside)
+    return depth
+
+
+def rasterise_bands(
+    bands: list[dict], voxel_mm: float = CARTILAGE_VOXEL_MM
+) -> tuple[np.ndarray, np.ndarray]:
+    """The union of cartilage bands as a smooth field sampled every voxel_mm,
+    and the RAS mm position of its first sample. Each band has its
+    centreline ("curve", RAS mm, sampled finely enough to be smooth as a
+    polyline), half widths and depths per sample ("halfW", "halfD") and its
+    width direction at the start and, if it joins something, at the end
+    ("across0", "across1"). A band's field is how deep inside it a point
+    lies (laid_out, band_field). The union is a smooth maximum of the bands'
+    fields (UNION_BLEND_MM), so where bands meet they run into each other in
+    a fillet and a slit too narrow to show closes; it is cut off at
+    FIELD_REACH_MM either way. Its zero level is the bands' surface, with no
+    seam where one band joins another and no voxel steps."""
+    dense = [laid_out(band) for band in bands]
+    blend = UNION_BLEND_MM
+    margins = [float(max(d["halfW"].max(), d["halfD"].max())) + blend for d in dense]
+    lo = np.min([d["curve"].min(0) - m for d, m in zip(dense, margins, strict=True)], axis=0)
+    hi = np.max([d["curve"].max(0) + m for d, m in zip(dense, margins, strict=True)], axis=0)
+    lo -= 2 * voxel_mm  # the field ends outside every band, so its surface closes
+    shape = np.ceil((hi - lo) / voxel_mm).astype(int) + 3
+    field = np.full(shape, -1e3, dtype=np.float32)
+    for band, margin in zip(dense, margins, strict=True):
+        curve = band["curve"]
+        first = np.maximum(np.floor((curve.min(0) - margin - lo) / voxel_mm).astype(int), 0)
+        last = np.minimum(np.ceil((curve.max(0) + margin - lo) / voxel_mm).astype(int) + 1, shape)
+        ijk = np.indices(last - first).reshape(3, -1).T + first
+        own = band_field(band, ijk * voxel_mm + lo, margin).reshape(last - first)
+        part = field[first[0] : last[0], first[1] : last[1], first[2] : last[2]]
+        # A smooth maximum: where the two are within the blend of each other it
+        # lies above both, by as much as their surfaces face each other.
+        fillet = np.clip(blend - np.abs(own - part), 0, None) ** 2 / (4 * blend)
+        part[:] = np.maximum(own, part) + fillet * facing(own, part, 2 * blend)
+    return np.clip(field, -FIELD_REACH_MM, FIELD_REACH_MM), lo
+
+
+def facing(one: np.ndarray, other: np.ndarray, reach: float) -> np.ndarray:
+    """How much two fields' surfaces face each other at each sample, from 0
+    to 1: 0 where they slope the same way (two faces lying in one plane), 1
+    where they slope at right angles or against each other (a crease, or the
+    two sides of a slit), and 1 where either has no slope within reach of
+    its surface (far outside it, where it is cut off)."""
+    slopes = [np.stack(np.gradient(np.maximum(f, -reach).astype(np.float64))) for f in (one, other)]
+    sizes = [np.linalg.norm(s, axis=0) for s in slopes]
+    cosine = (slopes[0] * slopes[1]).sum(0) / np.maximum(sizes[0] * sizes[1], 1e-12)
+    return np.where(np.minimum(*sizes) > 1e-6, np.clip(1 - cosine, 0, 1), 1.0)
+
+
+def evened(
+    vertices: np.ndarray, triangles: np.ndarray, field: np.ndarray, origin: np.ndarray,
+    voxel_mm: float, rounds: int = EVEN_ROUNDS,
+) -> np.ndarray:  # fmt: skip
+    """The vertices of a surface contoured from a smooth field at its zero
+    level, moved so that its triangles are even and it lies on that level
+    again. A contour's vertices crowd wherever the surface passes a grid
+    point, which shows as a fine ripple in the shading, and smoothing them
+    shrinks a thin band. In each round every vertex goes half way to the
+    mean of its neighbours (a quarter voxel at most), along the surface only
+    (at right angles to the field's gradient), and is then put back on the
+    zero level of the field, interpolated by cubic splines: two Newton
+    steps, neither longer than half a voxel. Where the field has no clear
+    slope (under EVEN_SLOPE: the crotch where two bands part) a vertex stays
+    where it is, so nothing folds over there."""
+    from scipy.sparse import coo_matrix, diags
+
+    edges = np.unique(
+        np.sort(np.vstack([triangles[:, [0, 1]], triangles[:, [1, 2]], triangles[:, [2, 0]]]), 1),
+        axis=0,
+    ).astype(np.int64)
+    n = len(vertices)
+    pairs = (np.r_[edges[:, 0], edges[:, 1]], np.r_[edges[:, 1], edges[:, 0]])
+    ring = coo_matrix((np.ones(2 * len(edges)), pairs), shape=(n, n)).tocsr()
+    ring = diags(1.0 / np.maximum(np.asarray(ring.sum(1)).ravel(), 1)) @ ring
+    spline = ndimage.spline_filter(field.astype(np.float64), order=3)
+
+    def level(points: np.ndarray) -> np.ndarray:
+        at = ((points - origin) / voxel_mm).T
+        return ndimage.map_coordinates(spline, at, order=3, prefilter=False, mode="nearest")
+
+    def gradient(points: np.ndarray) -> np.ndarray:
+        h = voxel_mm / 4
+        return np.stack([(level(points + h * axis) - level(points - h * axis)) / (2 * h)
+                         for axis in np.eye(3)], 1)  # fmt: skip
+
+    points = vertices.astype(np.float64)
+    for _ in range(rounds):
+        slope = gradient(points)
+        steep = np.linalg.norm(slope, axis=1, keepdims=True)
+        normal = slope / np.maximum(steep, 1e-9)
+        shift = ring @ points - points
+        shift -= np.einsum("ij,ij->i", shift, normal)[:, None] * normal
+        length = np.linalg.norm(shift, axis=1, keepdims=True)
+        shift *= np.minimum(0.5, voxel_mm / 4 / np.maximum(length, 1e-12))
+        points = points + np.where(steep > EVEN_SLOPE, shift, 0.0)
+        for _ in range(2):
+            slope = gradient(points)
+            steep = np.linalg.norm(slope, axis=1, keepdims=True)
+            back = -level(points)[:, None] * slope / np.maximum(steep**2, 1e-6)
+            length = np.linalg.norm(back, axis=1, keepdims=True)
+            back *= np.minimum(1.0, voxel_mm / 2 / np.maximum(length, 1e-12))
+            points = points + np.where(steep > EVEN_SLOPE, back, 0.0)
+    return points
+
+
+def cartilage_surface(
+    bands: list[dict], voxel_mm: float = CARTILAGE_VOXEL_MM
+) -> tuple[np.ndarray, np.ndarray]:
+    """The closed surface of the union of cartilage bands, as RAS mm vertices
+    and triangles: the zero level of the bands' field (rasterise_bands) on a
+    voxel_mm grid, blurred a little (CARTILAGE_BLUR_MM), contoured and
+    smoothed as a segmented structure is, then evened out on the field's
+    zero level (evened). Bands that touch are one surface, and no faces
+    cross each other. It is not decimated: its triangles are all about
+    voxel_mm across, and thinning them out leaves slivers along the bands'
+    edges that a quality check takes for spikes."""
+    field, origin = rasterise_bands(bands, voxel_mm)
+    field = ndimage.gaussian_filter(field, CARTILAGE_BLUR_MM / voxel_mm)
+    image = vtk.vtkImageData()
+    image.SetDimensions(*field.shape)
+    image.SetSpacing(voxel_mm, voxel_mm, voxel_mm)
+    image.SetOrigin(*origin)
+    image.GetPointData().SetScalars(numpy_to_vtk(field.ravel(order="F"), deep=True))
+    poly = finished(image, 0.0, pieces=True)
+    vertices = vtk_to_numpy(poly.GetPoints().GetData()).astype(np.float64)
+    triangles = triangles_of(poly).astype(np.uint32)
+    return evened(vertices, triangles, field, origin, voxel_mm), triangles
+
+
+def rib_number(rib: str) -> int:
+    return int(rib.rsplit("_", 1)[1])
+
+
+def partner_of(rib: str) -> str:
+    return rib.replace("left", "right") if "left" in rib else rib.replace("right", "left")
+
+
+def sternum_floor(sternum: np.ndarray) -> float:
+    """The height (RAS z, mm) of the lower end of the sternum's body: the
+    lowest 3 mm level at which the sternum is still XIPHOID_SHARE of its
+    usual (median) width. What hangs below is the xiphoid process, which no
+    costal cartilage joins."""
+    levels = np.round(sternum[:, 2] / 3.0).astype(int)
+    widths = {level: float(np.ptp(sternum[levels == level, 0])) for level in np.unique(levels)}
+    usual = float(np.median(list(widths.values())))
+    return min(level for level, width in widths.items() if width >= XIPHOID_SHARE * usual) * 3.0
+
+
+def sternum_edge(sternum: np.ndarray, side: float, height: float) -> tuple[np.ndarray, float]:
+    """Where a cartilage meets the sternum at a height (RAS z, mm): the point
+    on the sternum's border on one side (side +1 is toward larger x, -1
+    toward smaller) halfway through the sternum's thickness there, and the x
+    of the sternum's middle at that height. From the sternum within 5 mm of
+    the height, or its nearest level if the height is beyond its ends."""
+    off = np.abs(sternum[:, 2] - height)
+    slab = sternum[off <= max(5.0, float(off.min()))]
+    centre = float(np.median(slab[:, 0]))
+    reach = (slab[:, 0] - centre) * side
+    border = slab[reach > reach.max() - 8.0]
+    return np.array([centre + side * reach.max(), border[:, 1].mean(), height]), centre
+
+
+def band_curves(
+    ends: dict[str, dict], sternum: np.ndarray
+) -> tuple[dict[str, dict], list[tuple[str, str]]]:
+    """Lays out the costal cartilage bands from the ribs' measured front ends
+    (rib_end_of, by rib label) and the sternum's RAS mm points. A band is a
+    finely sampled centreline ("curve"), half widths and depths per sample
+    ("halfW", "halfD"), its frame along the curve ("tangent", "across"), the
+    width directions it starts and ends with ("across0", "across1") and the
+    samples at its rib's end and at its target ("tipAt", "endAt").
+    The rules:
+    - Ribs 1 to 10 in left-right pairs only; ribs 11 and 12 float. A rib 1 to
+      7 whose end is over CARTILAGE_MAX_MM from the sternum, or touches it,
+      gets none.
+    - A band lies flat in the chest wall, its broad face outward
+      (wall_across; the wall is taken to face away from an axis
+      CHEST_AXIS_MM behind the sternum), and is CARTILAGE_FLAT times wider
+      than deep.
+    - It begins out of sight inside its rib (JOIN_OVERLAP_MM behind the end,
+      at INSIDE_SHARE of the rib's section) and leaves through the rib's end
+      in the rib's own line with the rib's own section, so there is no step
+      or kink at the join. Within the first third of the way it takes the
+      pair's mean width (at most CARTILAGE_HALF_W_MM), so left and right
+      match.
+    - Ribs 1 to 7 turn medially and rise into the sternum (more for lower
+      ribs), widening CARTILAGE_WIDEN on the way, and run into the sternum's
+      border on their own side at full width. A pair meets the sternum at
+      one height: the mean height of its two rib ends, but within the
+      sternum, never on the xiphoid (sternum_floor) and never lower than a
+      full band's width above the pair below.
+    - Ribs 8 to 10 run up to the band above and merge into it ARCH_JOIN of
+      the way along it, taking its line, width, depth and face direction
+      there: the two make one smooth costal arch margin with no seam. They
+      come in at an angle (a short end tangent, ARCH_REACH) rather than
+      alongside, so the slit between the two is short and open.
+    Returns the bands by rib and every rib that gets none, with the reason."""
+    from scipy.spatial import cKDTree
+
     tree = cKDTree(sternum)
     midline = float(np.median(sternum[:, 0]))
-    ends, skipped = {}, []
-    for rib in kept_ribs:
-        number = int(rib.rsplit("_", 1)[1])
+    axis_y = float(np.median(sternum[:, 1])) - CHEST_AXIS_MM
+
+    def outward(point: np.ndarray) -> np.ndarray:
+        out = np.array([point[0] - midline, point[1] - axis_y, 0.0])
+        return out / max(float(np.linalg.norm(out)), 1e-9)
+
+    usable, skipped = {}, []
+    for rib, end in ends.items():
+        number = rib_number(rib)
         if number > 10:
-            continue  # ribs 11 and 12 float: no cartilage reaches the arch
-        end = rib_end(seg_dir / f"{rib}.nii.gz")
-        if end is None:
-            skipped.append((rib, "its front end could not be measured"))
-        elif number <= 7 and tree.query(end["tip"])[0] > CARTILAGE_MAX_MM:
+            continue
+        if number <= 7 and tree.query(end["tip"])[0] > CARTILAGE_MAX_MM:
             skipped.append((rib, f"its end is over {CARTILAGE_MAX_MM} mm from the sternum"))
         elif number <= 7 and tree.query(end["tip"])[0] < 1.0:
             skipped.append((rib, "its end already touches the sternum"))
         else:
-            ends[rib] = end
-
-    def partner_of(r: str) -> str:
-        return r.replace("left", "right") if "left" in r else r.replace("right", "left")
-
-    paired = [r for r in ends if partner_of(r) in ends]
-    skipped += [(r, "its pair has no cartilage") for r in ends if r not in paired]
-    bands: dict[str, dict] = {}  # curve, half widths and depths per rib, for the arch
-    vertices, triangles = [], []
-    for rib in sorted(paired, key=lambda r: (int(r.rsplit("_", 1)[1]), r)):
-        e, partner = ends[rib], ends[partner_of(rib)]
-        number = int(rib.rsplit("_", 1)[1])
-        side = np.sign(e["tip"][0] - midline)
-        p0 = e["tip"] - e["direction"] * JOIN_OVERLAP_MM  # start well inside the rib's end
-        # The rib's measured end direction can dip where the segmentation
-        # rounds the tip off; a cartilage never leaves its rib steeply downward.
-        start = e["direction"].copy()
-        if start[2] < -START_DIP:
-            start[2] = -START_DIP
-            start /= np.linalg.norm(start)
-        w_pair = min((e["halfWidth"] + partner["halfWidth"]) / 2, CARTILAGE_HALF_W_MM)
+            usable[rib] = end
+    paired = [r for r in usable if partner_of(r) in usable]
+    skipped += [(r, "its pair has no cartilage") for r in usable if r not in paired]
+    starts, sides = {}, {}  # per rib: its width direction and section there; its side of the body
+    for rib in paired:
+        e = usable[rib]
+        across = wall_across(e["direction"], outward(e["tip"]))
+        w, d = extents(e["section"], across, np.cross(e["direction"], across))
+        starts[rib] = (across, w, d)
+        sides[rib] = 1.0 if e["tip"][0] >= usable[partner_of(rib)]["tip"][0] else -1.0
+    widths = {
+        rib: min((starts[rib][1] + starts[partner_of(rib)][1]) / 2, CARTILAGE_HALF_W_MM)
+        for rib in paired
+    }
+    # The height at which each pair of ribs 1 to 7 meets the sternum, from the lowest pair up.
+    heights: dict[int, float] = {}
+    lowest, top = sternum_floor(sternum), float(sternum[:, 2].max())
+    for number in sorted({rib_number(r) for r in paired if rib_number(r) <= 7}, reverse=True):
+        pair = [r for r in paired if rib_number(r) == number]
+        reach = (1 + CARTILAGE_WIDEN) * widths[pair[0]]
+        level = float(np.mean([usable[r]["tip"][2] for r in pair]))
+        heights[number] = max(min(level, top - reach), lowest + (reach if heights else 0.0))
+        lowest = heights[number] + reach
+    bands: dict[str, dict] = {}
+    for rib in sorted(paired, key=lambda r: (rib_number(r), r)):
+        e, number = usable[rib], rib_number(rib)
+        tip, start = e["tip"], e["direction"]
+        across0, w0, d0 = starts[rib]
+        w_pair, side = widths[rib], sides[rib]
         if number <= 7:
-            # Aim at the sternum's border on the rib's own side, so the lowest
-            # pairs meet it side by side instead of crossing at the xiphoid.
-            own = sternum[(sternum[:, 0] - midline) * side >= 0]
-            p1 = own[cKDTree(own).query(e["tip"])[1]]
+            edge, centre = sternum_edge(sternum, side, heights[number])
             # Lower cartilages rise more steeply into the sternum, but never
             # much more than the line from rib to sternum does, or the band
             # would dip first and hook up at the end.
-            chord = p1 - p0
+            chord = edge - tip
             chord_rise = chord[2] / max(np.hypot(chord[0], chord[1]), 1e-6)
             rise = min(0.15 + 0.2 * (number - 2), max(chord_rise, 0.0) + 0.3)
             t1 = np.array([-side, 0.0, rise])
             t1 /= np.linalg.norm(t1)
-            p1 = p1 + t1 * 2.0  # end just inside the sternum, as a notch would hold it
-            # But no further in than the sternum's midline at that height less the
-            # band's own half-width, so a left and a right end never overlap.
-            level = np.abs(sternum[:, 2] - p1[2]) < 10
-            centre = float(np.median(sternum[level, 0])) if level.any() else midline
-            if (p1[0] - centre) * side < w_pair * 1.15:
-                p1[0] = centre + side * w_pair * 1.15
-            end_w, end_d, widen = w_pair * 1.15, w_pair * 1.15 / CARTILAGE_FLAT, 0.15
+            end_w = w_pair * (1 + CARTILAGE_WIDEN)
+            end_d = max(end_w / CARTILAGE_FLAT, MIN_HALF_DEPTH_MM * (1 + CARTILAGE_WIDEN))
+            # Into the sternum's border at full width; the rounded end lies
+            # inside the sternum, short of its middle.
+            p1 = edge - np.array([side * NOTCH_MM, 0.0, 0.0])
+            room = ((p1[0] - centre) * side - 1.0) / abs(t1[0])
+            run_out = float(np.clip(room, 0.0, end_w))
+            across1 = wall_across(t1, outward(p1))
+            span = float(np.linalg.norm(p1 - tip))
+            if span < 1.0:
+                skipped.append((rib, "its end lies on its target"))
+                continue
+            s = np.linspace(0, 1, max(int(np.ceil(1.5 * span / CARTILAGE_SAMPLE_MM)), 8))[:, None]
+            h00, h10 = 2 * s**3 - 3 * s**2 + 1, s**3 - 2 * s**2 + s
+            h01, h11 = -2 * s**3 + 3 * s**2, s**3 - s**2
+            # Longer tangents overshoot into a hook on short spans.
+            bend = (h00 * tip + h10 * start * TANGENT_SHARE * span
+                    + h01 * p1 + h11 * t1 * TANGENT_SHARE * span)  # fmt: skip
         else:
             above = bands.get(rib.replace(f"_{number}", f"_{number - 1}"))
             if above is None:
                 skipped.append((rib, "no cartilage above it to join"))
                 continue
-            k = int(round(ARCH_JOIN[number] * (len(above["curve"]) - 1)))
-            t1 = above["curve"][min(k + 1, len(above["curve"]) - 1)] - above["curve"][k - 1]
-            t1 /= np.linalg.norm(t1)
-            # Run in under the band above and meet its lower edge with this
-            # band's upper edge, so the two touch along their length without
-            # passing through each other.
-            down = np.array([0.0, 0.0, -1.0]) - t1 * (-t1[2])
-            down /= np.linalg.norm(down)
-            end_w, end_d, widen = above["halfW"][k] * 0.7, above["halfD"][k], 0.1
-            p1 = above["curve"][k] + down * (above["halfW"][k] + end_w)
-        span = np.linalg.norm(p1 - p0)
-        if span < 1.0 or abs(float(start @ (p1 - p0))) < 1e-6 * span:
-            skipped.append((rib, "its end lies on its target"))
-            continue
-        s = np.linspace(0, 1, 32)[:, None]
-        h00, h10 = 2 * s**3 - 3 * s**2 + 1, s**3 - 2 * s**2 + s
-        h01, h11 = -2 * s**3 + 3 * s**2, s**3 - s**2
-        # Longer tangents overshoot into a hook on short spans; a band joining
-        # the one above runs along it, so its tangents are longer.
-        reach = (TANGENT_SHARE if number <= 7 else 1.0) * span
-        curve = h00 * p0 + h10 * start * reach + h01 * p1 + h11 * t1 * reach
-        f = s[:, 0]
+            # Merge into the band above: beside it, in its plane, and onto
+            # its centreline with its section and its face, so the lower
+            # edges of the two flow into one arch margin.
+            shown = arc_length(above["curve"][above["tipAt"] : above["endAt"] + 1])
+            k = above["tipAt"] + int(np.searchsorted(shown, ARCH_JOIN[number] * shown[-1]))
+            path = arch_path(tip, start, above, k)
+            if path is None:
+                skipped.append((rib, "its end lies on its target"))
+                continue
+            bend, lying, faces = path
+            end_w, end_d = above["halfW"][k], above["halfD"][k]
+            # Then on inside the band above, thinning out, so it ends nowhere on the surface.
+            run = shown[k - above["tipAt"]] + ARCH_RUN_MM
+            # But not up to the band above's own end, where the other side's band ends too.
+            run = min(run, shown[-1] - 2 * CARTILAGE_HALF_W_MM)
+            last = max(above["tipAt"] + int(np.searchsorted(shown, run)), k)
+            run_in = slice(k + 1, last + 1)
+        # Out of sight inside the rib, in the rib's own line, up to its end.
+        lead = JOIN_OVERLAP_MM + INSIDE_SHARE * w0
+        count = int(np.ceil(lead / CARTILAGE_SAMPLE_MM))
+        inside = tip - np.outer(np.linspace(lead, 0, count, endpoint=False), start)
+        shrink = np.linspace(INSIDE_SHARE, 1, count, endpoint=False)
+        f = arc_length(bend) / arc_length(bend)[-1]
         blend = np.clip(f / 0.35, 0, 1)  # from the rib's own section to the pair's within a third
-        w_mid, d_mid = w_pair, w_pair / CARTILAGE_FLAT
-        half_w = (1 - blend) * e["halfWidth"] + blend * w_mid
-        half_d = (1 - blend) * e["halfDepth"] + blend * d_mid
-        half_w = half_w * (1 - f**2) + f**2 * end_w * (1 + widen - 0.15)
-        half_d = half_d * (1 - f**2) + f**2 * end_d
-        bands[rib] = {"curve": curve, "halfW": half_w, "halfD": half_d}
-        # Round both ends over the band's full width (a half disc seen from
-        # the front, a pill seen edge on), the far tip on the target point and
-        # the near one inside the rib, so no end is a flat cut face wherever
-        # it shows.
-        curve, half_w, half_d = rounded_ends(curve, half_w, half_d)
-        # The band's section starts as the rib end's own, in the rib's own
-        # flat direction (pointing up, so left and right match), and the
-        # rotation-minimising frame carries it on; a rib's anterior end is
-        # already flattened with its broad face forward.
-        across = e["across"] if e["across"][2] >= 0 else -e["across"]
-        v, t = sweep(curve, across, half_w, half_d)
-        triangles.append(t + sum(len(x) for x in vertices))
-        vertices.append(v)
-    if not vertices:
+        half_w = (1 - blend) * w0 + blend * w_pair
+        half_d = (1 - blend) * d0 + blend * max(w_pair / CARTILAGE_FLAT, MIN_HALF_DEPTH_MM)
+        if number <= 7:
+            half_w, half_d = half_w * (1 + CARTILAGE_WIDEN * f), half_d * (1 + CARTILAGE_WIDEN * f)
+            steps = int(np.ceil(run_out / CARTILAGE_SAMPLE_MM))
+            beyond = p1 + np.outer(np.linspace(0, run_out, steps + 1)[1:], t1)
+            beyond_w, beyond_d = np.full(steps, end_w), np.full(steps, end_d)
+        else:
+            half_w = half_w * (1 - f**2) + f**2 * end_w
+            half_d = half_d * (1 - f**2) + f**2 * end_d
+            beyond = above["curve"][run_in]
+            thin = 1 - (1 - ARCH_THIN) * eased(np.linspace(0, 1, len(beyond) + 1)[1:])
+            beyond_w, beyond_d = above["halfW"][run_in] * thin, above["halfD"][run_in] * thin
+        curve = np.vstack([inside, bend, beyond])
+        half_w = np.concatenate([shrink * w0, half_w, beyond_w])
+        half_d = np.concatenate([shrink * d0, half_d, beyond_d])
+        tangent, across, _ = frames(curve, across0, across1 if number <= 7 else None)
+        if number > 7:  # its face turns to the band above's as it comes to lie beside it
+            faces = np.vstack([np.tile(across0, (count, 1)), faces, above["across"][run_in]])
+            lying = np.concatenate([np.zeros(count), lying, np.ones(len(beyond))])
+            across = turned(tangent, across, faces, lying)
+            across1 = across[-1]
+        bands[rib] = {"curve": curve, "halfW": half_w, "halfD": half_d, "tangent": tangent,
+                      "across": across, "across0": across0, "across1": across1,
+                      "tipAt": count, "endAt": count + len(bend) - 1}  # fmt: skip
+    return bands, skipped
+
+
+def modelled_cartilage(
+    sternum_path: Path, ribs: dict[str, tuple[np.ndarray, np.ndarray]]
+) -> tuple[np.ndarray, np.ndarray, list[tuple[str, str]]]:
+    """Costal cartilages modelled, not segmented, for ribs 1 to 10: the bands
+    band_curves() lays out from the sternum's mask and the front ends of the
+    ribs' meshed surfaces (RAS mm vertices and triangles by rib label),
+    surfaced together (cartilage_surface). Bands that meet are one smooth
+    closed surface, so ribs 7 to 10 of a side make one costal arch with no
+    seam, step or join, and no faces cross each other anywhere in the set.
+    Returns RAS mm vertices and triangles, and each rib that gets no
+    cartilage with the reason; the manifest marks the node as modelled."""
+    sternum_image = nib.load(sternum_path)
+    sternum = np.argwhere(np.asanyarray(sternum_image.dataobj) > 0)
+    sternum = sternum @ sternum_image.affine[:3, :3].T + sternum_image.affine[:3, 3]
+    ends, skipped = {}, []
+    for rib, (vertices, triangles) in ribs.items():
+        if rib_number(rib) > 10:
+            continue  # ribs 11 and 12 float: no cartilage reaches the arch
+        end = rib_end_of(vertices, triangles)
+        if end is None:
+            skipped.append((rib, "its front end could not be measured"))
+        else:
+            ends[rib] = end
+    bands, unplaced = band_curves(ends, sternum)
+    skipped += unplaced
+    if not bands:
         return np.zeros((0, 3)), np.zeros((0, 3), dtype=np.uint32), skipped
-    return np.vstack(vertices), np.vstack(triangles).astype(np.uint32), skipped
+    ras, triangles = cartilage_surface(list(bands.values()))
+    return ras, triangles, skipped
 
 
 def scan_outside(ct_path: Path) -> tuple[np.ndarray, np.ndarray]:
@@ -433,8 +840,13 @@ def scan_outside(ct_path: Path) -> tuple[np.ndarray, np.ndarray]:
     from a tilted gantry, empty end slices). Voxels at or below PADDING_HU
     (never tissue; air is about -1000 HU with noise) in regions that survive a
     small opening and join the volume's border, grown back through the fill
-    so the thin end of a gantry wedge stays outside too. Returns the mask and
-    the CT's affine, so masks can be checked against the same grid."""
+    so the thin end of a gantry wedge stays outside too, then PADDING_BLEND
+    voxels further out: a scan resampled onto its grid blends the fill into
+    its last scanned slice over that distance (the blended voxels sit well
+    above PADDING_HU and measure nothing), so a bone ending against the
+    blend was cut by the scan's end just as one against the fill was.
+    Returns the mask and the CT's affine, so masks can be checked against
+    the same grid."""
     image = nib.load(ct_path)
     fill = np.asanyarray(image.dataobj) <= PADDING_HU
     pad = ndimage.binary_opening(fill, structure=np.ones((3, 3, 3)))
@@ -444,7 +856,8 @@ def scan_outside(ct_path: Path) -> tuple[np.ndarray, np.ndarray]:
         labels[:, :, 0].ravel(), labels[:, :, -1].ravel(),
     ])  # fmt: skip
     kept = np.isin(labels, np.setdiff1d(np.unique(border), [0]))
-    return ndimage.binary_propagation(kept, mask=fill), image.affine
+    outside = ndimage.binary_propagation(kept, mask=fill)
+    return ndimage.binary_dilation(outside, iterations=PADDING_BLEND), image.affine
 
 
 def cut_reason(path: Path, outside: tuple[np.ndarray, np.ndarray] | None = None) -> str | None:
@@ -453,8 +866,9 @@ def cut_reason(path: Path, outside: tuple[np.ndarray, np.ndarray] | None = None)
     Smaller than MIN_ML (measured with the voxel size from the affine, so the
     limit is the same at 0.8 mm and 1.5 mm), touching any face of the volume
     (the first or last slice, or the in-plane border), or touching the part of
-    the volume that was never scanned (outside, from scan_outside): the scan
-    cut it. A mask on another grid than the CT's raises ValueError.
+    the volume that was never scanned (outside, from scan_outside, blend
+    included): the scan cut it. A mask on another grid than the CT's raises
+    ValueError.
     """
     if not path.exists():
         return "not segmented"
@@ -483,29 +897,42 @@ def cut_faces(path: Path, outside: tuple[np.ndarray, np.ndarray] | None = None) 
     """The sides of the body where the scan cuts a mask: "S" or "I" (its top
     or bottom slice), "L", "R", "A" or "P" (the in-plane border), named by the
     direction each face of the volume points in RAS. Where the mask meets
-    unscanned padding (outside), the side is the direction from the mask's
-    centre to where it meets it."""
+    unscanned padding (outside), each separate patch of contact names the
+    side the padding lies on there: the direction in which most of the patch
+    is one step on from the scanned part of the mask. A clavicle the scan
+    ends through is cut at "S", however it lies, and a bone cut at both ends
+    names both."""
     image = nib.load(path)
     data = np.asanyarray(image.dataobj) > 0
     faces = set()
+    sides = []  # (axis, step, side) for the six directions of the grid
     for axis in range(3):
-        k = np.flatnonzero(data.any(tuple(a for a in range(3) if a != axis)))
-        if len(k) == 0:
-            continue
         column = image.affine[:3, axis]
         ras = int(np.argmax(np.abs(column)))
         up, down = "RAS"[ras], "LPI"[ras]  # the RAS axis's positive and negative ends
         high, low = (up, down) if column[ras] > 0 else (down, up)
+        sides += [(axis, 1, high), (axis, -1, low)]
+        k = np.flatnonzero(data.any(tuple(a for a in range(3) if a != axis)))
+        if len(k) == 0:
+            continue
         if k[0] == 0:
             faces.add(low)
         if k[-1] == data.shape[axis] - 1:
             faces.add(high)
     if outside is not None:
-        contact = np.argwhere(ndimage.binary_dilation(data) & on_grid(image, outside))
-        if len(contact):
-            towards = image.affine[:3, :3] @ (contact.mean(0) - np.argwhere(data).mean(0))
-            ras = int(np.argmax(np.abs(towards)))
-            faces.add("RAS"[ras] if towards[ras] > 0 else "LPI"[ras])
+        pad = on_grid(image, outside)
+        met = ndimage.binary_dilation(data) & pad
+        scanned = data & ~pad
+        patches, count = ndimage.label(met, structure=np.ones((3, 3, 3)))
+        contact, patch = np.argwhere(met), patches[met]
+        reached = np.zeros((count + 1, len(sides)), dtype=np.int64)
+        for k, (axis, step, _) in enumerate(sides):
+            source = contact.copy()
+            source[:, axis] -= step  # the voxel this one is a step on from
+            inside = (source[:, axis] >= 0) & (source[:, axis] < data.shape[axis])
+            inside[inside] = scanned[tuple(source[inside].T)]
+            reached[:, k] = np.bincount(patch[inside], minlength=count + 1)
+        faces |= {sides[int(np.argmax(row))][2] for row in reached[1:] if row.any()}
     return faces
 
 
@@ -562,7 +989,12 @@ def bone_kind(label: str) -> str:
     return label.split("_")[0]  # vertebrae, rib, clavicula, scapula, ...
 
 
-def settle_fragments(seg_dir: Path, labels: list[str]) -> tuple[dict[str, np.ndarray], list[dict]]:
+def settle_fragments(
+    seg_dir: Path,
+    labels: list[str],
+    left_out: list[str] | None = None,
+    given: dict[str, np.ndarray] | None = None,
+) -> tuple[dict[str, np.ndarray], list[dict]]:
     """Sorts out the detached pieces of the bones in labels before meshing.
 
     A piece of a bone's mask that is not its largest is, in order: left for
@@ -572,15 +1004,25 @@ def settle_fragments(seg_dir: Path, labels: list[str]) -> tuple[dict[str, np.nda
     segmentation gave that neighbour's voxels the wrong label; dropped when
     it is under FRAGMENT_SHARE (a chip off a process, calcified cartilage at
     a rib's end); otherwise left, and the split bone stops the build.
-    Returns the corrected masks and a note per piece moved or dropped.
+    Pieces are taken largest first, until what is still loose is within
+    MAX_DROPPED_SHARE of the bone, the noise the manifest records: several
+    chips, each under that limit, can be over it together.
+    The neighbour may be a bone in left_out, one the scan cut and the body
+    leaves out: its mislabelled piece leaves with it, and the note says so
+    ("exported": False). A mask in given (from whole_but_for_lumps) stands
+    in for the one on disk. Returns the corrected masks of the bones in
+    labels and a note per piece moved or dropped.
     """
     masks, affines = {}, {}
-    for label in labels:
+    left_out = [lab for lab in left_out or [] if lab not in labels]
+    for label in labels + left_out:
         path = seg_dir / f"{label}.nii.gz"
         if path.exists():
             image = nib.load(path)
             masks[label] = np.asanyarray(image.dataobj) > 0
             affines[label] = image.affine
+            if label in (given or {}):
+                masks[label] = given[label].copy()
     notes = []
     for label in [lab for lab in labels if lab in masks]:
         pieces, count = ndimage.label(masks[label], structure=np.ones((3, 3, 3)))
@@ -591,15 +1033,17 @@ def settle_fragments(seg_dir: Path, labels: list[str]) -> tuple[dict[str, np.nda
         spacing = np.linalg.norm(affines[label][:3, :3], axis=0)
         voxel_ml = float(np.prod(spacing)) / 1000
         main = int(np.argmax(sizes)) + 1
+        loose = 1 - sizes[main - 1] / total  # the share outside the largest piece
         for piece in sorted(set(range(1, count + 1)) - {main}, key=lambda k: -sizes[k - 1]):
             share = sizes[piece - 1] / total
-            if share <= MAX_DROPPED_SHARE:
-                continue  # noise at the limit the manifest already records
+            if loose <= MAX_DROPPED_SHARE:
+                break  # noise at the limit the manifest already records
             part = pieces == piece
             if (
                 bone_kind(label) in BRIDGEABLE
                 and bridge_gap(masks[label] & ((pieces == main) | part), spacing)[1] is not None
             ):
+                loose -= share
                 continue  # one bone with a gap: bridged when it is meshed
             grown = ndimage.binary_dilation(part)
             contact = {
@@ -617,11 +1061,109 @@ def settle_fragments(seg_dir: Path, labels: list[str]) -> tuple[dict[str, np.nda
             if neighbour and contact[neighbour] >= NEIGHBOUR_CONTACT and share <= REASSIGN_SHARE:
                 masks[neighbour] |= part
                 masks[label] &= ~part
-                notes.append({**note, "action": "moved", "to": neighbour})
+                gone = {"exported": False} if neighbour in left_out else {}
+                notes.append({**note, "action": "moved", "to": neighbour, **gone})
+                loose -= share
             elif share < FRAGMENT_SHARE:
                 masks[label] &= ~part
                 notes.append({**note, "action": "dropped"})
-    return masks, notes
+                loose -= share
+    return {label: masks[label] for label in labels if label in masks}, notes
+
+
+def whole_but_for_lumps(
+    seg_dir: Path,
+    reasons: dict[str, str | None],
+    outside: tuple[np.ndarray, np.ndarray] | None = None,
+) -> tuple[dict[str, np.ndarray], list[dict]]:
+    """The bones the scan seems to cut only because their masks carry a lump
+    of a cut neighbour.
+
+    Where a scan ends through the spine, the segmentation may give part of
+    the vertebra above the label of the one below, joined to it by a thin
+    neck: the lump meets the scan's end, the bone itself ends well short of
+    it. For each bone in reasons that the scan cut, an opening (one voxel,
+    6-connected) takes the necks away and the largest piece, grown back, is
+    the bone. A piece left over is a neighbour's lump when it keeps a core of
+    its own through the opening, meets the scan's end and lies on a cut bone
+    of the same kind (NEIGHBOUR_CONTACT). When the lumps are within
+    REASSIGN_SHARE of the mask and the rest is clear of the scan's end, the
+    bone is whole and the lumps leave with the neighbour. A thin tip the scan
+    ends through has no core: it is the bone's own, and the bone stays cut;
+    so does a bone that is given such a lump. Returns the masks of the bones
+    found whole, and a note per lump ("neck": True, "exported": False).
+    """
+    six = ndimage.generate_binary_structure(3, 1)
+    images = {
+        label: nib.load(seg_dir / f"{label}.nii.gz")
+        for label, reason in reasons.items()
+        if (reason or "").startswith("cut by") and (seg_dir / f"{label}.nii.gz").exists()
+    }
+    masks = {label: np.asanyarray(image.dataobj) > 0 for label, image in images.items()}
+    whole, notes = {}, {}
+    for label, mask in masks.items():
+        others = [o for o in masks if o != label and bone_kind(o) == bone_kind(label)]
+        if not others:
+            continue
+        box = tuple(
+            slice(max(s.start - 2, 0), s.stop + 2)
+            for s in ndimage.find_objects(mask.astype(np.uint8))[0]
+        )  # the mask with two voxels round it, so the opening has room
+        bone = mask[box]
+        pad = np.zeros(bone.shape, bool)
+        if outside is not None:
+            pad = on_grid(images[label], outside)[box]
+        face = np.zeros(bone.shape, bool)  # the volume's own faces, where the box reaches them
+        for axis, s in enumerate(box):
+            if s.start == 0:
+                face[(slice(None),) * axis + (0,)] = True
+            if s.stop >= mask.shape[axis]:
+                face[(slice(None),) * axis + (-1,)] = True
+
+        def meets_end(part: np.ndarray, pad: np.ndarray = pad, face: np.ndarray = face) -> bool:
+            return bool((part & face).any() or (ndimage.binary_dilation(part) & pad).any())
+
+        opened = ndimage.binary_opening(bone, structure=six)
+        cores, count = ndimage.label(opened, structure=np.ones((3, 3, 3)))
+        if count < 2:
+            continue
+        main = cores == int(np.argmax(np.bincount(cores.ravel())[1:])) + 1
+        body = ndimage.binary_dilation(main, structure=six) & bone
+        rest, pieces = ndimage.label(bone & ~body, structure=np.ones((3, 3, 3)))
+        kept, lumps = bone.copy(), []
+        for piece in range(1, pieces + 1):
+            part = rest == piece
+            if not (part & opened).any() or not meets_end(part):
+                continue  # a thin tip, or a part the scan's end does not reach: the bone's own
+            grown = ndimage.binary_dilation(part)
+            contact = {o: int((grown & masks[o][box]).sum()) for o in others}
+            neighbour = max(contact, key=contact.get)
+            if contact[neighbour] >= NEIGHBOUR_CONTACT:
+                kept &= ~part
+                lumps.append((int(part.sum()), neighbour))
+        total = int(bone.sum())
+        if not lumps or sum(v for v, _ in lumps) > REASSIGN_SHARE * total or meets_end(kept):
+            continue
+        whole[label] = np.zeros_like(mask)
+        whole[label][box] = kept
+        voxel_ml = abs(float(np.linalg.det(images[label].affine[:3, :3]))) / 1000
+        notes[label] = [
+            {
+                "label": label,
+                "voxels": voxels,
+                "ml": round(voxels * voxel_ml, 2),
+                "share": round(voxels / total, 4),
+                "action": "moved",
+                "to": neighbour,
+                "neck": True,
+                "exported": False,
+            }
+            for voxels, neighbour in lumps
+        ]
+    while given := {note["to"] for label in whole for note in notes[label]} & set(whole):
+        for label in given:  # it takes a lump that meets the scan's end: cut after all
+            del whole[label]
+    return whole, [note for label in whole for note in notes[label]]
 
 
 def trim_knobs(mask: np.ndarray, voxel_ml: float) -> tuple[np.ndarray, float]:
@@ -1162,16 +1704,29 @@ def main() -> None:
     reasons = {label: cut_reason(seg_dir / f"{label}.nii.gz", outside) for label in labels}
     settled, fragments = {}, []
     if args.set in RULED_SETS:
+        # A bone that meets the scan's end only with a cut neighbour's lump is whole.
+        unmixed, lumps = whole_but_for_lumps(seg_dir, reasons, outside)
+        reasons.update(dict.fromkeys(unmixed))
         reasons = reference_rules(reasons)
         bones = [
             s.label
             for s in SETS[args.set]
             if s.system == "skeletal" and s.label not in SETS_OF_PIECES and not reasons[s.label]
         ]  # a set of pieces (the segmented cartilage) is many pieces by nature
-        settled, fragments = settle_fragments(seg_dir, bones)
+        # A bone the scan cut is left out, and takes its mislabelled pieces along.
+        cut = [
+            s.label
+            for s in SETS[args.set]
+            if s.system == "skeletal" and s.label not in SETS_OF_PIECES
+            and (reasons[s.label] or "").startswith(("cut by", "shoulder girdle", "its pair"))
+        ]  # fmt: skip
+        settled, fragments = settle_fragments(seg_dir, bones, cut, unmixed)
+        fragments = lumps + fragments
         for note in fragments:
             print(f"{note['label']}: {note['ml']} ml {note['action']}"
-                  + (f" to {note['to']}" if note.get("to") else ""), file=sys.stderr)  # fmt: skip
+                  + (f" to {note['to']}" if note.get("to") else "")
+                  + (" (left out)" if note.get("exported") is False else ""),
+                  file=sys.stderr)  # fmt: skip
     for s in SETS[args.set]:
         bone = s.system == "skeletal"
         cap = args.max_bone_triangles if bone else args.max_triangles
@@ -1180,8 +1735,14 @@ def main() -> None:
             # The segmented cartilage is too lumpy and broken to show, and it
             # may be cut where the ribs are not; the body carries modelled
             # cartilages instead, so its own cut status does not matter.
-            kept_ribs = [r for r in labels if r.startswith("rib_") and not reasons[r]]
-            ras, triangles, skipped = modelled_cartilage(seg_dir, kept_ribs)
+            # They start from the ribs as meshed above: the ends the body shows.
+            to_ras = np.linalg.inv(RAS_TO_GLTF).T
+            ribs = {
+                p["structure"].label: (p["vertices"] @ to_ras, p["triangles"])
+                for p in parts
+                if p["structure"].label.startswith("rib_")
+            }
+            ras, triangles, skipped = modelled_cartilage(seg_dir / "sternum.nii.gz", ribs)
             dropped += [
                 {"label": f"costal_cartilages:{rib}", "reason": why} for rib, why in skipped
             ]
@@ -1197,11 +1758,15 @@ def main() -> None:
         if reason and not bone:
             sys.exit(f"{s.label}: {reason} in {args.case}; organs must be whole")
         if reason:
-            # Never exported, never capped. The femurs and humeri are still
-            # meshed into the landmarks file for their joint centres.
+            # Never exported, never capped; the manifest says which side of
+            # the body the scan cut it at (S for a shoulder the scan ends
+            # through). The femurs and humeri are still meshed into the
+            # landmarks file for their joint centres.
             dropped.append({"label": s.label, "reason": reason})
+            faces = cut_faces(path, outside) if reason.startswith("cut by") else set()
+            if faces:
+                dropped[-1]["cut_at"] = "".join(sorted(faces))
             if s.label in LANDMARK_BONES and not reason.startswith(("absent", "not segmented")):
-                faces = cut_faces(path, outside) if reason.startswith("cut by") else set()
                 if landmark_ok(s.label, reason, faces):
                     landmarks.append(s)
                 else:
