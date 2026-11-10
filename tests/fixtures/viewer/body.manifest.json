@@ -1,0 +1,124 @@
+{
+  "case": "synthetic",
+  "set": "viewer-fixture",
+  "file": "body.glb",
+  "sha256": "e1f42c0872ab3234db0b3f2a07a4e3bf5a7ab6486e0f624e48252da7ee277c9e",
+  "attribution": "Synthetic shapes written by viewer/test/make-fixture.mjs. No scan data.",
+  "units": "metres",
+  "axes": "+Y superior, +Z anterior, +X the body's left",
+  "nodes": [
+    {
+      "name": "FMA_7485",
+      "term": "FMA:7485",
+      "label": "sternum",
+      "system": "skeletal",
+      "licence": "CC-BY-4.0",
+      "triangles": 384,
+      "volume_ml": null,
+      "modelled": false,
+      "pieces": "one"
+    },
+    {
+      "name": "FMA_9165",
+      "term": "FMA:9165",
+      "label": "first thoracic vertebra",
+      "system": "skeletal",
+      "licence": "CC-BY-4.0",
+      "triangles": 416,
+      "volume_ml": null,
+      "modelled": false,
+      "pieces": "one"
+    },
+    {
+      "name": "FMA_9187",
+      "term": "FMA:9187",
+      "label": "second thoracic vertebra",
+      "system": "skeletal",
+      "licence": "CC-BY-4.0",
+      "triangles": 416,
+      "volume_ml": null,
+      "modelled": false,
+      "pieces": "one"
+    },
+    {
+      "name": "FMA_9209",
+      "term": "FMA:9209",
+      "label": "third thoracic vertebra",
+      "system": "skeletal",
+      "licence": "CC-BY-4.0",
+      "triangles": 416,
+      "volume_ml": null,
+      "modelled": false,
+      "pieces": "one"
+    },
+    {
+      "name": "FMA_7987",
+      "term": "FMA:7987",
+      "label": "left first rib",
+      "system": "skeletal",
+      "licence": "CC-BY-4.0",
+      "triangles": 384,
+      "volume_ml": null,
+      "modelled": false,
+      "pieces": "one"
+    },
+    {
+      "name": "FMA_8012",
+      "term": "FMA:8012",
+      "label": "left second rib",
+      "system": "skeletal",
+      "licence": "CC-BY-4.0",
+      "triangles": 384,
+      "volume_ml": null,
+      "modelled": false,
+      "pieces": "one"
+    },
+    {
+      "name": "FMA_7857",
+      "term": "FMA:7857",
+      "label": "right first rib",
+      "system": "skeletal",
+      "licence": "CC-BY-4.0",
+      "triangles": 384,
+      "volume_ml": null,
+      "modelled": false,
+      "pieces": "one"
+    },
+    {
+      "name": "FMA_7882",
+      "term": "FMA:7882",
+      "label": "right second rib",
+      "system": "skeletal",
+      "licence": "CC-BY-4.0",
+      "triangles": 384,
+      "volume_ml": null,
+      "modelled": false,
+      "pieces": "one"
+    },
+    {
+      "name": "FMA_85213",
+      "term": "FMA:85213",
+      "label": "set of costal cartilages",
+      "system": "skeletal",
+      "licence": "CC-BY-4.0",
+      "triangles": 384,
+      "volume_ml": null,
+      "modelled": true,
+      "pieces": "several"
+    },
+    {
+      "name": "UBERON_0000948",
+      "term": "UBERON:0000948",
+      "label": "heart",
+      "system": "cardiovascular",
+      "licence": "CC-BY-4.0",
+      "triangles": 432,
+      "volume_ml": null,
+      "modelled": false,
+      "pieces": "one"
+    }
+  ],
+  "missing": [],
+  "fragments": [],
+  "dropped": []
+}
