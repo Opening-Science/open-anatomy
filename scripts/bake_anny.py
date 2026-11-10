@@ -20,6 +20,9 @@
 #   { index = "pytorch-cpu", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 # ]
 # ///
+# anny, roma and torch come from the script metadata above (uv run --script),
+# not from the project's environment, so the type check cannot resolve them.
+# pyright: reportMissingImports=false
 """
 Bakes a rigged ANNY demo body: the same adult shape as the pinned static demo
 bodies (gender 0 or 1, age 2/3 "young", every other phenotype 0.5; 1.914 m and

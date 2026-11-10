@@ -1,0 +1,37 @@
+name: Feature request
+description: Propose a new structure, layer, source or improvement.
+title: "feature: "
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        New input data must be CC BY or CC0. Name its licence and record URL.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is missing or hard to do now?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed outcome
+      description: What should exist or happen, not just how to build it.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: textarea
+    id: acceptance-criteria
+    attributes:
+      label: Acceptance criteria
+      description: Checkable conditions for done.
+      placeholder: |
+        - ...
+        - ...
+    validations:
+      required: true

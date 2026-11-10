@@ -46,7 +46,7 @@ def fit_sphere(points: np.ndarray) -> np.ndarray:
 
 def surface_points(path: Path) -> np.ndarray:
     """RAS millimetres of a mask's boundary voxels (canonical orientation)."""
-    image = nib.as_closest_canonical(nib.load(path))
+    image = nib.as_closest_canonical(nib.Nifti1Image.from_filename(path))
     mask = np.asanyarray(image.dataobj) > 0
     inner = mask.copy()
     for axis in range(3):
@@ -156,7 +156,7 @@ def edge_warnings(weight: float, height: float, searched: dict[str, list[float]]
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     parser.add_argument("--case", required=True)
     parser.add_argument("--sex", choices=("male", "female"), required=True)
     args = parser.parse_args()

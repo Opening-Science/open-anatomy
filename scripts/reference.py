@@ -50,7 +50,7 @@ def body_file(name: str) -> Path:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     parser.add_argument("bodies", nargs="*", default=list(SOURCES["references"]))
     parser.add_argument("--render", action="store_true")
     parser.add_argument("--skip-segment", action="store_true", help="reuse existing masks")
