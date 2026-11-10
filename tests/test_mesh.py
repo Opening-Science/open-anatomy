@@ -1,8 +1,10 @@
-"""Tests for mesh.py's cut and symmetry rules and its volume-keeping surface,
-on small synthetic masks: no CT, no download, no GPU."""
+"""Tests for mesh.py's cut and symmetry rules, its volume-keeping surface and
+the explode-view contract its GLB and manifest follow, on small synthetic
+masks: no CT, no download, no GPU."""
 
 from __future__ import annotations
 
+import itertools
 import json
 import math
 import sys
@@ -560,25 +562,247 @@ def test_outward_turns_an_inside_out_surface_the_right_way() -> None:
     assert normals.shape == (4, 3)
 
 
-def test_write_glb_names_nodes_by_term_and_marks_modelled_ones(tmp_path: Path) -> None:
+def read_glb(path: Path) -> tuple[dict[str, Any], dict[str, FloatArray]]:
+    """The GLB's glTF JSON and each node's vertex positions (relative to its node)."""
+    data = path.read_bytes()
+    assert data[:4] == b"glTF" and len(data) % 4 == 0
+    length = int.from_bytes(data[12:16], "little")
+    gltf: dict[str, Any] = json.loads(data[20 : 20 + length])
+    blob = data[20 + length + 8 :]
+    positions = {}
+    for node in gltf["nodes"]:
+        primitive = gltf["meshes"][node["mesh"]]["primitives"][0]
+        accessor = gltf["accessors"][primitive["attributes"]["POSITION"]]
+        view = gltf["bufferViews"][accessor["bufferView"]]
+        raw = blob[view["byteOffset"] : view["byteOffset"] + view["byteLength"]]
+        positions[node["name"]] = np.frombuffer(raw, np.float32).reshape(-1, 3).astype(np.float64)
+    return gltf, positions
+
+
+def test_write_glb_writes_each_nodes_translation_and_extras(tmp_path: Path) -> None:
     triangles, normals = mesh.outward(TETRA, TETRA_TRIANGLES)
     vertices = (TETRA / 1000).astype(np.float32)
+    extras = {"term": REFERENCE[0].term, "label": REFERENCE[0].name, "modelled": False}
     parts: list[dict[str, Any]] = [
         {"structure": s, "vertices": vertices, "triangles": triangles, "normals": normals}
         for s in REFERENCE[:2]
     ]
-    parts[1]["modelled"] = True
+    parts[0].update(translation=[0.1, 0.2, 0.3], extras=extras)
     mesh.write_glb(tmp_path / "a.glb", parts)
     mesh.write_glb(tmp_path / "b.glb", parts)
-    data = (tmp_path / "a.glb").read_bytes()
-    assert data == (tmp_path / "b.glb").read_bytes()
-    assert len(data) % 4 == 0
-    length = int.from_bytes(data[12:16], "little")
-    gltf: dict[str, Any] = json.loads(data[20 : 20 + length])
+    assert (tmp_path / "a.glb").read_bytes() == (tmp_path / "b.glb").read_bytes()
+    gltf, positions = read_glb(tmp_path / "a.glb")
     assert [n["name"] for n in gltf["nodes"]] == [node_name(s.term) for s in REFERENCE[:2]]
-    assert gltf["nodes"][0]["extras"]["term"] == REFERENCE[0].term
-    assert "modelled" not in gltf["nodes"][0]["extras"]
-    assert gltf["nodes"][1]["extras"]["modelled"] is True
+    assert gltf["nodes"][0]["translation"] == [0.1, 0.2, 0.3]
+    assert gltf["nodes"][0]["extras"] == extras
+    np.testing.assert_allclose(positions[gltf["nodes"][0]["name"]], TETRA / 1000)
+    # A part outside the contract (the trunk outline) gets no translation and
+    # the basic extras only.
+    assert "translation" not in gltf["nodes"][1]
+    assert gltf["nodes"][1]["extras"] == {
+        "term": REFERENCE[1].term, "label": REFERENCE[1].name,
+        "system": REFERENCE[1].system, "licence": mesh.SOURCE_LICENCE,
+    }  # fmt: skip
+
+
+# The explode-view contract: centres, directions and distances
+
+
+def test_volume_centroid_is_a_tetrahedrons_vertex_mean_whichever_way_it_is_wound() -> None:
+    shifted = TETRA + np.array([10.0, 20.0, 30.0])
+    np.testing.assert_allclose(mesh.volume_centroid(shifted, TETRA_TRIANGLES), shifted.mean(0))
+    inside_out = np.ascontiguousarray(TETRA_TRIANGLES[:, ::-1])
+    np.testing.assert_allclose(mesh.volume_centroid(shifted, inside_out), shifted.mean(0))
+
+
+def test_volume_centroid_weighs_pieces_by_volume_not_by_vertex_count() -> None:
+    small, big = TETRA, 2 * TETRA + np.array([50.0, 0.0, 0.0])  # the big one holds 8 times more
+    vertices = np.vstack([small, big])
+    triangles = np.vstack([TETRA_TRIANGLES, TETRA_TRIANGLES + 4])
+    expected = (small.mean(0) + 8 * big.mean(0)) / 9
+    np.testing.assert_allclose(mesh.volume_centroid(vertices, triangles), expected)
+    assert not np.allclose(expected, vertices.mean(0))
+
+
+def test_directions_run_from_the_volume_weighted_body_centre() -> None:
+    centres = np.array([[0.1, 0.0, 0.0], [-0.1, 0.0, 0.0], [0.0, 0.2, 0.0]])
+    body, directions = mesh.explode_directions(centres, np.array([1.0, 1.0, 2.0]), ["a", "a", "b"])
+    np.testing.assert_allclose(body, [0.0, 0.1, 0.0])
+    np.testing.assert_allclose(np.linalg.norm(directions, axis=1), 1.0)
+    np.testing.assert_allclose(directions[0], np.array([0.1, -0.1, 0.0]) / math.sqrt(0.02))
+    np.testing.assert_allclose(directions[2], [0.0, 1.0, 0.0])
+
+
+def test_a_structure_at_the_centre_takes_its_systems_mean_direction() -> None:
+    centres = np.array([[0.2, 0.1, 0.0], [-0.2, 0.1, 0.0], [0.0, -0.2, 0.0], [0.0, 0.005, 0.0]])
+    volumes = np.array([1.0, 1.0, 1.0, 1e-3])  # the last sits 5 mm from the body centre
+    systems = ["urinary", "urinary", "digestive", "urinary"]
+    _, directions = mesh.explode_directions(centres, volumes, systems)
+    # The two kidneys' directions point out and up; their mean points up.
+    np.testing.assert_allclose(directions[3], [0.0, 1.0, 0.0], atol=1e-4)
+
+
+def test_the_direction_falls_back_to_anterior_when_the_systems_sides_cancel() -> None:
+    centres = np.array([[0.2, 0.0, 0.0], [-0.2, 0.0, 0.0], [0.0, 0.0, 0.002]])
+    volumes = np.ones(3)
+    _, cancelling = mesh.explode_directions(centres, volumes, ["skeleton"] * 3)
+    np.testing.assert_array_equal(cancelling[2], mesh.ANTERIOR)
+    _, alone = mesh.explode_directions(centres, volumes, ["skeleton", "skeleton", "nervous"])
+    np.testing.assert_array_equal(alone[2], mesh.ANTERIOR)
+
+
+def test_blocked_interval_is_the_stretch_of_travel_that_meets_the_other_box() -> None:
+    a = np.array([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]])
+    b = np.array([[1.5, 0.0, 0.0], [2.5, 1.0, 1.0]])
+    still, x, y = np.zeros(3), np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0])
+    assert mesh.blocked_interval(a, x, b, still, 0.0) == pytest.approx((0.5, 2.5))
+    assert mesh.blocked_interval(a, x, b, still, 0.1) == pytest.approx((0.4, 2.6))
+    assert mesh.blocked_interval(a, y, b, still, 0.0) is None  # x keeps them apart whatever d
+    # Two overlapping boxes moving apart clear each other once the relative
+    # travel is their overlap.
+    c = np.array([[0.5, 0.0, 0.0], [1.5, 1.0, 1.0]])
+    assert mesh.blocked_interval(a, -x, c, x, 0.0) == pytest.approx((-0.75, 0.25))
+
+
+def test_first_clear_skips_past_every_blocked_stretch_to_the_millimetre() -> None:
+    blocked = [(0.05, 0.2), (0.19, 0.3), (0.5, 0.6)]
+    assert mesh.first_clear(0.1, blocked) == 0.3
+    assert mesh.first_clear(0.35, blocked) == 0.35
+    assert mesh.first_clear(0.55, blocked) == 0.6
+    assert mesh.first_clear(0.1234, []) == 0.124
+    assert mesh.first_clear(0.2, []) == 0.2
+    assert mesh.first_clear(0.1, [(0.05, 0.109 + 1e-17)]) == 0.109  # never stalls on an end
+    assert mesh.first_clear(0.1, [(0.05, math.inf)]) == math.inf  # two that never part
+
+
+def moved(node: dict[str, Any]) -> FloatArray:
+    """A manifest node's bounds at full separation."""
+    shift = np.array(node["explode"]["direction"]) * node["explode"]["distance"]
+    return np.array(node["bounds"]) + shift
+
+
+def apart(a: FloatArray, b: FloatArray, gap: float) -> bool:
+    return bool((a[1] + gap <= b[0]).any() or (b[1] + gap <= a[0]).any())
+
+
+def stacked(n: int, half: float) -> tuple[FloatArray, FloatArray]:
+    centres = np.array([[0.0, 0.1 * k, 0.0] for k in range(n)])
+    return centres, np.stack([centres - half, centres + half], axis=1)
+
+
+def test_explode_distances_keep_every_pair_of_bounds_apart_at_full_separation() -> None:
+    centres, bounds = stacked(5, 0.06)  # five overlapping cubes up the middle, and two kidneys
+    centres = np.vstack([centres, [[0.3, 0.2, 0.0], [-0.3, 0.2, 0.0]]])
+    bounds = np.vstack([bounds, np.stack([centres[5:] - 0.06, centres[5:] + 0.06], axis=1)])
+    labels = [f"vertebrae_T{k}" for k in range(1, 6)] + ["kidney_right", "kidney_left"]
+    systems = ["skeleton"] * 5 + ["urinary"] * 2
+    body, directions = mesh.explode_directions(centres, np.ones(7), systems)
+    np.testing.assert_array_equal(directions[2], mesh.ANTERIOR)  # T3 sits on the body centre
+    distances = mesh.explode_distances(bounds, centres, directions, labels, body)
+    radius = math.sqrt(3) * 0.06
+    assert (distances >= radius + mesh.EXPLODE_MARGIN_M).all()
+    assert distances[5] == distances[6]  # the pair shares one distance
+    gap = mesh.EXPLODE_GAP_M - 1e-9
+    for i, j in itertools.combinations(range(7), 2):
+        a = bounds[i] + distances[i] * directions[i]
+        b = bounds[j] + distances[j] * directions[j]
+        assert apart(a, b, gap), (labels[i], labels[j])
+    # The same bodies in another order get the same distances: the rule is deterministic.
+    order = np.random.default_rng(1).permutation(7)
+    shuffled = mesh.explode_distances(bounds[order], centres[order], directions[order],
+                                      [labels[i] for i in order], body)  # fmt: skip
+    np.testing.assert_array_equal(shuffled, distances[order])
+
+
+def test_a_pair_shares_the_larger_distance_the_two_need() -> None:
+    # A thin plate on the right side, nearer the body centre than the kidneys,
+    # is placed first and stands in the right kidney's way; the left kidney has
+    # a clear run but moves as far as the right one.
+    centres = np.array([[0.03, 0.0, 0.0], [0.1, 0.0, 0.0], [-0.1, 0.0, 0.0]])
+    bounds = np.array([
+        [[0.02, -0.08, -0.08], [0.04, 0.08, 0.08]],
+        [[0.07, -0.03, -0.03], [0.13, 0.03, 0.03]],
+        [[-0.13, -0.03, -0.03], [-0.07, 0.03, 0.03]],
+    ])  # fmt: skip
+    labels = ["sternum", "kidney_right", "kidney_left"]
+    body, directions = mesh.explode_directions(centres, np.array([1e-3, 1.0, 1.0]), ["a"] * 3)
+    distances = mesh.explode_distances(bounds, centres, directions, labels, body)
+    alone = mesh.explode_distances(bounds[2:], centres[2:], directions[2:], labels[2:], body)
+    assert distances[1] == distances[2] > alone[0]
+    gap = mesh.EXPLODE_GAP_M - 1e-9
+    for i, j in itertools.combinations(range(3), 2):
+        assert apart(bounds[i] + distances[i] * directions[i],
+                     bounds[j] + distances[j] * directions[j], gap)  # fmt: skip
+
+
+def test_a_pair_with_one_direction_is_placed_one_after_the_other() -> None:
+    # Both kidneys sit on the body centre in a system of their own, so both
+    # fall back to anterior; sharing a distance could never part them.
+    centres = np.array([[0.2, 0.0, 0.0], [-0.2, 0.0, 0.0], [0.0, 0.0, 0.001], [0.0, 0.0, -0.001]])
+    bounds = np.stack([centres - 0.03, centres + 0.03], axis=1)
+    labels = ["rib_left_1", "rib_right_1", "kidney_left", "kidney_right"]
+    systems = ["skeleton", "skeleton", "urinary", "urinary"]
+    body, directions = mesh.explode_directions(centres, np.ones(4), systems)
+    np.testing.assert_array_equal(directions[2:], [mesh.ANTERIOR, mesh.ANTERIOR])
+    distances = mesh.explode_distances(bounds, centres, directions, labels, body)
+    assert distances[3] > distances[2]
+    assert apart(bounds[2] + distances[2] * directions[2],
+                 bounds[3] + distances[3] * directions[3], mesh.EXPLODE_GAP_M - 1e-9)  # fmt: skip
+
+
+CONTRACT_FIELDS = {
+    "term", "label", "plain", "about", "system", "layer", "licence", "modelled", "typical",
+    "pieces", "centre", "bounds", "volume_ml", "explode",
+}  # fmt: skip
+
+
+def test_a_built_glb_follows_the_contract(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    manifest = run_main(tmp_path, monkeypatch, {})
+    first = (tmp_path / "c.reference.glb").read_bytes()
+    gltf, positions = read_glb(tmp_path / "c.reference.glb")
+    assert manifest["contract"] == 1
+    assert len(manifest["body_centre_m"]) == 3
+    offset = np.array(manifest["centre_offset_m"])
+    entries = {n["name"]: n for n in manifest["nodes"]}
+    names = [node_name(s.term) for s in REFERENCE]
+    assert [n["name"] for n in gltf["nodes"]] == list(entries) == names
+    surfaced = 0
+    for node, s in zip(gltf["nodes"], REFERENCE, strict=True):
+        extras, entry = node["extras"], entries[node["name"]]
+        assert set(extras) == CONTRACT_FIELDS
+        assert all(entry[field] == extras[field] for field in CONTRACT_FIELDS)  # mirrored
+        # The fake surface gave the k-th structure TETRA + k mm; the cartilage TETRA itself.
+        if s.label == "costal_cartilages":
+            ras = TETRA
+        else:
+            surfaced += 1
+            ras = TETRA + surfaced
+        expected = ras @ mesh.RAS_TO_GLTF.T - offset  # the body frame
+        # Recentring: translation + vertex is the body-frame position, and the
+        # translation is the volume centroid (a tetrahedron's vertex mean).
+        assert node["translation"] == extras["centre"]
+        placed = positions[node["name"]] + node["translation"]
+        np.testing.assert_allclose(placed, expected, atol=2e-6)
+        np.testing.assert_allclose(extras["centre"], expected.mean(0), atol=1e-6)
+        low, high = np.array(extras["bounds"])
+        assert (low <= expected.min(0) + 1e-9).all() and (high >= expected.max(0) - 1e-9).all()
+        assert extras["term"] == s.term and extras["label"] == s.name
+        assert extras["plain"] == s.plain and extras["about"] == s.about
+        assert extras["system"] == s.system
+        assert extras["layer"] == ("skeleton" if s.system == "skeleton" else "organs")
+        assert extras["licence"] == "CC-BY-4.0" and extras["typical"] is True
+        assert extras["modelled"] is (s.label == "costal_cartilages")
+        assert extras["pieces"] == ("several" if s.label == "costal_cartilages" else "one")
+        assert extras["volume_ml"] == pytest.approx(TETRA_ML, abs=0.05)
+        assert np.linalg.norm(extras["explode"]["direction"]) == pytest.approx(1.0, abs=1e-5)
+        assert extras["explode"]["distance"] > 0
+    # At full separation no two structures' bounds overlap, on the numbers a viewer reads.
+    for a, b in itertools.combinations(manifest["nodes"], 2):
+        assert apart(moved(a), moved(b), mesh.EXPLODE_GAP_M - 1e-9), (a["name"], b["name"])
+    # The same masks give the same bytes and the same manifest.
+    again = run_main(tmp_path, monkeypatch, {})
+    assert (tmp_path / "c.reference.glb").read_bytes() == first
+    assert again["nodes"] == manifest["nodes"] and again["sha256"] == manifest["sha256"]
 
 
 # settle_fragments: detached pieces of bones before meshing

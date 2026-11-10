@@ -24,13 +24,38 @@ stops the run. With body_trunc.nii.gz in the masks it also
 writes <case>.outline.glb, the trunk outline in the same frame, which
 assemble.py measures and never releases.
 
-Writes data/work/<case>/<case>.<set>.glb and <case>.<set>.manifest.json with each node's
-UBERON ID, system, licence, triangle count, volume and dropped share, and the
-GLB's SHA-256. Every GLB's asset.copyright and asset.extras credit the source
-dataset's creator, DOI and case, so a GLB copied on its own keeps its
-attribution. It stops if any surface is open, non-manifold or inside out, or if its volume
-is more than 5% off the mask's voxel volume. VTK runs on
-one thread so the same masks give the same bytes.
+Writes data/work/<case>/<case>.<set>.glb and <case>.<set>.manifest.json under
+the explode-view contract (docs/explode-view.md, version 1). Every structure
+is one node named by its ontology ID (UBERON:0002107 -> UBERON_0002107), its
+vertices relative to the structure's volume centroid and that centroid as the
+node's translation, so translation + vertex is the position in the body frame
+(the set's bounding box centred on the origin), a viewer moves a structure by
+changing one translation, and turns it about its own middle. The node's extras,
+mirrored field for field by the manifest's nodes, carry term, label (the
+anatomical name), plain (the plain-language name), about (one line on what it
+is), system (one of structures.SYSTEMS), layer, licence, modelled, typical
+(false for a pathological case, from sources.json), pieces, centre, bounds
+(axis-aligned, body frame), volume_ml and explode {direction, distance}:
+- direction: from the body centre (the structures' centres weighted by
+  volume) to the structure's centre, unit length. A structure within
+  AT_CENTRE_M of the body centre takes its system's mean direction instead,
+  and +Z (anterior) when that mean is shorter than MEAN_DIRECTION_MIN
+  (left and right cancel); nothing shorter than those limits is normalised.
+- distance: how far it moves at full separation (slider 1), when every
+  structure sits at centre + distance * direction. It is at least the
+  structure's bounding radius plus EXPLODE_MARGIN_M. Then, taking the
+  structures in order of their distance from the body centre (nearest first,
+  ties by label), each takes the smallest distance at which its bounds clear
+  the bounds of every structure placed before it by EXPLODE_GAP_M, so at
+  full separation no two structures' bounds overlap. A left-right pair is
+  placed together and shares the larger distance, so it moves symmetrically.
+The manifest adds each node's triangle count, voxel volume, volume drift and
+dropped share, the body centre and the GLB's SHA-256. Every GLB's
+asset.copyright and asset.extras credit the source dataset's creator, DOI and
+case, so a GLB copied on its own keeps its attribution. The run stops if any
+surface is open, non-manifold or inside out, or if its volume is more than 5%
+off the mask's voxel volume. VTK runs on one thread so the same masks give the
+same bytes.
 """
 
 from __future__ import annotations
@@ -38,6 +63,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import struct
 import sys
@@ -54,7 +80,7 @@ from vtk.util.numpy_support import numpy_to_vtk, vtk_to_numpy  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from structures import RULED_SETS, SETS, Structure, node_name  # noqa: E402
+from structures import RULED_SETS, SETS, Structure, layer_of, node_name, partner_of  # noqa: E402
 
 # RAS millimetres to glTF metres: X = -R (the body's left), Y = S, Z = A.
 # Limb bones run out of a trunk scan by design; their joint ends are what count.
@@ -87,6 +113,14 @@ LANDMARK_BONES = {"femur_left", "femur_right", "humerus_left", "humerus_right"}
 OUTLINE = Structure("body_trunc", "outline", "trunk outline", "outline", (0.8, 0.8, 0.8))
 RAS_TO_GLTF = np.array([[-1, 0, 0], [0, 0, 1], [0, 1, 0]], dtype=np.float64) * 0.001
 SOURCE_LICENCE = "CC-BY-4.0"
+CONTRACT = 1  # the explode-view contract version the GLB and manifest follow
+# The explode view (see the module docstring): directions and distances in metres.
+AT_CENTRE_M = 0.01  # a structure this close to the body centre has no direction of its own
+MEAN_DIRECTION_MIN = 0.1  # a system's mean direction shorter than this says nothing: sides cancel
+ANTERIOR = np.array([0.0, 0.0, 1.0])  # the direction of last resort, +Z in the glTF frame
+EXPLODE_MARGIN_M = 0.02  # a structure moves at least its bounding radius plus this
+EXPLODE_GAP_M = 0.005  # at full separation any two structures' bounds are at least this far apart
+SAME_DIRECTION = 1e-3  # two unit directions closer than this (0.06 degrees) count as one
 SOURCES = json.loads((ROOT / "sources.json").read_text())
 # Pieces other than the largest may hold at most this share of a single
 # structure's voxels: stray voxels are dropped, a split organ stops the run.
@@ -930,6 +964,142 @@ def signed_volume(vertices: np.ndarray, triangles: np.ndarray) -> float:
     return float(np.einsum("ij,ij->i", a, np.cross(b, c)).sum() / 6)
 
 
+def volume_centroid(vertices: np.ndarray, triangles: np.ndarray) -> np.ndarray:
+    """The centroid of the volume a closed surface encloses, from the signed
+    tetrahedra between the origin and its triangles. It is not the mean of
+    the vertices, which crowd wherever the mesh is dense, and it is the same
+    whichever way the surface is wound. NaN for a surface enclosing nothing."""
+    a, b, c = (vertices[triangles[:, i]].astype(np.float64) for i in range(3))
+    volumes = np.einsum("ij,ij->i", a, np.cross(b, c)) / 6
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return (volumes[:, None] * (a + b + c) / 4).sum(0) / volumes.sum()
+
+
+def explode_directions(
+    centres: np.ndarray, volumes: np.ndarray, systems: list[str]
+) -> tuple[np.ndarray, np.ndarray]:
+    """The body centre (the structures' centres weighted by their volumes) and
+    each structure's unit direction away from it. A structure within
+    AT_CENTRE_M of the body centre takes the mean direction of its system's
+    other structures (those with a direction of their own), and ANTERIOR when
+    that mean is shorter than MEAN_DIRECTION_MIN or there are none; a vector
+    shorter than either limit is never normalised."""
+    body = (centres * volumes[:, None]).sum(0) / volumes.sum()
+    offsets = centres - body
+    lengths = np.linalg.norm(offsets, axis=1)
+    own = lengths >= AT_CENTRE_M
+    directions = np.zeros_like(centres, dtype=np.float64)
+    directions[own] = offsets[own] / lengths[own, None]
+    kinds = np.array(systems)
+    for i in np.flatnonzero(~own):
+        same = own & (kinds == systems[i])
+        mean = directions[same].mean(0) if same.any() else np.zeros(3)
+        length = float(np.linalg.norm(mean))
+        directions[i] = mean / length if length >= MEAN_DIRECTION_MIN else ANTERIOR
+    return body, directions
+
+
+def blocked_interval(
+    box_a: np.ndarray, u_a: np.ndarray, box_b: np.ndarray, u_b: np.ndarray, gap: float
+) -> tuple[float, float] | None:
+    """The open interval of d in which box a, moved by d * u_a, comes within
+    gap of box b, moved by d * u_b (boxes as [[min], [max]]), or None when
+    the two never do. Along an axis the boxes are too close while
+    q < d * w < p for w the relative speed, p the room to move one way and q
+    the other; across the three axes the intervals intersect. Where w is
+    zero the axis either always or never keeps them apart."""
+    low, high = -math.inf, math.inf
+    for axis in range(3):
+        w = float(u_a[axis] - u_b[axis])
+        p = float(box_b[1][axis] - box_a[0][axis]) + gap
+        q = float(box_b[0][axis] - box_a[1][axis]) - gap
+        if abs(w) < 1e-9:
+            if not q < 0 < p:
+                return None
+            continue
+        a, b = sorted((q / w, p / w))
+        low, high = max(low, a), min(high, b)
+        if low >= high:
+            return None
+    return low, high
+
+
+def first_clear(base: float, blocked: list[tuple[float, float]]) -> float:
+    """The smallest distance at or beyond base, rounded up to the millimetre,
+    that lies in none of the open intervals (a nanometre short of an
+    interval's end counts as clear, so the rounding cannot stall there).
+    Infinite when a blocked stretch never ends."""
+    d = base
+    while True:
+        if not math.isfinite(d):
+            return math.inf
+        d = math.ceil(d * 1000 - 1e-6) / 1000
+        inside = [high for low, high in blocked if low < d < high - 1e-9]
+        if not inside:
+            return d
+        d = max(inside)
+
+
+def explode_distances(
+    bounds: np.ndarray,
+    centres: np.ndarray,
+    directions: np.ndarray,
+    labels: list[str],
+    body: np.ndarray,
+) -> np.ndarray:
+    """How far each structure moves at full separation, so that no two
+    structures' bounds overlap then.
+
+    Each distance is at least the structure's bounding radius (its farthest
+    bounds corner from its centre) plus EXPLODE_MARGIN_M. The structures are
+    placed in order of their distance from the body centre, nearest first
+    (ties by label); each takes the smallest distance, to the millimetre, at
+    which its moved bounds stay EXPLODE_GAP_M clear of every structure placed
+    before it, which stay where they were put. A left-right pair
+    (structures.partner_of) is placed together and shares the larger distance
+    the two need, clearing each other too; a pair whose two directions are
+    the same (to SAME_DIRECTION) could never clear each other that way, so it
+    is placed one after the other. Every input is in the body frame, in metres.
+    """
+    n = len(labels)
+    ends = [(i, j, k) for i in (0, 1) for j in (0, 1) for k in (0, 1)]  # a box's eight corners
+    corners = np.array([[b[i][0], b[j][1], b[k][2]] for b in bounds for i, j, k in ends])
+    radii = np.linalg.norm(corners.reshape(n, 8, 3) - centres[:, None, :], axis=2).max(1)
+    base = radii + EXPLODE_MARGIN_M
+    index = {label: i for i, label in enumerate(labels)}
+    order = sorted(range(n), key=lambda i: (float(np.linalg.norm(centres[i] - body)), labels[i]))
+    distances = np.full(n, math.nan)
+    for i in order:
+        if not math.isnan(distances[i]):
+            continue
+        group = [i]
+        partner = partner_of(labels[i])
+        j = index.get(partner) if partner else None
+        if j is not None and math.isnan(distances[j]):
+            if np.linalg.norm(directions[i] - directions[j]) > SAME_DIRECTION:
+                group.append(j)
+        placed = [k for k in range(n) if not math.isnan(distances[k])]
+        still = np.zeros(3)
+        blocked = []
+        for g in group:
+            for k in placed:
+                moved = bounds[k] + distances[k] * directions[k]
+                interval = blocked_interval(bounds[g], directions[g], moved, still, EXPLODE_GAP_M)
+                if interval is not None:
+                    blocked.append(interval)
+        if len(group) == 2:
+            a, b = group
+            interval = blocked_interval(bounds[a], directions[a], bounds[b], directions[b],
+                                        EXPLODE_GAP_M)  # fmt: skip
+            if interval is not None:
+                blocked.append(interval)
+        distance = first_clear(float(base[group].max()), blocked)
+        if not math.isfinite(distance):
+            raise ValueError(f"{labels[i]} can never clear the structures placed before it")
+        distances[group] = distance
+    return distances
+
+
 def credit(case: str) -> dict:
     """The attribution a GLB built from case carries: creator, DOI, licence, case."""
     if case not in SOURCES["cases"]:
@@ -953,7 +1123,11 @@ def credit(case: str) -> dict:
 def write_glb(path: Path, parts: list[dict], attribution: dict | None = None) -> None:
     """Writes one node and mesh per part, each with its own material.
 
-    attribution (from credit()) goes into asset.copyright and asset.extras.
+    A part with a translation and extras (a contract node, from main) is
+    written with them; one without (the trunk outline and the landmarks,
+    fitting inputs outside the contract) gets an identity node and the
+    basic extras. attribution (from credit()) goes into asset.copyright and
+    asset.extras.
     """
     gltf: dict = {
         "asset": {"version": "2.0", "generator": "open-anatomy mesh.py", **(attribution or {})},
@@ -1014,19 +1188,13 @@ def write_glb(path: Path, parts: list[dict], attribution: dict | None = None) ->
                 ],
             }
         )
-        gltf["nodes"].append(
-            {
-                "name": node_name(s.term),
-                "mesh": i,
-                "extras": {
-                    "term": s.term,
-                    "name": s.name,
-                    "system": s.system,
-                    "licence": SOURCE_LICENCE,
-                    **({"modelled": True} if part.get("modelled") else {}),
-                },
-            }
-        )
+        node: dict = {"name": node_name(s.term), "mesh": i}
+        if "translation" in part:
+            node["translation"] = [float(c) for c in part["translation"]]
+        node["extras"] = part.get("extras") or {
+            "term": s.term, "label": s.name, "system": s.system, "licence": SOURCE_LICENCE,
+        }  # fmt: skip
+        gltf["nodes"].append(node)
 
     while len(blob) % 4:
         blob.append(0)
@@ -1153,25 +1321,70 @@ def main() -> None:
         })  # fmt: skip
 
     everything = np.vstack([p["vertices"] for p in parts])
-    centre = (everything.min(0) + everything.max(0)) / 2
+    centre = (everything.min(0) + everything.max(0)) / 2  # the body frame's origin
     for p in parts:
-        p["vertices"] = (p["vertices"] - centre).astype(np.float32)
-        p["triangles"], p["normals"] = outward(p["vertices"], p["triangles"])
         name = p["structure"].label
         if open_edges(p["triangles"]):
             sys.exit(f"{name}: the surface is not closed and manifold")
+        # Each mesh is written about its own volume centroid, which the node
+        # carries as its translation: translation + vertex is the body frame.
+        body = p["vertices"] - centre
+        centroid = volume_centroid(body, p["triangles"])
+        if not np.all(np.isfinite(centroid)):
+            sys.exit(f"{name}: the surface encloses no volume")
+        p["centre"] = np.round(centroid, 6) + 0.0
+        p["vertices"] = (body - p["centre"]).astype(np.float32)
+        p["triangles"], p["normals"] = outward(p["vertices"], p["triangles"])
         if signed_volume(p["vertices"], p["triangles"]) < 0:
             # VTK's auto-orientation can miss on a ragged fragment; a closed
             # surface with negative volume is simply wound the other way round.
             p["triangles"], p["normals"] = p["triangles"][:, ::-1].copy(), -p["normals"]
-        if signed_volume(p["vertices"], p["triangles"]) <= 0:
+        p["volume_m3"] = signed_volume(p["vertices"], p["triangles"])
+        if p["volume_m3"] <= 0:
             sys.exit(f"{name}: the normals point inward")
+        low = p["vertices"].min(0).astype(np.float64) + p["centre"]
+        high = p["vertices"].max(0).astype(np.float64) + p["centre"]
+        p["bounds"] = np.stack([np.floor(low * 1e6) / 1e6, np.ceil(high * 1e6) / 1e6]) + 0.0
         if p.get("modelled"):
             p["drift"] = None  # modelled, not segmented: there is no voxel volume
             continue
-        p["drift"] = signed_volume(p["vertices"], p["triangles"]) * 1e6 / p["voxel_ml"] - 1
+        p["drift"] = p["volume_m3"] * 1e6 / p["voxel_ml"] - 1
         if abs(p["drift"]) > MAX_VOLUME_DRIFT:
             sys.exit(f"{name}: the mesh's volume is {p['drift']:+.1%} off its voxel volume")
+
+    # The explode view: directions from the centres, then distances from the
+    # rounded centres, bounds and directions the files carry, so what a viewer
+    # reads is exactly what was checked to stay apart.
+    centres = np.array([p["centre"] for p in parts])
+    body_centre, directions = explode_directions(
+        centres, np.array([p["volume_m3"] for p in parts]), [p["structure"].system for p in parts]
+    )
+    directions = np.round(directions, 6) + 0.0
+    distances = explode_distances(
+        np.array([p["bounds"] for p in parts]), centres, directions,
+        [p["structure"].label for p in parts], body_centre,
+    )  # fmt: skip
+    record = {} if args.synthetic else SOURCES["cases"][args.case]["record"]
+    typical = bool(record.get("typical", True))
+    for p, direction, distance in zip(parts, directions, distances, strict=True):
+        s = p["structure"]
+        p["translation"] = [float(c) for c in p["centre"]]
+        p["extras"] = {
+            "term": s.term,
+            "label": s.name,
+            "plain": s.plain,
+            "about": s.about,
+            "system": s.system,
+            "layer": layer_of(s.system),
+            "licence": SOURCE_LICENCE,
+            "modelled": bool(p.get("modelled")),
+            "typical": typical,
+            "pieces": "several" if s.label in SETS_OF_PIECES else "one",
+            "centre": p["translation"],
+            "bounds": p["bounds"].tolist(),
+            "volume_ml": round(p["volume_m3"] * 1e6, 1),
+            "explode": {"direction": [float(u) for u in direction], "distance": float(distance)},
+        }
 
     glb = work / f"{args.case}.{args.set}.glb"
     write_glb(glb, parts, attribution)
@@ -1186,6 +1399,7 @@ def main() -> None:
         outline["normals"] = normals
         write_glb(work / f"{args.case}.outline.glb", [outline], attribution)
     manifest = {
+        "contract": CONTRACT,
         "case": args.case,
         "set": args.set,
         "file": glb.name,
@@ -1194,19 +1408,14 @@ def main() -> None:
         "units": "metres",
         "axes": "+Y superior, +Z anterior, +X the body's left",
         "centre_offset_m": [round(float(c), 6) for c in centre],
+        "body_centre_m": [round(float(c), 6) + 0.0 for c in body_centre],
         "seg_dir": str(seg_dir.relative_to(ROOT)) if seg_dir.is_relative_to(ROOT) else str(seg_dir),
         "nodes": [
             {
                 "name": node_name(p["structure"].term),
-                "term": p["structure"].term,
-                "label": p["structure"].name,
-                "system": p["structure"].system,
-                "licence": SOURCE_LICENCE,
+                **p["extras"],  # the GLB node's extras, field for field
                 "triangles": int(len(p["triangles"])),
-                "volume_ml": round(signed_volume(p["vertices"], p["triangles"]) * 1e6, 1),
                 "voxel_volume_ml": round(p["voxel_ml"], 1) if p["voxel_ml"] else None,
-                "modelled": bool(p.get("modelled")),
-                "pieces": "several" if p["structure"].label in SETS_OF_PIECES else "one",
                 "volume_drift": round(p["drift"], 4) if p["drift"] is not None else None,
                 **({"knobs_trimmed_ml": p["trimmed_ml"]} if p.get("trimmed_ml") else {}),
                 **({"dropped_share": round(p["dropped_share"], 4)} if "dropped_share" in p else {}),
