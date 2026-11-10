@@ -135,7 +135,7 @@ as textured planes inside the body. See
 
 ```bash
 .venv/bin/python scripts/mesh_check.py   # meshes synthetic ellipsoids; no download
-.venv/bin/python scripts/imaging_check.py   # the imaging layer's orientation
+.venv/bin/python scripts/imaging_check.py   # the imaging layer's orientation and head guard
 scripts/self-check.sh                     # every Blender self-check; skips without Blender
 python3 scripts/bake_check.py             # the bake's lock, and any baked body
 ```

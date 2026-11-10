@@ -1,5 +1,5 @@
 """
-Self-check for imaging.py on synthetic volumes: no CT, no download.
+Self-check for imaging.py on synthetic volumes and masks: no CT, no download.
 
   python scripts/imaging_check.py
 
@@ -9,6 +9,18 @@ on the expected side of each image (radiology's layout: the body's right on the
 image's left, superior or anterior at the top), each marker's pixel must map
 through quad_corners back to the marker's own position, and the left marker
 must end up on +X in glTF.
+
+Checks that the head guard (face_free_top and apply_head_guard)
+- crops nothing when no skull, brain or C1-C6 is in the scan;
+- stops at the top of C7 when the scan reaches the head and C7 is there;
+- stops 2 cm below the skull when a bowed head brings the jaw level with C7;
+- stops 2 cm below the lowest head or neck structure when C7 is not;
+- turns 2 cm into slices from the scan's own slice spacing;
+- refuses a case whose skull or brain was never segmented, and a case whose
+  head comes within 2 cm of the scan's bottom slice;
+and that a body mask cut by the guard keeps no voxel of a synthetic face, for a
+head far above C7, a bowed head with the face level with C7, and a head just
+above the margin at the scan's bottom.
 """
 
 from __future__ import annotations
@@ -21,7 +33,17 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from imaging import WINDOWS, quad_corners, slice_image, to_reference  # noqa: E402
+from imaging import (  # noqa: E402
+    NECK,
+    WINDOWS,
+    apply_head_guard,
+    face_free_top,
+    guard_margin,
+    quad_corners,
+    slice_image,
+    to_reference,
+)
+from structures import HEAD_GUARD  # noqa: E402
 
 # Stored as (posterior, left, superior) at 0.9, 0.8 and 1.5 mm, so canonical()
 # has to flip two axes and permute all three.
@@ -61,6 +83,26 @@ def phantom():
 def grey(hu: float) -> int:
     width, level = WINDOWS["soft"]
     return int(np.round(np.clip((hu - (level - width / 2)) / width, 0, 1) * 255))
+
+
+SHAPE = (32, 32, 120)  # canonical: the third axis runs inferior to superior
+
+
+def block(k0: int, k1: int, j: tuple[int, int] = (10, 20)) -> np.ndarray:
+    """A box over axial slices k0..k1-1; j picks its anterior-posterior range."""
+    m = np.zeros(SHAPE, dtype=bool)
+    m[10:20, j[0] : j[1], k0:k1] = True
+    return m
+
+
+def empty() -> np.ndarray:
+    return np.zeros(SHAPE, dtype=bool)
+
+
+def masks(**present: np.ndarray) -> dict:
+    out = {label: empty() for label in (*HEAD_GUARD, *NECK, "vertebrae_C7")}
+    out.update(present)
+    return out
 
 
 def main() -> int:
@@ -111,6 +153,68 @@ def main() -> int:
     left = to_reference((centre_ras + MARKERS["left"][0])[None], np.zeros(3), 1.0, np.zeros(3))
     middle = to_reference(centre_ras[None], np.zeros(3), 1.0, np.zeros(3))
     check(bool(left[0, 0] > middle[0, 0]), "the left marker lands on +X in glTF")
+
+    margin = guard_margin(1.5)  # the masks below are at 1.5 mm slices
+    check(
+        (margin, guard_margin(0.8), guard_margin(3.0)) == (14, 25, 7),
+        "2 cm is 14 slices at 1.5 mm, 25 at 0.8 mm and 7 at 3 mm",
+    )
+    check(face_free_top(masks(), margin) is None, "a trunk-only scan is not cropped")
+    check(
+        face_free_top(masks(vertebrae_C7=block(60, 70)), margin) is None,
+        "C7 alone (a scan starting at the neck's base) is not cropped",
+    )
+    head = masks(skull=block(95, 120), vertebrae_C5=block(75, 80), vertebrae_C7=block(60, 70))
+    check(face_free_top(head, margin) == 69, "with the head in view, slices stop at the top of C7")
+    bowed = masks(skull=block(62, 72), vertebrae_C6=block(70, 75), vertebrae_C7=block(60, 70))
+    check(
+        face_free_top(bowed, margin) == 62 - margin,
+        "a bowed head's jaw level with C7 is cut 2 cm below the jaw",
+    )
+    no_c7 = masks(brain=block(100, 120), vertebrae_C6=block(72, 78))
+    check(
+        face_free_top(no_c7, margin) == 72 - margin,
+        "without C7, slices stop 2 cm below the lowest head or neck structure",
+    )
+    for label in HEAD_GUARD:
+        missing = masks()
+        missing[label] = None
+        try:
+            face_free_top(missing, margin)
+            check(False, f"a case without a {label} mask is refused")
+        except ValueError:
+            check(True, f"a case without a {label} mask is refused")
+
+    def survives(face: np.ndarray, guard: dict, spacing: float = 1.5) -> bool:
+        body, _ = apply_head_guard(np.ones(SHAPE, dtype=bool), guard, spacing)
+        return bool((body & face).any())
+
+    # The face: everything above the neck, here in front of the spine.
+    check(not survives(block(100, 120, (20, 30)), head), "no face voxel survives the guard")
+    # A bowed head: the face hangs in front of the neck, level with C7.
+    bowed_face = block(60, 75, (20, 30))
+    bowed = masks(skull=bowed_face, vertebrae_C6=block(70, 75), vertebrae_C7=block(60, 70))
+    check(not survives(bowed_face, bowed), "a bowed head's face level with C7 is cut away")
+    # The same at 0.8 mm slices: the margin is 25 slices, not 14.
+    check(
+        apply_head_guard(np.ones(SHAPE, dtype=bool), bowed, 0.8)[1] == 60 - 25,
+        "at 0.8 mm the bowed head is cut 25 slices (2 cm) below the jaw",
+    )
+    # A skull just above the margin at the scan's bottom: only slice 0 is left.
+    low = masks(skull=block(margin, 60))
+    body, top = apply_head_guard(np.ones(SHAPE, dtype=bool), low, 1.5)
+    check(
+        top == 0 and not body[:, :, 1:].any() and not survives(block(margin, 60), low),
+        "a skull 2 cm above the scan's bottom leaves only the bottom slice",
+    )
+    # A skull nearer the bottom than the margin: a negative cut is refused, not
+    # used as an index (body[..., top + 1 :] would wrap and keep the face).
+    for k in (0, 3, margin - 1):
+        try:
+            apply_head_guard(np.ones(SHAPE, dtype=bool), masks(skull=block(k, 60)), 1.5)
+            check(False, f"a skull starting at slice {k} is refused")
+        except ValueError:
+            check(True, f"a skull starting at slice {k} is refused")
 
     print("imaging check passed" if not failures else f"imaging check failed: {len(failures)}")
     return 1 if failures else 0
