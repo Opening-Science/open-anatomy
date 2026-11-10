@@ -3,6 +3,7 @@ Runs the headless Blender scripts in blender/ with a checked Blender.
 
   python scripts/blender.py self-check
   python scripts/blender.py cleanup --in <glb> --out-dir <dir> [cleanup_mesh.py options]
+  python scripts/blender.py qa --in <glb> --manifest <json> --out-dir <dir>
   python scripts/blender.py assemble --body <glb> --ct <glb> --out <glb> --report <json>
   python scripts/blender.py fit --atlas <glb> --scheme hra --body <glb> \
       --out <glb> --report <json> [fit_atlas.py options]
@@ -10,12 +11,12 @@ Runs the headless Blender scripts in blender/ with a checked Blender.
 
 Blender comes from BLENDER_BIN, else `blender` on PATH, and must be 5.2.x LTS.
 Without one, self-check says so and exits 0, so CI (which has none) skips;
-the other tasks fail. self-check
-runs this repository's glTF round trip and both ported scripts on synthetic
-meshes. Any argument that points under a data/vitronic/ folder is refused,
-input or output, given as `--flag path` or `--flag=path`: the scripts are only
-ever run on synthetic bodies, open atlases and open CT data, never on a scan of
-a person. self-check tests that guard first, with or without Blender.
+the other tasks fail. self-check runs this repository's glTF round trip, both
+ported scripts and qa.py on synthetic meshes. Any argument that points under a
+data/vitronic/ folder is refused, input or output, given as `--flag path` or
+`--flag=path`: the scripts are only ever run on synthetic bodies, open atlases
+and open CT data, never on a scan of a person. self-check tests that guard
+first, with or without Blender.
 
 Ported from twin-llm's scripts/blender/run.ts and blender-bin.ts (a4058fa8,
 Apache-2.0).
@@ -95,7 +96,7 @@ def guard_check() -> list[str]:
 
 def main() -> int:
     task, args = (sys.argv[1], sys.argv[2:]) if len(sys.argv) > 1 else ("", [])
-    if task not in ("self-check", "cleanup", "fit", "assemble"):
+    if task not in ("self-check", "cleanup", "fit", "assemble", "qa"):
         print((__doc__ or "").split("\n\n")[1], file=sys.stderr)
         return 2
     if task == "self-check":
@@ -122,11 +123,15 @@ def main() -> int:
             (ROOT / "scripts" / "self_check.py", []),
             (ROOT / "blender" / "fit_atlas.py", ["--self-check"]),
             (ROOT / "blender" / "cleanup_mesh.py", ["--self-check"]),
+            (ROOT / "blender" / "qa.py", ["--self-check"]),
         ]
         failed = [s.name for s, a in checks if run(blender, s, a) != 0]
         print("all Blender self-checks passed" if not failed else f"failed: {', '.join(failed)}")
         return 1 if failed else 0
-    script = {"cleanup": "cleanup_mesh.py", "fit": "fit_atlas.py", "assemble": "assemble.py"}[task]
+    script = {
+        "cleanup": "cleanup_mesh.py", "fit": "fit_atlas.py", "assemble": "assemble.py",
+        "qa": "qa.py",
+    }[task]  # fmt: skip
     return run(blender, ROOT / "blender" / script, args)
 
 

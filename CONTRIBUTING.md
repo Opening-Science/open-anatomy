@@ -10,7 +10,7 @@
    self-check, Secret scan, Data guard, Licence check):
 
    ```bash
-   uv venv .venv -p 3.12 && uv pip install --group test -e '.[mesh]'   # once
+   uv venv .venv -p 3.12 && uv pip install --group test -e '.[mesh,qa]'   # once
    ruff check scripts blender tests && ruff format --check scripts blender tests
    shellcheck scripts/*.sh
    .venv/bin/pytest
