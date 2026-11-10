@@ -118,19 +118,27 @@ def decimate(poly: vtk.vtkPolyData, max_triangles: int) -> vtk.vtkPolyData:
     return poly
 
 
+def affine_of(image: nib.Nifti1Image) -> np.ndarray:
+    """The image's voxel-to-RAS affine. A mask without one cannot be placed."""
+    affine = image.affine
+    if affine is None:
+        raise ValueError("the image has no affine")
+    return affine
+
+
 def rib_end(path: Path) -> dict | None:
     """rib_end_of the rib's mask, or of the mask after a small opening when that
     takes a knob off its tip: the opened rib keeps at least 85% of its voxels,
     its tip moves under 20 mm, and its tip is wider than the raw one's."""
     image = nib.Nifti1Image.from_filename(path)
     mask = np.asanyarray(image.dataobj) > 0
-    raw = rib_end_of(mask, image.affine)
+    raw = rib_end_of(mask, affine_of(image))
     opened = ndimage.binary_opening(mask, structure=ndimage.generate_binary_structure(3, 1))
     labels, count = ndimage.label(opened, structure=np.ones((3, 3, 3)))
     if raw is None or count == 0:
         return raw
     largest = labels == int(np.argmax(np.bincount(labels.ravel())[1:])) + 1
-    cleaned = rib_end_of(largest, image.affine)
+    cleaned = rib_end_of(largest, affine_of(image))
     if (
         cleaned is not None
         and largest.sum() >= 0.85 * mask.sum()
@@ -248,7 +256,7 @@ def modelled_cartilage(
 
     sternum_image = nib.Nifti1Image.from_filename(seg_dir / "sternum.nii.gz")
     sternum = np.argwhere(np.asanyarray(sternum_image.dataobj) > 0)
-    sternum = sternum @ sternum_image.affine[:3, :3].T + sternum_image.affine[:3, 3]
+    sternum = sternum @ affine_of(sternum_image)[:3, :3].T + affine_of(sternum_image)[:3, 3]
     tree = cKDTree(sternum)
     midline = float(np.median(sternum[:, 0]))
     ends, skipped = {}, []
@@ -340,7 +348,7 @@ def cut_reason(path: Path) -> str | None:
         return "not segmented"
     image = nib.Nifti1Image.from_filename(path)
     data = np.asanyarray(image.dataobj) > 0
-    if data.sum() * abs(np.linalg.det(image.affine[:3, :3])) / 1000 < MIN_ML:
+    if data.sum() * abs(np.linalg.det(affine_of(image)[:3, :3])) / 1000 < MIN_ML:
         return "absent or a stray label"
     for axis in range(3):
         k = np.flatnonzero(data.any(tuple(a for a in range(3) if a != axis)))
@@ -360,7 +368,7 @@ def cut_faces(path: Path) -> set[str]:
         k = np.flatnonzero(data.any(tuple(a for a in range(3) if a != axis)))
         if len(k) == 0:
             continue
-        column = image.affine[:3, axis]
+        column = affine_of(image)[:3, axis]
         ras = int(np.argmax(np.abs(column)))
         up, down = "RAS"[ras], "LPI"[ras]  # the RAS axis's positive and negative ends
         high, low = (up, down) if column[ras] > 0 else (down, up)
@@ -607,7 +615,7 @@ def surface(
     lo = np.maximum(np.argwhere(data).min(0) - 3, 0)
     hi = np.argwhere(data).max(0) + 4
     crop = np.pad(data[lo[0] : hi[0], lo[1] : hi[1], lo[2] : hi[2]], PAD).astype(np.float32)
-    spacing = np.linalg.norm(image.affine[:3, :3], axis=0)
+    spacing = np.linalg.norm(affine_of(image)[:3, :3], axis=0)
     target = float(data.sum() * np.prod(spacing))
 
     # grid_mode keeps voxel centres aligned: fine sample j sits at (j + 0.5) / 2 - 0.5.
@@ -616,7 +624,7 @@ def surface(
         # Flat and long bones (sternum, ribs, vertebrae) show the segmentation's
         # slice-to-slice wobble as ripples, so they are blurred more along the
         # slice axis than in-plane.
-        axis = int(np.argmax(np.abs(image.affine[2, :3])))
+        axis = int(np.argmax(np.abs(affine_of(image)[2, :3])))
         label = path.name.removesuffix(".nii.gz")
         ladder = {"sternum": STERNUM_BLURS, "costal_cartilages": CARTILAGE_BLURS}.get(
             label, SLICE_BLURS
@@ -626,10 +634,13 @@ def surface(
         blurs = list(BLUR_VOXELS)
     if centreline:
         fine = straighten(fine, np.argwhere(crop > 0) * spacing, spacing)
+    poly = None
     for blur in blurs:
         poly = smoothest(fine, spacing, blur, target, pieces)
         if abs(enclosed_volume(poly) / target - 1) <= BLUR_TOLERANCE:
             break  # a thin, lobed organ (the pancreas) can need a lighter blur
+    if poly is None:
+        raise ValueError(f"{path.name}: no blur to try")
     if pieces:
         poly = drop_small_pieces(poly, MIN_PIECE_VOXELS * float(np.prod(spacing)))
 
@@ -640,7 +651,7 @@ def surface(
     triangles = triangles_of(poly)
     # The padded crop's first voxel sits at the origin.
     ijk = points / spacing + lo - PAD
-    ras = ijk @ image.affine[:3, :3].T + image.affine[:3, 3]
+    ras = ijk @ affine_of(image)[:3, :3].T + affine_of(image)[:3, 3]
     return ras, triangles.astype(np.uint32), target / 1000, dropped
 
 
@@ -859,7 +870,7 @@ def main() -> None:
             image = nib.Nifti1Image.from_filename(path)
             knobless, trimmed_ml = trim_knobs(
                 np.asanyarray(image.dataobj) > 0,
-                float(abs(np.linalg.det(image.affine[:3, :3]))) / 1000,
+                float(abs(np.linalg.det(affine_of(image)[:3, :3]))) / 1000,
             )
         try:
             ras, triangles, voxel_ml, share = surface(

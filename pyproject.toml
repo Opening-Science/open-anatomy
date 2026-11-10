@@ -13,8 +13,9 @@ pipeline = ["open-anatomy[mesh]", "TotalSegmentator==2.18.0"]
 
 # Tools for the unit tests and the type check. Install with
 #   pip install --group test   (pip 25.1+)   or   uv pip install --group test
+# scipy ships no type information; scipy-stubs gives the type check its types.
 [dependency-groups]
-test = ["pytest==9.2.0"]
+test = ["pytest==9.2.0", "scipy-stubs==1.18.1.1"]
 
 [tool.ruff]
 line-length = 100
