@@ -932,6 +932,22 @@ def test_a_small_far_chip_is_dropped(tmp_path: Path) -> None:
     assert masks["vertebrae_T1"].sum() == 1000
 
 
+def test_small_pieces_that_add_up_past_the_limit_are_settled_largest_first(tmp_path: Path) -> None:
+    seg = vertebra_pair(tmp_path, chip=None, moved=False)
+    t1 = np.asanyarray(nib.load(seg / "vertebrae_T1.nii.gz").dataobj) > 0
+    lone = t1 | box(t1.shape, (3, 3, 48), (5, 6, 50))  # 12 voxels, 1.2%: noise, left alone
+    save(seg / "vertebrae_T1.nii.gz", lone)
+    masks, notes = mesh.settle_fragments(seg, ["vertebrae_T1", "vertebrae_T2"])
+    assert notes == [] and masks["vertebrae_T1"].sum() == 1012
+    # A second chip of 1.6% takes the loose share to 2.7%: each is under the
+    # 2% limit, but the build would stop on the two, so the larger one goes.
+    save(seg / "vertebrae_T1.nii.gz", lone | box(t1.shape, (30, 30, 48), (32, 34, 50)))
+    masks, notes = mesh.settle_fragments(seg, ["vertebrae_T1", "vertebrae_T2"])
+    assert [(n["voxels"], n["action"]) for n in notes] == [(16, "dropped")]
+    assert masks["vertebrae_T1"].sum() == 1012
+    assert 12 / 1012 <= mesh.MAX_DROPPED_SHARE
+
+
 def test_a_large_loose_piece_is_left_for_the_build_to_stop_on(tmp_path: Path) -> None:
     seg = vertebra_pair(tmp_path, chip=None, moved=False)
     t1 = np.asanyarray(nib.load(seg / "vertebrae_T1.nii.gz").dataobj) > 0

@@ -600,6 +600,9 @@ def settle_fragments(seg_dir: Path, labels: list[str]) -> tuple[dict[str, np.nda
     segmentation gave that neighbour's voxels the wrong label; dropped when
     it is under FRAGMENT_SHARE (a chip off a process, calcified cartilage at
     a rib's end); otherwise left, and the split bone stops the build.
+    Pieces of at most MAX_DROPPED_SHARE each are noise and stay, unless
+    together they hold more than that share, which would stop the build:
+    then they are settled too, largest first, until the rest is within it.
     Returns the corrected masks and a note per piece moved or dropped.
     """
     masks, affines = {}, {}
@@ -619,15 +622,18 @@ def settle_fragments(seg_dir: Path, labels: list[str]) -> tuple[dict[str, np.nda
         spacing = np.linalg.norm(affines[label][:3, :3], axis=0)
         voxel_ml = float(np.prod(spacing)) / 1000
         main = int(np.argmax(sizes)) + 1
+        kept = total  # the bone's voxels after the pieces moved or dropped so far
+        loose = total - int(sizes[main - 1])  # those of them outside the largest piece
         for piece in sorted(set(range(1, count + 1)) - {main}, key=lambda k: -sizes[k - 1]):
             share = sizes[piece - 1] / total
-            if share <= MAX_DROPPED_SHARE:
+            if share <= MAX_DROPPED_SHARE and loose <= MAX_DROPPED_SHARE * kept:
                 continue  # noise at the limit the manifest already records
             part = pieces == piece
             if (
                 bone_kind(label) in BRIDGEABLE
                 and bridge_gap(masks[label] & ((pieces == main) | part), spacing)[1] is not None
             ):
+                loose -= int(sizes[piece - 1])
                 continue  # one bone with a gap: bridged when it is meshed
             grown = ndimage.binary_dilation(part)
             contact = {
@@ -649,6 +655,10 @@ def settle_fragments(seg_dir: Path, labels: list[str]) -> tuple[dict[str, np.nda
             elif share < FRAGMENT_SHARE:
                 masks[label] &= ~part
                 notes.append({**note, "action": "dropped"})
+            else:
+                continue
+            kept -= int(sizes[piece - 1])
+            loose -= int(sizes[piece - 1])
     return masks, notes
 
 
