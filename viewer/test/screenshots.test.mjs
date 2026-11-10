@@ -489,7 +489,12 @@ describe("the viewer in headless Chromium", () => {
       await new Promise((r) => browser.child.once("exit", r));
     }
     server?.close();
-    if (profile) rmSync(profile, { recursive: true, force: true });
+    // Chromium's helpers may still be writing as it exits; a leftover profile must not fail the run.
+    try {
+      if (profile) rmSync(profile, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+    } catch (err) {
+      console.warn(`could not remove ${profile}: ${err.message}`);
+    }
   });
 
   /** The 3D view's pixels, as the page lays them out. */
