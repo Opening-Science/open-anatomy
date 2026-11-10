@@ -1441,11 +1441,32 @@ def test_the_sternums_body_ends_above_its_xiphoid_and_its_border_is_found_per_si
     sternum = plate_sternum(xiphoid=True)
     assert sternum[:, 2].min() == 30 and mesh.sternum_floor(sternum) == pytest.approx(60.0, abs=1.5)
     edge, centre = mesh.sternum_edge(sternum, -1.0, 100.0)
-    np.testing.assert_allclose(edge, [-12, 63, 100])
+    np.testing.assert_allclose(edge, [-12, 66, 100])  # on its border, at its front face
     assert centre == 0
-    np.testing.assert_allclose(mesh.sternum_edge(sternum, 1.0, 100.0)[0], [12, 63, 100])
+    np.testing.assert_allclose(mesh.sternum_edge(sternum, 1.0, 100.0)[0], [12, 66, 100])
     # Beyond its top the nearest level stands in.
-    np.testing.assert_allclose(mesh.sternum_edge(sternum, 1.0, 190.0)[0], [12, 63, 190])
+    np.testing.assert_allclose(mesh.sternum_edge(sternum, 1.0, 190.0)[0], [12, 66, 190])
+
+
+def test_a_band_meets_a_leaning_sternum_along_its_front_face_just_behind_it() -> None:
+    # The plate leant back at the top: 3 mm further back for every 10 mm of height.
+    sternum = plate_sternum()
+    sternum[:, 1] -= 0.3 * (sternum[:, 2] - 100)
+    edge, _ = mesh.sternum_edge(sternum, 1.0, 100.0)
+    assert edge[1] == pytest.approx(66.0, abs=1.0)  # the face at that height, not the slab's
+    bands, _ = mesh.band_curves(seventh_pair((6.0, 6.0)), sternum)
+    face = np.array([0.0, 1.0, 0.3]) / np.hypot(1.0, 0.3)
+    for rib, side in (("rib_left_7", -1.0), ("rib_right_7", 1.0)):
+        band = bands[rib]
+        at = band["endAt"]
+        # Its front face lies SET_BACK_MM behind the sternum's, and parallel to it.
+        behind = (edge * [side, 1, 1] - band["curve"][at]) @ face
+        assert behind == pytest.approx(band["halfD"][at] + mesh.SET_BACK_MM, abs=0.5)
+        assert abs(band["across"][at] @ face) < 0.02
+        assert abs(band["tangent"][at] @ face) < 0.02
+        # And it comes to the sternum from behind, never from in front of its face.
+        ahead = (band["curve"][band["tipAt"] : at + 1] - edge * [side, 1, 1]) @ face
+        assert ahead.max() < 0
 
 
 def test_a_band_leaves_its_rib_in_line_with_the_ribs_own_section_and_takes_the_pairs() -> None:
@@ -1497,8 +1518,10 @@ def test_a_band_leaves_its_rib_in_line_with_the_ribs_own_section_and_takes_the_p
     np.testing.assert_allclose(np.interp(0.6, f, half_w), np.interp(0.6, g, other_w), rtol=0.01)
     # Into the sternum's border on its own side, NOTCH_MM deep at full width, at the
     # height of the pair's rib ends; the rounded end stays short of the sternum's middle.
-    np.testing.assert_allclose(curve[-1], [-12 + mesh.NOTCH_MM, 63, 100])
-    np.testing.assert_allclose(mirrored[-1], [12 - mesh.NOTCH_MM, 63, 100])
+    # Its front face lies SET_BACK_MM behind the sternum's (y = 66), not behind its border.
+    set_back = half_d[-1] + mesh.SET_BACK_MM
+    np.testing.assert_allclose(curve[-1], [-12 + mesh.NOTCH_MM, 66 - set_back, 100])
+    np.testing.assert_allclose(mirrored[-1], [12 - mesh.NOTCH_MM, 66 - set_back, 100])
     assert -12 < bands["rib_left_7"]["curve"][-1][0] <= -1
     assert 12 > bands["rib_right_7"]["curve"][-1][0] >= 1
     # Left and right are mirror images where the ribs are.

@@ -91,6 +91,9 @@ ARCH_MIN_MM = 5.0  # a band of ribs 8-10 shorter than this is not worth laying
 CHEST_AXIS_MM = 100.0  # the chest wall faces away from an axis this far behind the sternum
 XIPHOID_SHARE = 0.7  # of the sternum's usual width: what hangs below that is the xiphoid
 NOTCH_MM = 2.0  # a cartilage keeps its full width this far into the sternum's border
+SET_BACK_MM = 1.0  # a cartilage's front face lies this far behind the sternum's, where they meet
+FACE_SLAB_MM = 2.5  # the sternum's front face at a height is read from this far above and below
+FACE_SPAN_MM = 6.0  # and its lean from the face this far above and below that
 CARTILAGE_VOXEL_MM = 0.9  # the bands' field is sampled this far apart, then contoured
 FIELD_REACH_MM = 3.0  # the field tells inside from outside up to this far from a band's surface
 UNION_BLEND_MM = 3.0  # bands nearer each other than about half this run together in a fillet
@@ -105,10 +108,10 @@ KNOB_MAX_ML = 1.0  # a lump the opening separates from a rib is taken off below 
 RIB_BIN_MM = 3.0
 END_SKIP_BINS = 3  # bins of a rib's centreline at its front end that curl into a corner
 END_FIT_BINS = 7  # bins behind those (21 mm) that give the end's direction
+END_SECTION_MM = (8.0, 18.0)  # behind a rib's tip: its section is taken clear of the rounding
 RIB_SMOOTH_MM = 9.0
 RIB_LEAD_MM = 30.0  # a rib's centreline runs on this far past its ends, for the blur's reach
 RIB_KEPT_SHARE = 0.9  # of a rib's volume must lie where its centreline puts it (real ribs: 0.96+)
-END_SECTION_MM = (8.0, 18.0)  # behind a rib's tip: its section is taken clear of the rounding
 PAD = 2  # empty voxels around a crop, so the surface closes
 UPSAMPLE = 2
 BLUR_VOXELS = (1.0, 0.5, 0.25)  # Gaussian sigmas to try, in source voxels
@@ -626,15 +629,20 @@ def sternum_floor(sternum: np.ndarray) -> float:
 def sternum_edge(sternum: np.ndarray, side: float, height: float) -> tuple[np.ndarray, float]:
     """Where a cartilage meets the sternum at a height (RAS z, mm): the point
     on the sternum's border on one side (side +1 is toward larger x, -1
-    toward smaller) halfway through the sternum's thickness there, and the x
-    of the sternum's middle at that height. From the sternum within 5 mm of
-    the height, or its nearest level if the height is beyond its ends."""
+    toward smaller) on the sternum's front face there, and the x of the
+    sternum's middle at that height. The border is taken from the sternum
+    within 5 mm of the height, or its nearest level if the height is beyond
+    its ends; the front face from the border within FACE_SLAB_MM of it (the
+    sternum leans, and a thicker slab would read its lean as thickness), as
+    the 90th percentile of its points from back to front."""
     off = np.abs(sternum[:, 2] - height)
     slab = sternum[off <= max(5.0, float(off.min()))]
     centre = float(np.median(slab[:, 0]))
     reach = (slab[:, 0] - centre) * side
+    off = off[off <= max(5.0, float(off.min()))][reach > reach.max() - 8.0]
     border = slab[reach > reach.max() - 8.0]
-    return np.array([centre + side * reach.max(), border[:, 1].mean(), height]), centre
+    front = float(np.percentile(border[off <= max(FACE_SLAB_MM, float(off.min())), 1], 90))
+    return np.array([centre + side * reach.max(), front, height]), centre
 
 
 def band_curves(
@@ -729,16 +737,25 @@ def band_curves(
             chord = edge - tip
             chord_rise = chord[2] / max(np.hypot(chord[0], chord[1]), 1e-6)
             rise = min(0.15 + 0.2 * (number - 2), max(chord_rise, 0.0) + 0.3)
+            # The sternum leans: the band meets it along its front face, not
+            # the body's, with its own face SET_BACK_MM behind it, so the
+            # sternum does not stand in front of its cartilages like a slab.
+            lean = (
+                sternum_edge(sternum, side, heights[number] + FACE_SPAN_MM)[0]
+                - sternum_edge(sternum, side, heights[number] - FACE_SPAN_MM)[0]
+            )
+            face = np.array([0.0, lean[2], -lean[1]]) / np.hypot(lean[1], lean[2])
             t1 = np.array([-side, 0.0, rise])
+            t1 = t1 - face * (t1 @ face)
             t1 /= np.linalg.norm(t1)
             end_w = w_pair * (1 + CARTILAGE_WIDEN)
             end_d = max(end_w / CARTILAGE_FLAT, MIN_HALF_DEPTH_MM * (1 + CARTILAGE_WIDEN))
             # Into the sternum's border at full width; the rounded end lies
             # inside the sternum, short of its middle.
-            p1 = edge - np.array([side * NOTCH_MM, 0.0, 0.0])
+            p1 = edge - np.array([side * NOTCH_MM, 0.0, 0.0]) - face * (end_d + SET_BACK_MM)
             room = ((p1[0] - centre) * side - 1.0) / abs(t1[0])
             run_out = float(np.clip(room, 0.0, end_w))
-            across1 = wall_across(t1, outward(p1))
+            across1 = wall_across(t1, face)
             span = float(np.linalg.norm(p1 - tip))
             if span < 1.0:
                 skipped.append((rib, "its end lies on its target"))
