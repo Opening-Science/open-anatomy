@@ -142,9 +142,40 @@ CARDIOVASCULAR: tuple[Structure, ...] = (
               "The large vein that returns blood from the legs and belly to the heart."),
 )  # fmt: skip
 
-# Respiratory: the five lung lobes and the trachea.
+# Respiratory: the five lung lobes and the trachea. The left lung has two
+# lobes and the right three; a lobe is coloured by its level, the same on both
+# sides, so the fissures between the lobes of one lung show.
 
-RESPIRATORY: tuple[Structure, ...] = ()
+UPPER_LOBE = (0.86, 0.56, 0.54)
+MIDDLE_LOBE = (0.80, 0.47, 0.47)
+LOWER_LOBE = (0.72, 0.39, 0.41)
+
+RESPIRATORY: tuple[Structure, ...] = (
+    Structure("lung_upper_lobe_left", "UBERON:0008952", "upper lobe of left lung", "respiratory",
+              UPPER_LOBE, "left lung, upper lobe",
+              "The upper of the left lung's two lobes; the lungs pass oxygen from the air into "
+              "the blood."),
+    Structure("lung_lower_lobe_left", "UBERON:0008953", "lower lobe of left lung", "respiratory",
+              LOWER_LOBE, "left lung, lower lobe",
+              "The lower of the left lung's two lobes, at the back, resting on the diaphragm, the "
+              "breathing muscle."),
+    Structure("lung_upper_lobe_right", "UBERON:0002170", "upper lobe of right lung", "respiratory",
+              UPPER_LOBE, "right lung, upper lobe",
+              "The top of the right lung's three lobes; the right lung is the larger, as the "
+              "heart sits to the left."),
+    Structure("lung_middle_lobe_right", "UBERON:0002174", "middle lobe of right lung",
+              "respiratory", MIDDLE_LOBE, "right lung, middle lobe",
+              "The smallest of the right lung's three lobes, a wedge at the front beside the "
+              "heart."),
+    Structure("lung_lower_lobe_right", "UBERON:0002171", "lower lobe of right lung", "respiratory",
+              LOWER_LOBE, "right lung, lower lobe",
+              "The lowest of the right lung's three lobes, at the back, resting on the diaphragm, "
+              "the breathing muscle."),
+    Structure("trachea", "UBERON:0003126", "trachea", "respiratory", (0.74, 0.82, 0.86),
+              "windpipe",
+              "The tube that carries air from the throat down to the lungs, held open by rings of "
+              "cartilage."),
+)  # fmt: skip
 
 # Digestive: the gut from the oesophagus to the colon with the liver,
 # gallbladder and pancreas. The spleen is a lymphoid organ; it goes with the
