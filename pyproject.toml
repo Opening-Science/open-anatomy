@@ -10,6 +10,8 @@ requires-python = ">=3.11"
 mesh = ["nibabel==5.4.2", "numpy==2.5.4", "scipy==1.18.1", "vtk==9.7.2"]
 # fetch.py, segment.py and mesh.py
 pipeline = ["open-anatomy[mesh]", "TotalSegmentator==2.18.0"]
+# qa_sheet.py's contact sheets
+qa = ["pillow==13.0.0"]
 
 # Tools for the unit tests and the type check. Install with
 #   pip install --group test   (pip 25.1+)   or   uv pip install --group test
