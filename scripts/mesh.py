@@ -65,7 +65,10 @@ SETS_OF_PIECES = {"costal_cartilages"}  # one node, several separate pieces
 MIN_PIECE_VOXELS = 150  # a piece smaller than this (0.5 ml) in a set is a loose blob
 LEVEL_STEPS = 12
 SLICE_SMOOTHED = ("sternum", "rib_", "vertebrae_", "costal_cartilages", "sacrum")
-SLICE_BLURS = ((0.5, 2.0), (0.5, 1.5), (0.25, 1.0))  # (in-plane, along slices), source voxels
+# (in-plane, along slices), in source voxels. Half a voxel in-plane left a
+# vertebral body's wall fluted: the voxel steps of each slice, drawn out along
+# the slice axis by the stronger blur there.
+SLICE_BLURS = ((1.0, 2.0), (0.5, 1.5), (0.25, 1.0))
 STERNUM_BLURS = ((1.0, 3.0), (0.75, 2.0), (0.5, 1.5))  # its ripples span several slices
 RIB_BLURS = ((0.75, 5.0), (0.75, 3.5), (0.75, 2.0))  # (across, along the rib) in mm: unroll()
 CARTILAGE_BLURS = ((1.0, 1.5), (0.75, 1.0), (0.5, 0.75))  # thin, lumpy segmentation
