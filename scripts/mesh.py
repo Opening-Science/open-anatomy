@@ -48,7 +48,7 @@ import nibabel as nib  # noqa: E402
 import numpy as np  # noqa: E402
 import vtk  # noqa: E402
 from scipy import ndimage  # noqa: E402
-from vtk.util.numpy_support import numpy_to_vtk, vtk_to_numpy  # noqa: E402
+from vtkmodules.util.numpy_support import numpy_to_vtk, vtk_to_numpy  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -122,7 +122,7 @@ def rib_end(path: Path) -> dict | None:
     """rib_end_of the rib's mask, or of the mask after a small opening when that
     takes a knob off its tip: the opened rib keeps at least 85% of its voxels,
     its tip moves under 20 mm, and its tip is wider than the raw one's."""
-    image = nib.load(path)
+    image = nib.Nifti1Image.from_filename(path)
     mask = np.asanyarray(image.dataobj) > 0
     raw = rib_end_of(mask, image.affine)
     opened = ndimage.binary_opening(mask, structure=ndimage.generate_binary_structure(3, 1))
@@ -246,7 +246,7 @@ def modelled_cartilage(
     cartilage with the reason; the manifest marks the node as modelled."""
     from scipy.spatial import cKDTree
 
-    sternum_image = nib.load(seg_dir / "sternum.nii.gz")
+    sternum_image = nib.Nifti1Image.from_filename(seg_dir / "sternum.nii.gz")
     sternum = np.argwhere(np.asanyarray(sternum_image.dataobj) > 0)
     sternum = sternum @ sternum_image.affine[:3, :3].T + sternum_image.affine[:3, 3]
     tree = cKDTree(sternum)
@@ -338,7 +338,7 @@ def cut_reason(path: Path) -> str | None:
     """
     if not path.exists():
         return "not segmented"
-    image = nib.load(path)
+    image = nib.Nifti1Image.from_filename(path)
     data = np.asanyarray(image.dataobj) > 0
     if data.sum() * abs(np.linalg.det(image.affine[:3, :3])) / 1000 < MIN_ML:
         return "absent or a stray label"
@@ -353,7 +353,7 @@ def cut_faces(path: Path) -> set[str]:
     """The sides of the body where the scan cuts a mask: "S" or "I" (its top
     or bottom slice), "L", "R", "A" or "P" (the in-plane border), named by the
     direction each face of the volume points in RAS."""
-    image = nib.load(path)
+    image = nib.Nifti1Image.from_filename(path)
     data = np.asanyarray(image.dataobj) > 0
     faces = set()
     for axis in range(3):
@@ -592,7 +592,7 @@ def surface(
     A light windowed-sinc pass (Taubin-like, volume-keeping) removes the rest
     of the noise.
     """
-    image = nib.load(path)
+    image = nib.Nifti1Image.from_filename(path)
     data = mask if mask is not None else np.asanyarray(image.dataobj) > 0
     if not data.any():
         raise ValueError(f"{path.name} is empty")
@@ -794,7 +794,7 @@ def write_glb(path: Path, parts: list[dict], attribution: dict | None = None) ->
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     parser.add_argument("--case", required=True)
     parser.add_argument("--seg-dir", type=Path, help="default: data/work/<case>/seg")
     parser.add_argument("--out-dir", type=Path, help="default: data/work/<case>")
@@ -856,7 +856,7 @@ def main() -> None:
             continue
         knobless, trimmed_ml = None, 0.0
         if s.label.startswith("rib_") and path.exists():
-            image = nib.load(path)
+            image = nib.Nifti1Image.from_filename(path)
             knobless, trimmed_ml = trim_knobs(
                 np.asanyarray(image.dataobj) > 0,
                 float(abs(np.linalg.det(image.affine[:3, :3]))) / 1000,

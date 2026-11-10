@@ -138,7 +138,7 @@ def check(case: Case) -> str | dict:
 
 def main() -> None:
     sources = json.loads((ROOT / "sources.json").read_text())
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     parser.add_argument("--source", default="totalsegmentator-v201")
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
