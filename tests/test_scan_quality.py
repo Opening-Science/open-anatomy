@@ -306,6 +306,37 @@ def test_real_refuses_if_any_one_of_several_runs_is_unprotected(
         run_main(monkeypatch, "--real", "--runs", str(ok), str(bad))
 
 
+@pytest.mark.parametrize("where", ["runs", "out"])
+def test_a_path_under_data_vitronic_is_refused_without_real(
+    ansur_root: Path, monkeypatch: pytest.MonkeyPatch, where: str
+) -> None:
+    personal = ansur_root / "data" / "vitronic"
+    personal.mkdir(parents=True)
+    run = make_run(personal if where == "runs" else ansur_root, "r1", standing_body())
+    out = (personal if where == "out" else ansur_root) / "out.json"
+    with pytest.raises(SystemExit, match="refused: data/vitronic/ holds real"):
+        run_main(monkeypatch, "--runs", str(run), "--out", str(out))
+    assert not out.exists()
+
+
+def test_a_folder_named_like_data_vitronic_is_not_refused(
+    ansur_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    near = ansur_root / "data" / "vitronic-like"
+    near.mkdir(parents=True)
+    run_main(monkeypatch, "--runs", str(make_run(near, "r1", standing_body())))
+
+
+def test_real_measures_a_protected_run_under_data_vitronic(
+    ansur_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    personal = ansur_root / "data" / "vitronic"
+    personal.mkdir(parents=True)
+    body = standing_body()
+    run = make_run(personal, "r1", body, face_protected=True, source=body)
+    run_main(monkeypatch, "--real", "--runs", str(run))
+
+
 def test_real_accepts_a_protected_run(
     ansur_root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

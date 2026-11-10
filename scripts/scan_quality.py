@@ -28,8 +28,9 @@ beyond its limit at the mean or the 95th percentile; the face is one of those
 regions, so a cleanup that smooths or fills the face fails here even when the
 head as a whole passes. With --real it refuses any run whose cleanup did not
 protect a face region, or whose input surface is missing so the face cannot
-be checked. ANSUR II outside the 1st to 99th percentile is a flag, never a
-reject.
+be checked. Without --real it refuses any path under a data/vitronic/ folder,
+where real scans are kept, so that none is measured without the face check.
+ANSUR II outside the 1st to 99th percentile is a flag, never a reject.
 """
 
 from __future__ import annotations
@@ -37,6 +38,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -57,6 +59,8 @@ FACE_BELOW = 0.96  # fraction of stature: the face lies between the chin and the
 FACE_FRONT = 0.25  # the front of the head: past this share of its half-depth (+Z front)
 NEAREST = 8  # triangles checked exactly per vertex
 REPEAT_TOLERANCE_MM = 10.0
+# Real people's scans are kept under data/vitronic/, here or in another checkout.
+PERSONAL = re.compile(r"(^|[\\/])data[\\/]vitronic([\\/]|$)")
 HIP_AT = 0.52  # fraction of stature where hip breadth is taken (ANSUR-like)
 GAP_MM = 15  # a side-to-side gap this wide separates an arm from the trunk
 ANSUR = {"male": "ANSUR_II_MALE_Public.csv", "female": "ANSUR_II_FEMALE_Public.csv"}
@@ -200,6 +204,11 @@ def main() -> None:
         help="a real person's scan: refused unless the cleanup protected the face",
     )  # fmt: skip
     args = parser.parse_args()
+    if not args.real:
+        for path in [*args.runs, *([args.out] if args.out else [])]:
+            if PERSONAL.search(str(path)) or PERSONAL.search(str(path.resolve())):
+                sys.exit(f"{path}: refused: data/vitronic/ holds real people's scans, which "
+                         "are measured only with --real (docs/scan-enhancement.md)")  # fmt: skip
     ranges = ansur(args.sex)
     runs, per_measure = [], {}
     for run in args.runs:
