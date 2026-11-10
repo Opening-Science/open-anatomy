@@ -243,8 +243,9 @@ def blur(image: np.ndarray, sigma: float) -> np.ndarray:
     kernel /= kernel.sum()
     height, width = image.shape
     padded = np.pad(image, radius, mode="edge")
-    rows = sum(k * padded[:, i : i + width] for i, k in enumerate(kernel))
-    return sum(k * rows[i : i + height] for i, k in enumerate(kernel))
+    zero = np.zeros(())  # starts each sum as an array; adding it changes no value
+    rows = sum((k * padded[:, i : i + width] for i, k in enumerate(kernel)), zero)
+    return sum((k * rows[i : i + height] for i, k in enumerate(kernel)), zero)
 
 
 def shifted(array: np.ndarray, dy: int, dx: int, fill) -> np.ndarray:
