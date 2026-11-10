@@ -1090,12 +1090,18 @@ def test_ribs_8_to_10_merge_into_the_band_above_and_an_orphan_is_skipped() -> No
         along = shown(above)[0]
         k = above["tipAt"] + int(np.searchsorted(along, mesh.ARCH_JOIN[8]))
         assert along[k - above["tipAt"]] == pytest.approx(mesh.ARCH_JOIN[8], abs=0.01)
-        assert band["endAt"] == len(band["curve"]) - 1
-        np.testing.assert_allclose(band["curve"][-1], above["curve"][k])  # on its centreline
-        assert band["halfW"][-1] == pytest.approx(above["halfW"][k])
-        assert band["halfD"][-1] == pytest.approx(above["halfD"][k])
-        assert band["tangent"][-1] @ above["tangent"][k] > 0.99  # running along it
-        assert abs(band["across"][-1] @ above["across"][k]) > 0.99  # with the same face
+        j = band["endAt"]
+        np.testing.assert_allclose(band["curve"][j], above["curve"][k])  # on its centreline
+        assert band["halfW"][j] == pytest.approx(above["halfW"][k])
+        assert band["halfD"][j] == pytest.approx(above["halfD"][k])
+        assert band["tangent"][j] @ above["tangent"][k] > 0.99  # running along it
+        assert abs(band["across"][j] @ above["across"][k]) > 0.99  # with the same face
+        # Then on along that centreline, if at all, and ending short of the band's own end.
+        run = len(band["curve"]) - 1 - j
+        assert 0 <= run < above["endAt"] - k
+        np.testing.assert_allclose(band["curve"][j + 1 :], above["curve"][k + 1 : k + 1 + run])
+        assert band["halfW"][-1] <= band["halfW"][j]
+        assert band["halfD"][-1] <= band["halfD"][j]
         assert np.all(np.abs(np.diff(shown(band)[2])) < 0.05)  # the width never steps
 
 

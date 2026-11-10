@@ -76,7 +76,13 @@ CARTILAGE_WIDEN = 0.15  # a cartilage of ribs 1-7 is this much wider at the ster
 ARCH_JOIN = {8: 0.75, 9: 0.6, 10: 0.5}  # where along the cartilage above ribs 8-10 merge into it
 CARTILAGE_HALF_W_MM = 9.0  # a band is at most 18 mm wide, whatever its rib's end measures
 TANGENT_SHARE = 0.7  # of the rib-to-sternum span, for the cartilage curve's end tangents
-ARCH_REACH = 0.4  # the same, where a band of ribs 8-10 runs into the band above
+ARCH_RUN_MM = 24.0  # a band of ribs 8-10 runs on this far inside the band above, thinning out
+ARCH_THIN = 0.3  # of the band above's section: what is left of it where it ends in there
+ARCH_LEAVE_MM = 30.0  # of its way from its rib before a band of ribs 8-10 lies beside the one above
+ARCH_SMOOTH_MM = (
+    8.0  # the band above's frame is smoothed this far along before a band is hung on it
+)
+ARCH_MIN_MM = 5.0  # a band of ribs 8-10 shorter than this is not worth laying
 CHEST_AXIS_MM = 100.0  # the chest wall faces away from an axis this far behind the sternum
 XIPHOID_SHARE = 0.7  # of the sternum's usual width: what hangs below that is the xiphoid
 NOTCH_MM = 2.0  # a cartilage keeps its full width this far into the sternum's border
@@ -321,6 +327,77 @@ def arc_length(curve: np.ndarray) -> np.ndarray:
     return np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(curve, axis=0), axis=1))])
 
 
+def eased(share: np.ndarray) -> np.ndarray:
+    """A share clipped to 0..1 and eased in and out (smoothstep)."""
+    share = np.clip(share, 0, 1)
+    return share**2 * (3 - 2 * share)
+
+
+def turned(
+    tangents: np.ndarray, across: np.ndarray, target: np.ndarray, weight: np.ndarray
+) -> np.ndarray:
+    """Width directions turned about their tangents toward target directions,
+    by weight (0 to 1) of the angle between them. The target's opposite is
+    the same band, so the target is taken the way round that needs less
+    turning where the weight is greatest."""
+    flat = target - tangents * np.einsum("ij,ij->i", target, tangents)[:, None]
+    flat /= np.maximum(np.linalg.norm(flat, axis=1, keepdims=True), 1e-9)
+    if flat[np.argmax(weight)] @ across[np.argmax(weight)] < 0:
+        flat = -flat
+    angle = weight * np.arctan2(
+        np.einsum("ij,ij->i", np.cross(across, flat), tangents),
+        np.einsum("ij,ij->i", across, flat),
+    )
+    return across * np.cos(angle)[:, None] + np.cross(tangents, across) * np.sin(angle)[:, None]
+
+
+def arch_path(
+    tip: np.ndarray, start: np.ndarray, above: dict, join: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    """The centreline of a band of ribs 8 to 10, from its rib's end (tip,
+    where the rib runs along the unit direction start) to sample join of
+    the centreline of the band above (its "curve", "tangent" and "across"),
+    with the share (0 to 1) by which each of its samples lies beside that
+    band and that band's width direction there. The path is laid out in the
+    band above's frame: so far from its centreline along its width, and so
+    far out of its plane. The first closes smoothly to nothing at the join,
+    with no slope at either end, so the band keeps to its own side all the
+    way, bends where the band above bends, and runs into its centreline
+    along it. The second closes within ARCH_LEAVE_MM, so the two lie in one
+    plane before they overlap and neither lies over the other like a
+    shingle. Over that first stretch the path also blends out of the rib's
+    own line, so the band leaves its rib without a kink. Behind the band
+    above's first sample its line is carried on straight. None if the rib
+    ends less than ARCH_MIN_MM before the join."""
+    curve, tangent, across = above["curve"][: join + 1], above["tangent"], above["across"]
+    along = arc_length(curve)
+    nearest = int(np.argmin(np.linalg.norm(curve - tip, axis=1)))
+    behind = min(float((tip - curve[0]) @ tangent[0]), 0.0) if nearest == 0 else 0.0
+    first, way = along[nearest] + behind, along[-1] - along[nearest] - behind
+    if way < ARCH_MIN_MM:
+        return None
+    u = np.linspace(first, along[-1], int(np.ceil(1.5 * way / CARTILAGE_SAMPLE_MM)) + 1)
+
+    def there(values: np.ndarray) -> np.ndarray:
+        return np.stack([np.interp(u, along, values[: join + 1, d]) for d in range(3)], 1)
+
+    centre = there(curve) + np.minimum(u, 0.0)[:, None] * tangent[0]
+    # The band above's frame turns unevenly (not at all inside its rib, then
+    # at once), and a path held out from it on a long arm would kink with
+    # it: the directions it is held along are smoothed along the way.
+    faces, spread = there(across), ARCH_SMOOTH_MM / (u[1] - u[0])
+    wide = ndimage.gaussian_filter1d(faces, spread, axis=0, mode="nearest")
+    wide /= np.linalg.norm(wide, axis=1, keepdims=True)
+    out = np.cross(ndimage.gaussian_filter1d(there(tangent), spread, axis=0, mode="nearest"), wide)
+    out /= np.linalg.norm(out, axis=1, keepdims=True)
+    lying = eased((u - first) / min(ARCH_LEAVE_MM, way))
+    off = (tip - centre[0]) @ wide[0] * (1 - eased((u - first) / way))
+    lift = (tip - centre[0]) @ out[0] * (1 - lying)
+    beside = centre + off[:, None] * wide + lift[:, None] * out
+    own = tip + np.outer(u - first, start)
+    return own + lying[:, None] * (beside - own), lying, faces
+
+
 def densify(curve: np.ndarray, *profiles: np.ndarray, step: float = CARTILAGE_SAMPLE_MM) -> tuple:
     """The curve, and each per-sample profile with it, resampled (linearly)
     by arc length every step mm."""
@@ -333,11 +410,16 @@ def densify(curve: np.ndarray, *profiles: np.ndarray, step: float = CARTILAGE_SA
 def laid_out(band: dict) -> dict:
     """A band ready to be measured against: both ends rounded (rounded_ends),
     the centreline resampled every CARTILAGE_SAMPLE_MM ("curve") with its
-    half widths and depths ("halfW", "halfD") and its frames (frames():
-    "tangent", "across")."""
+    half widths and depths ("halfW", "halfD") and its frames ("tangent",
+    "across": the band's own width directions where it has them, or
+    frames() from the directions it starts and ends with)."""
     points, half_w, half_d = rounded_ends(band["curve"], band["halfW"], band["halfD"])
     points, half_w, half_d = densify(points, half_w, half_d)
     tangents, across, _ = frames(points, band["across0"], band.get("across1"))
+    if "across" in band:  # laid out by band_curves: its own width directions, by arc length
+        old, new = arc_length(band["curve"]), arc_length(points)
+        own = np.stack([np.interp(new, old, band["across"][:, d]) for d in range(3)], 1)
+        across = turned(tangents, across, own, np.ones(len(points)))
     return {"curve": points, "halfW": half_w, "halfD": half_d, "tangent": tangents,
             "across": across}  # fmt: skip
 
@@ -412,11 +494,24 @@ def rasterise_bands(
         last = np.minimum(np.ceil((curve.max(0) + margin - lo) / voxel_mm).astype(int) + 1, shape)
         ijk = np.indices(last - first).reshape(3, -1).T + first
         own = band_field(band, ijk * voxel_mm + lo, margin).reshape(last - first)
-        # A smooth maximum: where the two are within the blend of each other it lies above both.
         part = field[first[0] : last[0], first[1] : last[1], first[2] : last[2]]
-        share = np.clip(0.5 + 0.5 * (own - part) / blend, 0, 1)
-        part += (own - part) * share + blend * share * (1 - share)
+        # A smooth maximum: where the two are within the blend of each other it
+        # lies above both, by as much as their surfaces face each other.
+        fillet = np.clip(blend - np.abs(own - part), 0, None) ** 2 / (4 * blend)
+        part[:] = np.maximum(own, part) + fillet * facing(own, part, 2 * blend)
     return np.clip(field, -FIELD_REACH_MM, FIELD_REACH_MM), lo
+
+
+def facing(one: np.ndarray, other: np.ndarray, reach: float) -> np.ndarray:
+    """How much two fields' surfaces face each other at each sample, from 0
+    to 1: 0 where they slope the same way (two faces lying in one plane), 1
+    where they slope at right angles or against each other (a crease, or the
+    two sides of a slit), and 1 where either has no slope within reach of
+    its surface (far outside it, where it is cut off)."""
+    slopes = [np.stack(np.gradient(np.maximum(f, -reach).astype(np.float64))) for f in (one, other)]
+    sizes = [np.linalg.norm(s, axis=0) for s in slopes]
+    cosine = (slopes[0] * slopes[1]).sum(0) / np.maximum(sizes[0] * sizes[1], 1e-12)
+    return np.where(np.minimum(*sizes) > 1e-6, np.clip(1 - cosine, 0, 1), 1.0)
 
 
 def evened(
@@ -616,7 +711,6 @@ def band_curves(
         tip, start = e["tip"], e["direction"]
         across0, w0, d0 = starts[rib]
         w_pair, side = widths[rib], sides[rib]
-        run_out = 0.0
         if number <= 7:
             edge, centre = sternum_edge(sternum, side, heights[number])
             # Lower cartilages rise more steeply into the sternum, but never
@@ -635,50 +729,67 @@ def band_curves(
             room = ((p1[0] - centre) * side - 1.0) / abs(t1[0])
             run_out = float(np.clip(room, 0.0, end_w))
             across1 = wall_across(t1, outward(p1))
-            end_reach = TANGENT_SHARE
+            span = float(np.linalg.norm(p1 - tip))
+            if span < 1.0:
+                skipped.append((rib, "its end lies on its target"))
+                continue
+            s = np.linspace(0, 1, max(int(np.ceil(1.5 * span / CARTILAGE_SAMPLE_MM)), 8))[:, None]
+            h00, h10 = 2 * s**3 - 3 * s**2 + 1, s**3 - 2 * s**2 + s
+            h01, h11 = -2 * s**3 + 3 * s**2, s**3 - s**2
+            # Longer tangents overshoot into a hook on short spans.
+            bend = (h00 * tip + h10 * start * TANGENT_SHARE * span
+                    + h01 * p1 + h11 * t1 * TANGENT_SHARE * span)  # fmt: skip
         else:
             above = bands.get(rib.replace(f"_{number}", f"_{number - 1}"))
             if above is None:
                 skipped.append((rib, "no cartilage above it to join"))
                 continue
-            # Merge into the band above: end on its centreline with its
-            # section and its face, running along it, so the lower edges of
-            # the two flow into one arch margin.
+            # Merge into the band above: beside it, in its plane, and onto
+            # its centreline with its section and its face, so the lower
+            # edges of the two flow into one arch margin.
             shown = arc_length(above["curve"][above["tipAt"] : above["endAt"] + 1])
             k = above["tipAt"] + int(np.searchsorted(shown, ARCH_JOIN[number] * shown[-1]))
-            p1, t1 = above["curve"][k], above["tangent"][k]
-            end_w, end_d, across1 = above["halfW"][k], above["halfD"][k], above["across"][k]
-            end_reach = ARCH_REACH
-        span = float(np.linalg.norm(p1 - tip))
-        if span < 1.0:
-            skipped.append((rib, "its end lies on its target"))
-            continue
+            path = arch_path(tip, start, above, k)
+            if path is None:
+                skipped.append((rib, "its end lies on its target"))
+                continue
+            bend, lying, faces = path
+            end_w, end_d = above["halfW"][k], above["halfD"][k]
+            # Then on inside the band above, thinning out, so it ends nowhere on the surface.
+            run = shown[k - above["tipAt"]] + ARCH_RUN_MM
+            # But not up to the band above's own end, where the other side's band ends too.
+            run = min(run, shown[-1] - 2 * CARTILAGE_HALF_W_MM)
+            last = max(above["tipAt"] + int(np.searchsorted(shown, run)), k)
+            run_in = slice(k + 1, last + 1)
         # Out of sight inside the rib, in the rib's own line, up to its end.
         lead = JOIN_OVERLAP_MM + INSIDE_SHARE * w0
         count = int(np.ceil(lead / CARTILAGE_SAMPLE_MM))
         inside = tip - np.outer(np.linspace(lead, 0, count, endpoint=False), start)
         shrink = np.linspace(INSIDE_SHARE, 1, count, endpoint=False)
-        s = np.linspace(0, 1, max(int(np.ceil(1.5 * span / CARTILAGE_SAMPLE_MM)), 8))[:, None]
-        h00, h10 = 2 * s**3 - 3 * s**2 + 1, s**3 - 2 * s**2 + s
-        h01, h11 = -2 * s**3 + 3 * s**2, s**3 - s**2
-        # Longer tangents overshoot into a hook on short spans.
-        bend = (h00 * tip + h10 * start * TANGENT_SHARE * span
-                + h01 * p1 + h11 * t1 * end_reach * span)  # fmt: skip
         f = arc_length(bend) / arc_length(bend)[-1]
         blend = np.clip(f / 0.35, 0, 1)  # from the rib's own section to the pair's within a third
         half_w = (1 - blend) * w0 + blend * w_pair
         half_d = (1 - blend) * d0 + blend * max(w_pair / CARTILAGE_FLAT, MIN_HALF_DEPTH_MM)
         if number <= 7:
             half_w, half_d = half_w * (1 + CARTILAGE_WIDEN * f), half_d * (1 + CARTILAGE_WIDEN * f)
+            steps = int(np.ceil(run_out / CARTILAGE_SAMPLE_MM))
+            beyond = p1 + np.outer(np.linspace(0, run_out, steps + 1)[1:], t1)
+            beyond_w, beyond_d = np.full(steps, end_w), np.full(steps, end_d)
         else:
             half_w = half_w * (1 - f**2) + f**2 * end_w
             half_d = half_d * (1 - f**2) + f**2 * end_d
-        steps = int(np.ceil(run_out / CARTILAGE_SAMPLE_MM))
-        beyond = p1 + np.outer(np.linspace(0, run_out, steps + 1)[1:], t1)
+            beyond = above["curve"][run_in]
+            thin = 1 - (1 - ARCH_THIN) * eased(np.linspace(0, 1, len(beyond) + 1)[1:])
+            beyond_w, beyond_d = above["halfW"][run_in] * thin, above["halfD"][run_in] * thin
         curve = np.vstack([inside, bend, beyond])
-        half_w = np.concatenate([shrink * w0, half_w, np.full(steps, end_w)])
-        half_d = np.concatenate([shrink * d0, half_d, np.full(steps, end_d)])
-        tangent, across, _ = frames(curve, across0, across1)
+        half_w = np.concatenate([shrink * w0, half_w, beyond_w])
+        half_d = np.concatenate([shrink * d0, half_d, beyond_d])
+        tangent, across, _ = frames(curve, across0, across1 if number <= 7 else None)
+        if number > 7:  # its face turns to the band above's as it comes to lie beside it
+            faces = np.vstack([np.tile(across0, (count, 1)), faces, above["across"][run_in]])
+            lying = np.concatenate([np.zeros(count), lying, np.ones(len(beyond))])
+            across = turned(tangent, across, faces, lying)
+            across1 = across[-1]
         bands[rib] = {"curve": curve, "halfW": half_w, "halfD": half_d, "tangent": tangent,
                       "across": across, "across0": across0, "across1": across1,
                       "tipAt": count, "endAt": count + len(bend) - 1}  # fmt: skip
