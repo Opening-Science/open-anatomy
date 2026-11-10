@@ -60,6 +60,7 @@ from structures import RULED_SETS, SETS, Structure, node_name  # noqa: E402
 # Limb bones run out of a trunk scan by design; their joint ends are what count.
 MIN_ML = 0.3  # a mask smaller than this is a stray label, not a bone (volume, not voxels)
 PADDING_HU = -1020  # at or below: a scanner's fill beyond what it scanned, never tissue
+PADDING_BLEND = 2  # voxels: resampling blends the fill into the last scanned slice this far
 SETS_OF_PIECES = {"costal_cartilages"}  # one node, several separate pieces
 MIN_PIECE_VOXELS = 150  # a piece smaller than this (0.5 ml) in a set is a loose blob
 LEVEL_STEPS = 12
@@ -427,8 +428,13 @@ def scan_outside(ct_path: Path) -> tuple[np.ndarray, np.ndarray]:
     from a tilted gantry, empty end slices). Voxels at or below PADDING_HU
     (never tissue; air is about -1000 HU with noise) in regions that survive a
     small opening and join the volume's border, grown back through the fill
-    so the thin end of a gantry wedge stays outside too. Returns the mask and
-    the CT's affine, so masks can be checked against the same grid."""
+    so the thin end of a gantry wedge stays outside too, then PADDING_BLEND
+    voxels further out: a scan resampled onto its grid blends the fill into
+    its last scanned slice over that distance (the blended voxels sit well
+    above PADDING_HU and measure nothing), so a bone ending against the
+    blend was cut by the scan's end just as one against the fill was.
+    Returns the mask and the CT's affine, so masks can be checked against
+    the same grid."""
     image = nib.load(ct_path)
     fill = np.asanyarray(image.dataobj) <= PADDING_HU
     pad = ndimage.binary_opening(fill, structure=np.ones((3, 3, 3)))
@@ -438,7 +444,8 @@ def scan_outside(ct_path: Path) -> tuple[np.ndarray, np.ndarray]:
         labels[:, :, 0].ravel(), labels[:, :, -1].ravel(),
     ])  # fmt: skip
     kept = np.isin(labels, np.setdiff1d(np.unique(border), [0]))
-    return ndimage.binary_propagation(kept, mask=fill), image.affine
+    outside = ndimage.binary_propagation(kept, mask=fill)
+    return ndimage.binary_dilation(outside, iterations=PADDING_BLEND), image.affine
 
 
 def cut_reason(path: Path, outside: tuple[np.ndarray, np.ndarray] | None = None) -> str | None:
@@ -447,8 +454,9 @@ def cut_reason(path: Path, outside: tuple[np.ndarray, np.ndarray] | None = None)
     Smaller than MIN_ML (measured with the voxel size from the affine, so the
     limit is the same at 0.8 mm and 1.5 mm), touching any face of the volume
     (the first or last slice, or the in-plane border), or touching the part of
-    the volume that was never scanned (outside, from scan_outside): the scan
-    cut it. A mask on another grid than the CT's raises ValueError.
+    the volume that was never scanned (outside, from scan_outside, blend
+    included): the scan cut it. A mask on another grid than the CT's raises
+    ValueError.
     """
     if not path.exists():
         return "not segmented"
