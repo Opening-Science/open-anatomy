@@ -44,9 +44,11 @@ addopts = ["-ra", "--strict-markers", "--import-mode=importlib"]
 include = ["scripts", "tests"]
 exclude = ["scripts/render.py", "scripts/self_check.py"]
 strict = [
+  "scripts/blender.py",
   "scripts/data_guard.py",
   "scripts/licence_check.py",
   "tests/conftest.py",
+  "tests/test_blender_runner.py",
   "tests/test_data_guard.py",
   "tests/test_licence_check.py",
   "tests/test_repo_config.py",

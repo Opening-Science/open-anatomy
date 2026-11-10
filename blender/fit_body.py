@@ -1,7 +1,11 @@
 """
 Fits ANNY to the anatomy, one to one: the CT's organs and skeleton keep their
 true size and shape, and the ANNY body is placed, scaled and posed so that its
-joints sit on the CT skeleton's. Blender 5.2.x, headless.
+joints sit on the CT skeleton's. Blender 5.2.x, headless. Run it through
+scripts/blender.py, which checks the Blender version and refuses personal data:
+
+  python scripts/blender.py fit-body --body <glb> --ct <glb> --outline <glb> \
+      --out <glb> --report <json> --case <id>
 
 Inputs (after `--`):
   --body <glb>        a rigged ANNY body from scripts/bake_anny.py (sized with
@@ -18,6 +22,9 @@ Inputs (after `--`):
   [--sex male|female] the sex, for a CT with no case record; must agree with the record
                       if both are given. Without either, the script stops.
   [--render-dir <dir> --render-name <stem>]   front, three-quarter and trunk renders
+  --self-check        instead of a fit: checks the spine curve, the joint targets
+                      (a missing side is mirrored), the sex rule, the spine pose and
+                      the exported credit on a small synthetic scene
 
 Steps:
 1. Scale ANNY uniformly by the geometric mean of three ratios to the CT: the
@@ -44,8 +51,10 @@ Steps:
 Not posed, and why: elbows, wrists and hands, because the forearm and hand
 bones are only in TotalSegmentator's licensed appendicular_bones task, which
 this project does not use; knees and ankles, because the trunk scans end at
-the hips. The report names every joint it could not place. No randomness;
-the same inputs give the same file.
+the hips. The report names every joint it could not place. The output's asset
+copyright credits the CT's source (the TotalSegmentator dataset, CC BY 4.0:
+creator, DOI, case) and ANNY, as assemble.py's does. No randomness; the same
+inputs give the same file.
 """
 
 from __future__ import annotations
@@ -53,6 +62,7 @@ from __future__ import annotations
 import json
 import math
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -67,7 +77,9 @@ from assemble import (  # noqa: E402
     LEVELS,
     SCAPULA,
     SLAB,
+    credit_line,
     femoral_head,
+    glb_asset,
     humeral_head,
     inside_share,
     render,
@@ -184,6 +196,55 @@ def spine_angle(armature, wanted: dict[str, np.ndarray]) -> float:
     return round(float(np.mean(angles)), 2) if angles else float("nan")
 
 
+def pose_spine(armature, wanted: dict[str, np.ndarray]) -> None:
+    """Turns each spine bone the scan covers to its CT direction, from the pelvis up."""
+    for bone in SPINE_BONES:
+        if bone in wanted:
+            head = pose_head(armature, bone)
+            length = (pose_tail(armature, bone) - head).length
+            aim(armature, bone, head + Vector(wanted[bone]) * length)
+
+
+def joint_targets(bones: dict, midline: float) -> tuple[dict[str, np.ndarray], list[str]]:
+    """The CT's hip and shoulder joint centres, and a note for each one mirrored.
+
+    A femur or humerus the scan left out gives no joint; its side then takes
+    the other side's joint mirrored across the midline (CT x is left-right).
+    With neither side there is nothing to fit to, and the script stops.
+    """
+    targets, notes = {}, []
+    for table, bone, centre in ((FEMUR, "upperleg01", femoral_head),
+                                (HUMERUS, "upperarm01", humeral_head)):  # fmt: skip
+        for name, side in table.items():
+            if name in bones:
+                targets[f"{bone}.{side}"] = centre(coords(bones[name]), midline)
+        for name, side in table.items():
+            other = f"{bone}.{'R' if side == 'L' else 'L'}"
+            if f"{bone}.{side}" in targets:
+                continue
+            if other not in targets:
+                sys.exit(f"fit_body.py: no {name} on either side for the {bone} joints")
+            mirrored = targets[other].copy()
+            mirrored[0] = 2 * midline - mirrored[0]
+            targets[f"{bone}.{side}"] = mirrored
+            notes.append(f"{bone}.{side}: {name} not usable, joint mirrored from {other}")
+    return targets, notes
+
+
+def export_fitted(objects: list, out: str, credit: str) -> None:
+    """Writes the objects as one GLB whose asset copyright is credit."""
+    bpy.ops.object.select_all(action="DESELECT")
+    for o in objects:
+        o.select_set(True)
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+    bpy.ops.export_scene.gltf(
+        filepath=out, export_format="GLB", use_selection=True, export_extras=True,
+        export_yup=True, export_normals=True, export_materials="EXPORT",
+        export_skins=True, export_animations=False, export_morph=False,
+        export_copyright=credit,
+    )  # fmt: skip
+
+
 def follow(name: str, centroid: np.ndarray, armature) -> str:
     for table, bone in ((FEMUR, "upperleg01"), (HUMERUS, "upperarm01"),
                         (CLAVICLE, "clavicle"), (SCAPULA, "shoulder01")):  # fmt: skip
@@ -207,14 +268,18 @@ SCAPULA_RIBS = (2, 7)  # a scapula lies over the back of ribs 2 to 7
 SEX = {"m": "male", "f": "female", "male": "male", "female": "female"}
 
 
-def case_sex(case: str | None, given: str | None) -> str:
-    """The sex for the ANSUR II comparison: the case record's, else --sex; never a guess."""
+def case_sex(case: str | None, given: str | None, cases: dict | None = None) -> str:
+    """The sex for the ANSUR II comparison: the case record's, else --sex; never a guess.
+
+    cases is sources.json's "cases" unless given (the self-check passes its own).
+    """
     recorded = None
     if case:
-        sources = json.loads((ROOT / "sources.json").read_text())
-        if case not in sources["cases"]:
+        if cases is None:
+            cases = json.loads((ROOT / "sources.json").read_text())["cases"]
+        if case not in cases:
             sys.exit(f"fit_body.py: case {case} is not in sources.json")
-        entry = sources["cases"][case]
+        entry = cases[case]
         raw = entry.get("record", {}).get("sex", entry.get("sex"))
         recorded = SEX.get(str(raw).lower()) if raw else None
     if given is not None and given not in ("male", "female"):
@@ -352,6 +417,7 @@ def main() -> None:
         sys.exit(2)
     case = option(args, "--case")
     sex = case_sex(case, option(args, "--sex"))
+    credit = credit_line(ct_path, body_path)
 
     empty_scene()
     body = import_glb(body_path)
@@ -375,30 +441,13 @@ def main() -> None:
             o.name = "landmark:" + o.get("term", o.name).replace(":", "_")
     bones = dict(names)
     bones.update({o.name.removeprefix("landmark:"): o for o in marks})
-    notes = []
 
     # CT joints (true size; the anatomy never moves).
     femurs = [n for n in FEMUR if n in bones]
     if not femurs:
         sys.exit("fit_body.py: neither femur is in the CT or its landmarks file")
     midline = float(np.mean([coords(bones[n])[:, 0].mean() for n in femurs]))
-    targets = {}
-    for table, bone, centre in ((FEMUR, "upperleg01", femoral_head),
-                                (HUMERUS, "upperarm01", humeral_head)):  # fmt: skip
-        for name, side in table.items():
-            if name in bones:
-                targets[f"{bone}.{side}"] = centre(coords(bones[name]), midline)
-        for name, side in table.items():
-            other = f"{bone}.{'R' if side == 'L' else 'L'}"
-            if f"{bone}.{side}" in targets:
-                continue
-            if other not in targets:
-                sys.exit(f"fit_body.py: no {name} on either side for the {bone} joints")
-            # Mirror the other side's joint across the midline (CT x is left-right).
-            mirrored = targets[other].copy()
-            mirrored[0] = 2 * midline - mirrored[0]
-            targets[f"{bone}.{side}"] = mirrored
-            notes.append(f"{bone}.{side}: {name} not usable, joint mirrored from {other}")
+    targets, notes = joint_targets(bones, midline)
     curve = curve_points(names)
 
     # 1. Scale, place and turn ANNY.
@@ -461,11 +510,7 @@ def main() -> None:
 
     wanted = spine_directions(armature, curve, to_ct)
     spine_before = spine_angle(armature, wanted)
-    for bone in SPINE_BONES:
-        if bone in wanted:
-            head = pose_head(armature, bone)
-            length = (pose_tail(armature, bone) - head).length
-            aim(armature, bone, head + Vector(wanted[bone]) * length)
+    pose_spine(armature, wanted)
     notes.append(f"spine bones the scan does not cover were not posed: "
                  f"{', '.join(b for b in SPINE_BONES if b not in wanted) or 'none'}")  # fmt: skip
 
@@ -556,22 +601,14 @@ def main() -> None:
     skin.data.materials.append(mat)
     for o in ct:
         o.data.shade_smooth()
-    bpy.ops.object.select_all(action="DESELECT")
-    for o in [armature, skin, *ct]:
-        o.select_set(True)
-    Path(out).parent.mkdir(parents=True, exist_ok=True)
-    bpy.ops.export_scene.gltf(
-        filepath=out, export_format="GLB", use_selection=True, export_extras=True,
-        export_yup=True, export_normals=True, export_materials="EXPORT",
-        export_skins=True, export_animations=False, export_morph=False,
-    )  # fmt: skip
+    export_fitted([armature, skin, *ct], out, credit)
 
     report = {
         "method": "one-to-one: the anatomy keeps its true size; ANNY is scaled, placed and posed",
         "body": Path(body_path).name, "bodySha256": sha256(body_path),
         "ct": Path(ct_path).name, "ctSha256": sha256(ct_path), "case": case, "sex": sex,
         "output": Path(out).name, "outputSha256": sha256(out),
-        "blender": bpy.app.version_string,
+        "blender": bpy.app.version_string, "copyright": credit,
         "annyScale": round(scale, 4), "annyTurnDeg": round(math.degrees(turn), 2),
         "scaleRatios": {k: round(float(v), 4) for k, v in ratios.items()},
         "outlineOffsetM": rounded(offset),
@@ -619,5 +656,133 @@ def main() -> None:
         print(f"rendered {render_dir}/{stem}.*.png")
 
 
+def self_check() -> int:
+    """A small synthetic scene: spheres for the bone heads, a straight spine rig, a bent curve."""
+    failures = []
+
+    # The spine curve: linear between its points in any order, nothing outside them.
+    curve = np.array([[0.0, 0.0, 1.0], [0.0, 0.1, 1.2], [0.1, 0.1, 1.4]])
+    at = point_at_height(curve[::-1], 1.3)
+    if at is None or np.abs(at - [0.05, 0.1, 1.3]).max() > 1e-9:
+        failures.append(f"the spine curve at 1.3 m is {at}, not halfway between its points")
+    if point_at_height(curve, 0.99) is not None or point_at_height(curve, 1.41) is not None:
+        failures.append("a height outside the spine curve gave a point")
+
+    # The sex rule: the record's, else --sex; they must agree; never a guess.
+    cases = {"f1": {"record": {"sex": "f"}}, "m1": {"sex": "m"}, "blank": {"record": {}}}
+
+    def stops(run) -> bool:
+        try:
+            run()
+        except SystemExit:
+            return True
+        return False
+
+    sexes = [case_sex(*a, cases) for a in (("f1", None), ("m1", "male"), (None, "female"),
+                                           ("blank", "male"))]  # fmt: skip
+    if sexes != ["female", "male", "female", "male"]:
+        failures.append(f"the sex rule gave {sexes}")
+    for label, a in (("a record and a --sex that disagree", ("f1", "male")),
+                     ("a case with no sex on record and no --sex", ("blank", None)),
+                     ("neither a case nor --sex", (None, None)),
+                     ("a case that is not in sources.json", ("x1", "male")),
+                     ("a --sex that is neither male nor female", (None, "other"))):  # fmt: skip
+        if not stops(lambda a=a: case_sex(*a, cases)):
+            failures.append(f"the sex rule let through {label}")
+
+    # Joint targets: both femurs and the left humerus are spheres; the right
+    # humerus is missing and must come out mirrored across the midline.
+    empty_scene()
+
+    def ball(name: str, centre: tuple[float, float, float]) -> bpy.types.Object:
+        bpy.ops.mesh.primitive_uv_sphere_add(
+            radius=0.024, location=centre, segments=16, ring_count=10
+        )
+        obj = bpy.context.active_object
+        obj.name = name
+        bake_world([obj])
+        return obj
+
+    centres = {"FMA_24475": (0.10, 0.0, 0.90), "FMA_24474": (-0.08, 0.0, 0.90),
+               "FMA_23131": (0.20, 0.02, 1.40)}  # fmt: skip
+    bones = {name: ball(name, centre) for name, centre in centres.items()}
+    midline = float(np.mean([coords(bones[n])[:, 0].mean() for n in FEMUR]))
+    targets, notes = joint_targets(bones, midline)
+    expected = {
+        "upperleg01.L": centres["FMA_24475"],
+        "upperleg01.R": centres["FMA_24474"],
+        "upperarm01.L": centres["FMA_23131"],
+        "upperarm01.R": (-0.18, 0.02, 1.40),
+    }
+    for key, centre in expected.items():
+        if key not in targets or np.abs(targets[key] - centre).max() > 1e-4:
+            failures.append(f"joint {key} is at {targets.get(key)}, not {centre}")
+    if len(notes) != 1 or "upperarm01.R" not in notes[0] or "mirrored" not in notes[0]:
+        failures.append(f"the mirrored joint is not noted: {notes}")
+    if not stops(lambda: joint_targets({n: bones[n] for n in FEMUR}, midline)):
+        failures.append("a scan with neither humerus still gave shoulder joints")
+
+    # The spine pose: a straight rig, bone on bone from 1.0 m up, against a
+    # curve that leans and ends at 1.45 m, so the top bones are not covered.
+    data = bpy.data.armatures.new("rig")
+    armature = bpy.data.objects.new("rig", data)
+    bpy.context.scene.collection.objects.link(armature)
+    bpy.context.view_layer.objects.active = armature
+    bpy.ops.object.mode_set(mode="EDIT")
+    parent = None
+    for i, bone in enumerate([*SPINE_BONES, "neck02", "neck03"]):
+        edit = data.edit_bones.new(bone)
+        edit.head, edit.tail = (0, 0, 1.0 + 0.1 * i), (0, 0, 1.1 + 0.1 * i)
+        edit.parent, edit.use_connect = parent, parent is not None
+        parent = edit
+    bpy.ops.object.mode_set(mode="OBJECT")
+    bpy.context.view_layer.update()
+    for name, height, bone in (("FMA_24475", 0.9, "upperleg01.L"), ("FMA_13322", 1.5, "clavicle.R"),
+                               ("UBERON_0002107", 1.25, "spine03"),
+                               ("UBERON_0001255", 0.8, "root")):  # fmt: skip
+        got = follow(name, np.array([0.0, 0.0, height]), armature)
+        if got != bone:
+            failures.append(f"{name} at {height} m follows {got}, not {bone}")
+    off = residuals(armature, {"spine05": np.array([0.0, 0.03, 1.04])})["spine05"]
+    if abs(off - 0.05) > 1e-4:
+        failures.append(f"a joint 5 cm from its target has a residual of {off} m")
+    heights = np.linspace(0.9, 1.45, 12)
+    lean = np.c_[0.1 * (heights - 0.9), 0.5 * (heights - 0.9) ** 2, heights]
+    wanted = spine_directions(armature, lean, lambda z: z)
+    if sorted(wanted) != ["spine02", "spine03", "spine04", "spine05"]:
+        failures.append(f"the curve covers spine05 to spine02, but directions came for {wanted}")
+    before = spine_angle(armature, wanted)
+    pose_spine(armature, wanted)
+    after = spine_angle(armature, wanted)
+    if not (before > 5 and after < 0.05):
+        failures.append(f"the spine pose took the angle from {before} to {after} degrees")
+    foot = np.array(pose_head(armature, "spine05"))
+    gap = (pose_head(armature, "spine04") - pose_tail(armature, "spine05")).length
+    if np.abs(foot - [0, 0, 1.0]).max() > 1e-6 or gap > 1e-6:
+        failures.append("the spine pose moved the lowest bone's head or pulled the chain apart")
+
+    # The credit: the CT's and the body's copyright, written into the output's asset.
+    with tempfile.TemporaryDirectory() as tmp:
+        ct_path, body_path, out = (str(Path(tmp) / f"{n}.glb") for n in ("ct", "body", "out"))
+        ct_credit = "Derived from case t1 of a synthetic set, doi:none, licensed CC BY 4.0"
+        export_fitted([bones["FMA_24475"]], ct_path, ct_credit)
+        export_fitted([bones["FMA_24474"]], body_path, "A synthetic body")
+        credit = credit_line(ct_path, body_path)
+        export_fitted([armature, *bones.values()], out, credit)
+        written = glb_asset(out).get("copyright")
+    if ct_credit not in credit or "A synthetic body" not in credit:
+        failures.append(f"the credit leaves out the CT's or the body's: {credit}")
+    if written != credit:
+        failures.append(f"the output's asset copyright is {written!r}, not the credit")
+
+    for line in failures:
+        print(f"SELF-CHECK FAIL {line}")
+    print("fit_body self-check: " + ("ok" if not failures else f"{len(failures)} failed"))
+    return 1 if failures else 0
+
+
 if __name__ == "__main__":
+    require_blender()
+    if "--self-check" in script_args():
+        sys.exit(self_check())
     main()
