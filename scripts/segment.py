@@ -46,7 +46,7 @@ def dice(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def mask(path: Path) -> np.ndarray:
-    return np.asanyarray(nib.load(path).dataobj) > 0
+    return np.asanyarray(nib.Nifti1Image.from_filename(path).dataobj) > 0
 
 
 def score(found_path: Path, reference_path: Path) -> tuple[int, float | None]:
@@ -84,7 +84,7 @@ def tasks_for(which: str) -> list[str]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     parser.add_argument("--case", required=True)
     parser.add_argument("--device", default="gpu")
     parser.add_argument("--fast", action="store_true", help="3 mm model, quicker and coarser")
