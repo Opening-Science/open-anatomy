@@ -99,7 +99,7 @@ def decimate(poly: vtk.vtkPolyData, max_triangles: int) -> vtk.vtkPolyData:
 
 def cut_by_scan(path: Path) -> bool:
     """True if the mask is empty or touches the scan's first or last axial slice."""
-    data = np.asanyarray(nib.load(path).dataobj) > 0
+    data = np.asanyarray(nib.Nifti1Image.from_filename(path).dataobj) > 0
     if not data.any():
         return True
     k = np.flatnonzero(data.any((0, 1)))
