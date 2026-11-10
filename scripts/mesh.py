@@ -672,8 +672,9 @@ def band_curves(
       ribs), widening CARTILAGE_WIDEN on the way, and run into the sternum's
       border on their own side at full width. A pair meets the sternum at
       one height: the mean height of its two rib ends, but within the
-      sternum, never on the xiphoid (sternum_floor) and never lower than a
-      full band's width above the pair below.
+      sternum, never on the xiphoid (sternum_floor) and never lower than
+      clear of the pair below: by their widths, and more the steeper they
+      rise into the border, so each reaches it as a band of its own.
     - Ribs 8 to 10 run up to the band above and merge into it ARCH_JOIN of
       the way along it, taking its line, width, depth and face direction
       there: the two make one smooth costal arch margin with no seam. They
@@ -689,6 +690,9 @@ def band_curves(
     def outward(point: np.ndarray) -> np.ndarray:
         out = np.array([point[0] - midline, point[1] - axis_y, 0.0])
         return out / max(float(np.linalg.norm(out)), 1e-9)
+
+    def rise_of(number: int) -> float:
+        return 0.15 + 0.2 * (number - 2)  # lower cartilages rise more steeply into the sternum
 
     usable, skipped = {}, []
     for rib, end in ends.items():
@@ -719,7 +723,8 @@ def band_curves(
     lowest, top = sternum_floor(sternum), float(sternum[:, 2].max())
     for number in sorted({rib_number(r) for r in paired if rib_number(r) <= 7}, reverse=True):
         pair = [r for r in paired if rib_number(r) == number]
-        reach = (1 + CARTILAGE_WIDEN) * widths[pair[0]]
+        # A band that rises into the border takes more of it than its width.
+        reach = (1 + CARTILAGE_WIDEN) * widths[pair[0]] * float(np.hypot(1.0, rise_of(number)))
         level = float(np.mean([usable[r]["tip"][2] for r in pair]))
         heights[number] = max(min(level, top - reach), lowest + (reach if heights else 0.0))
         lowest = heights[number] + reach
@@ -736,7 +741,7 @@ def band_curves(
             # would dip first and hook up at the end.
             chord = edge - tip
             chord_rise = chord[2] / max(np.hypot(chord[0], chord[1]), 1e-6)
-            rise = min(0.15 + 0.2 * (number - 2), max(chord_rise, 0.0) + 0.3)
+            rise = min(rise_of(number), max(chord_rise, 0.0) + 0.3)
             # The sternum leans: the band meets it along its front face, not
             # the body's, with its own face SET_BACK_MM behind it, so the
             # sternum does not stand in front of its cartilages like a slab.

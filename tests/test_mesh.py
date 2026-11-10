@@ -1562,8 +1562,11 @@ def test_pairs_meet_the_sternum_one_above_the_other_and_never_on_the_xiphoid() -
     _, upper, upper_w, _ = shown(bands["rib_left_6"])
     assert lower[-1, 2] == pytest.approx(60.0, abs=1.5)  # the foot of the body, not the xiphoid
     assert abs(lower[-1, 0]) == pytest.approx(12 - mesh.NOTCH_MM)
-    # A full band's width higher: the two borders meet and do not overlap.
-    assert upper[-1, 2] - lower[-1, 2] == pytest.approx(lower_w[-1] + upper_w[-1])
+    # Higher by what the two take of the border: their widths, and more for rising
+    # into it at a slant (ribs 6 and 7 rise 0.95 and 1.15 for each 1 across), so the
+    # two reach the sternum as separate bands and do not run together in a sheet.
+    apart = lower_w[-1] * np.hypot(1, 1.15) + upper_w[-1] * np.hypot(1, 0.95)
+    assert upper[-1, 2] - lower[-1, 2] == pytest.approx(apart)
     assert lower_w[-1] == pytest.approx(1.15 * 6.0, abs=0.3)
 
 
