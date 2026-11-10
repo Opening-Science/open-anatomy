@@ -7,14 +7,15 @@ requires-python = ">=3.11"
 
 [project.optional-dependencies]
 # mesh.py and mesh_check.py
-mesh = ["nibabel==5.4.2", "numpy==2.5.4", "vtk==9.7.2"]
+mesh = ["nibabel==5.4.2", "numpy==2.5.4", "scipy==1.18.1", "vtk==9.7.2"]
 # fetch.py, segment.py and mesh.py
 pipeline = ["open-anatomy[mesh]", "TotalSegmentator==2.18.0"]
 
 # Tools for the unit tests and the type check. Install with
 #   pip install --group test   (pip 25.1+)   or   uv pip install --group test
+# scipy ships no type information; scipy-stubs gives the type check its types.
 [dependency-groups]
-test = ["pytest==9.2.0"]
+test = ["pytest==9.2.0", "scipy-stubs==1.18.1.1"]
 
 [tool.ruff]
 line-length = 100
@@ -45,9 +46,11 @@ exclude = ["scripts/render.py", "scripts/self_check.py"]
 strict = [
   "scripts/data_guard.py",
   "scripts/licence_check.py",
+  "scripts/pins_check.py",
   "tests/conftest.py",
   "tests/test_data_guard.py",
   "tests/test_licence_check.py",
+  "tests/test_pins_check.py",
   "tests/test_repo_config.py",
 ]
 extraPaths = ["scripts"]
