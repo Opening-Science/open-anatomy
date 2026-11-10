@@ -191,7 +191,7 @@ def shape_change(output: tuple, source: tuple) -> dict[str, dict[str, float]]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     parser.add_argument("--sex", choices=ANSUR, required=True)
     parser.add_argument("--runs", type=Path, nargs="+", required=True)
     parser.add_argument("--out", type=Path)
