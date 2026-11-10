@@ -196,13 +196,13 @@ def test_the_document_gives_each_label_its_status_and_reason(
     assert got["liver"] == row("total", "passed QA", "liver", "no flags")
     assert got["spleen"] == row("total", "flagged", "spleen", "QA flags, reviewed: rough; spike")
     assert got["femur_left"] == row(
-        "total", "built", "femur_left", "outside this scan: cut by the scan's edge (axis 2)"
+        "total", "excluded", "femur_left", "outside this scan: cut by the scan's edge (axis 2)"
     )
     assert got["humerus_left"] == row(
-        "total", "built", "humerus_left", "outside this scan: absent from this scan"
+        "total", "excluded", "humerus_left", "outside this scan: absent from this scan"
     )
     assert got["kidney_left"] == row(
-        "total", "built", "kidney_left", "outside this scan: not in the QA report"
+        "total", "excluded", "kidney_left", "outside this scan: not in the QA report"
     )
     assert got["lung_upper_lobe_left"] == row(
         "total", "missing", "lung_upper_lobe_left", "not built yet"
@@ -215,7 +215,10 @@ def test_the_document_gives_each_label_its_status_and_reason(
     )
     assert got["eye_left"] == row("head_glands_cavities", "missing", "eye_left", "not built yet")
 
-    assert "1 passed QA, 1 flagged, 3 built but outside its scan, 3 missing, of 8." in doc
+    assert "1 passed QA, 1 flagged, 3 excluded, 3 missing, of 8." in doc
+    # No row calls a structure "built" when the body leaves it out.
+    assert all(cells[1] != "built" for cells in got.values())
+    assert "Excluded means the reference set defines the structure but this body leaves" in doc
     assert "| anny-adult-f | s0001 | 2 | 1 | 1 | 2 |" in doc
     assert "| anny-adult-m | s0002 | not built on this machine | | | |" in doc
     # Groups appear in their fixed order, each only when it has rows.
@@ -231,7 +234,7 @@ def test_the_document_gives_each_label_its_status_and_reason(
     ]
 
 
-def test_without_a_qa_report_every_built_label_is_outside_the_scan(
+def test_without_a_qa_report_every_reference_label_is_excluded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (tmp_path / "sources.json").write_text(
@@ -239,9 +242,13 @@ def test_without_a_qa_report_every_built_label_is_outside_the_scan(
     )
     doc = generate(tmp_path, monkeypatch, ["liver", "colon"], [])
     got = rows(doc)
-    assert got["liver"][1:] == ["built", TERMS["liver"], "outside this scan: not in the QA report"]
+    assert got["liver"][1:] == [
+        "excluded",
+        TERMS["liver"],
+        "outside this scan: not in the QA report",
+    ]
     assert got["colon"][1] == "missing"
-    assert "0 passed QA, 0 flagged, 1 built but outside its scan, 1 missing, of 2." in doc
+    assert "0 passed QA, 0 flagged, 1 excluded, 1 missing, of 2." in doc
 
 
 def test_the_document_is_the_same_on_a_second_run(

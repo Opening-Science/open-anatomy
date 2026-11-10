@@ -11,12 +11,16 @@ TotalSegmentator's Apache-2.0 list ([Subtasks](https://github.com/wasserth/Total
 
 | Reference | Case | In the body | Passed QA | Flagged | Left out (cut or absent) |
 | --- | --- | --- | --- | --- | --- |
-| anny-adult-m | s0903 | 65 | 53 | 12 | 6 |
-| anny-adult-f | s0859 | 52 | 44 | 8 | 19 |
-| anny-adult-m-w0.9-h0.5.s0667 | s0667 | 64 | 54 | 10 | 7 |
-| anny-adult-m-w0.9-h0.9.s1086 | s1086 | 61 | 53 | 8 | 10 |
+| anny-adult-m | s0903 | 63 | 57 | 6 | 8 |
+| anny-adult-f | s0859 | 52 | 45 | 7 | 19 |
+| anny-adult-m-w0.9-h0.5.s0667 | s0667 | 56 | 50 | 6 | 17 |
+| anny-adult-m-w0.9-h0.9.s1086 | s1086 | 56 | 52 | 4 | 17 |
 
-The rows below describe `anny-adult-f` (case s0859): 44 passed QA, 8 flagged, 19 built but outside its scan, 65 missing, of 136.
+The rows below describe `anny-adult-f` (case s0859): 45 passed QA, 7 flagged, 19 excluded, 65 missing, of 136.
+
+Excluded means the reference set defines the structure but this body leaves
+it out, because the scan cuts it or does not contain it; the row gives the
+reason. Missing means it is not built yet.
 
 A flag is not a failure: the contact sheets show each one, and the QA PR
 explains the known false positives (single-vertex "spikes" on folds, and
@@ -39,8 +43,6 @@ explains the known false positives (single-vertex "spikes" on folds, and
 | `small_bowel` | total | missing |  | not built yet |
 | `duodenum` | total | missing |  | not built yet |
 | `colon` | total | missing |  | not built yet |
-| `kidney_cyst_left` | total | missing |  | not built yet |
-| `kidney_cyst_right` | total | missing |  | not built yet |
 
 ## Organs: pelvis
 
@@ -132,21 +134,21 @@ explains the known false positives (single-vertex "spikes" on folds, and
 | `vertebrae_T5` | total | passed QA | FMA:9922 | no flags |
 | `vertebrae_T4` | total | passed QA | FMA:9248 | no flags |
 | `vertebrae_T3` | total | passed QA | FMA:9209 | no flags |
-| `vertebrae_T2` | total | built | FMA:9187 | outside this scan: cut by the scan's edge (axis 2) |
-| `vertebrae_T1` | total | built | FMA:9165 | outside this scan: cut by the scan's edge (axis 2) |
-| `vertebrae_C7` | total | built | FMA:12525 | outside this scan: cut by the scan's edge (axis 2) |
-| `vertebrae_C6` | total | built | FMA:12524 | outside this scan: cut by the scan's edge (axis 2) |
-| `vertebrae_C5` | total | built | FMA:12523 | outside this scan: absent or a stray label |
-| `vertebrae_C4` | total | built | FMA:12522 | outside this scan: absent or a stray label |
-| `vertebrae_C3` | total | built | FMA:12521 | outside this scan: absent or a stray label |
-| `vertebrae_C2` | total | built | FMA:12520 | outside this scan: absent or a stray label |
-| `vertebrae_C1` | total | built | FMA:12519 | outside this scan: absent or a stray label |
+| `vertebrae_T2` | total | excluded | FMA:9187 | outside this scan: cut by the scan's edge (axis 2) |
+| `vertebrae_T1` | total | excluded | FMA:9165 | outside this scan: cut by the scan's edge (axis 2) |
+| `vertebrae_C7` | total | excluded | FMA:12525 | outside this scan: cut by the scan's edge (axis 2) |
+| `vertebrae_C6` | total | excluded | FMA:12524 | outside this scan: cut by the scan's edge (axis 2) |
+| `vertebrae_C5` | total | excluded | FMA:12523 | outside this scan: absent or a stray label |
+| `vertebrae_C4` | total | excluded | FMA:12522 | outside this scan: absent or a stray label |
+| `vertebrae_C3` | total | excluded | FMA:12521 | outside this scan: absent or a stray label |
+| `vertebrae_C2` | total | excluded | FMA:12520 | outside this scan: absent or a stray label |
+| `vertebrae_C1` | total | excluded | FMA:12519 | outside this scan: absent or a stray label |
 
 ## Ribcage
 
 | Label | Task | Status | ID | Why |
 | --- | --- | --- | --- | --- |
-| `rib_left_1` | total | built | FMA:7987 | outside this scan: cut by the scan's edge (axis 2) |
+| `rib_left_1` | total | excluded | FMA:7987 | outside this scan: cut by the scan's edge (axis 2) |
 | `rib_left_2` | total | passed QA | FMA:8012 | no flags |
 | `rib_left_3` | total | passed QA | FMA:8039 | no flags |
 | `rib_left_4` | total | passed QA | FMA:8148 | no flags |
@@ -157,39 +159,39 @@ explains the known false positives (single-vertex "spikes" on folds, and
 | `rib_left_9` | total | passed QA | FMA:8391 | no flags |
 | `rib_left_10` | total | passed QA | FMA:8472 | no flags |
 | `rib_left_11` | total | passed QA | FMA:8532 | no flags |
-| `rib_left_12` | total | flagged | FMA:8534 | QA flags, reviewed: volume +3.3% |
-| `rib_right_1` | total | built | FMA:7857 | outside this scan: its pair rib_left_1 is missing |
+| `rib_left_12` | total | passed QA | FMA:8534 | no flags |
+| `rib_right_1` | total | excluded | FMA:7857 | outside this scan: its pair rib_left_1 is missing |
 | `rib_right_2` | total | passed QA | FMA:7882 | no flags |
 | `rib_right_3` | total | passed QA | FMA:7909 | no flags |
 | `rib_right_4` | total | passed QA | FMA:7957 | no flags |
 | `rib_right_5` | total | passed QA | FMA:8066 | no flags |
 | `rib_right_6` | total | passed QA | FMA:8175 | no flags |
-| `rib_right_7` | total | passed QA | FMA:8229 | no flags |
+| `rib_right_7` | total | flagged | FMA:8229 | QA flags, reviewed: spikes 1 |
 | `rib_right_8` | total | passed QA | FMA:8283 | no flags |
 | `rib_right_9` | total | passed QA | FMA:8364 | no flags |
-| `rib_right_10` | total | flagged | FMA:8445 | QA flags, reviewed: spikes 1 |
+| `rib_right_10` | total | passed QA | FMA:8445 | no flags |
 | `rib_right_11` | total | passed QA | FMA:8531 | no flags |
 | `rib_right_12` | total | passed QA | FMA:8533 | no flags |
 | `sternum` | total | passed QA | FMA:7485 | no flags |
-| `costal_cartilages` | total | flagged | FMA:85213 | QA flags, reviewed: self-intersections 706 |
+| `costal_cartilages` | total | flagged | FMA:85213 | QA flags, reviewed: self-intersections 1567; spikes 1; rough (bend95 23 deg) |
 
 ## Shoulder girdle and arm
 
 | Label | Task | Status | ID | Why |
 | --- | --- | --- | --- | --- |
-| `humerus_left` | total | built | FMA:23131 | outside this scan: cut by the scan's edge (axis 0) |
-| `humerus_right` | total | built | FMA:23130 | outside this scan: shoulder girdle dropped: clavicula_left, scapula_left, humerus_left cut |
-| `scapula_left` | total | built | FMA:13396 | outside this scan: cut by the scan's edge (axis 2) |
-| `scapula_right` | total | built | FMA:13395 | outside this scan: shoulder girdle dropped: clavicula_left, scapula_left, humerus_left cut |
-| `clavicula_left` | total | built | FMA:13323 | outside this scan: cut by the scan's edge (axis 2) |
-| `clavicula_right` | total | built | FMA:13322 | outside this scan: shoulder girdle dropped: clavicula_left, scapula_left, humerus_left cut |
+| `humerus_left` | total | excluded | FMA:23131 | outside this scan: cut by the scan's edge (axis 0) |
+| `humerus_right` | total | excluded | FMA:23130 | outside this scan: shoulder girdle dropped: clavicula_left, scapula_left, humerus_left cut |
+| `scapula_left` | total | excluded | FMA:13396 | outside this scan: cut by the scan's edge (axis 2) |
+| `scapula_right` | total | excluded | FMA:13395 | outside this scan: shoulder girdle dropped: clavicula_left, scapula_left, humerus_left cut |
+| `clavicula_left` | total | excluded | FMA:13323 | outside this scan: cut by the scan's edge (axis 2) |
+| `clavicula_right` | total | excluded | FMA:13322 | outside this scan: shoulder girdle dropped: clavicula_left, scapula_left, humerus_left cut |
 
 ## Pelvis and thigh
 
 | Label | Task | Status | ID | Why |
 | --- | --- | --- | --- | --- |
-| `femur_left` | total | built | FMA:24475 | outside this scan: cut by the scan's edge (axis 2) |
-| `femur_right` | total | built | FMA:24474 | outside this scan: cut by the scan's edge (axis 2) |
+| `femur_left` | total | excluded | FMA:24475 | outside this scan: cut by the scan's edge (axis 2) |
+| `femur_right` | total | excluded | FMA:24474 | outside this scan: cut by the scan's edge (axis 2) |
 | `hip_left` | total | passed QA | FMA:16587 | no flags |
 | `hip_right` | total | passed QA | FMA:16586 | no flags |
 
@@ -207,6 +209,13 @@ explains the known false positives (single-vertex "spikes" on folds, and
 | `autochthon_right` | total | missing |  | not built yet |
 | `iliopsoas_left` | total | missing |  | not built yet |
 | `iliopsoas_right` | total | missing |  | not built yet |
+
+## Cysts
+
+| Label | Task | Status | ID | Why |
+| --- | --- | --- | --- | --- |
+| `kidney_cyst_left` | total | missing |  | not built yet |
+| `kidney_cyst_right` | total | missing |  | not built yet |
 
 ## Not available from open tasks
 

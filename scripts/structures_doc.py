@@ -6,11 +6,13 @@ can give, and what open-anatomy does with it.
 
 For each label of the "total" and "head_glands_cavities" tasks (the class map
 comes from the installed TotalSegmentator) it gives the group, the status, the
-ontology ID where built, and why: not built yet, outside the scan (with the
-reason mesh.py logged), or the QA result from blender/qa.py. Statuses:
+ontology ID where the reference set defines it, and why: not built yet, left
+out of this body (with the reason mesh.py logged), or the QA result from
+blender/qa.py. Statuses:
 
 - missing: not built yet;
-- built: meshed in the reference set, but not in this body (outside its scan);
+- excluded: the reference set defines it, but this body leaves it out, because
+  the scan cuts it or does not contain it (the row gives the reason);
 - passed QA: checked close up, no flags;
 - flagged: checked, with flags (reviewed in the QA PR).
 
@@ -120,7 +122,7 @@ def main() -> None:
     labels = [(lab, "total") for lab in class_map["total"].values()]
     labels += [(lab, "head_glands_cavities") for lab in class_map["head_glands_cavities"].values()]
     rows: dict[str, list[str]] = {}
-    counts = {"missing": 0, "built": 0, "passed QA": 0, "flagged": 0}
+    counts = {"missing": 0, "excluded": 0, "passed QA": 0, "flagged": 0}
     for label, task in labels:
         s = built.get(label)
         if s is None:
@@ -134,7 +136,7 @@ def main() -> None:
             term = s.term
             entry = qa.get(term.replace(":", "_"))
             if entry is None:
-                status = "built"
+                status = "excluded"
                 why = f"outside this scan: {left_out.get(label, 'not in the QA report')}"
             elif entry["flags"]:
                 status, why = "flagged", "QA flags, reviewed: " + "; ".join(entry["flags"])
@@ -160,8 +162,12 @@ def main() -> None:
         *per_body(references),
         "",
         f"The rows below describe `{args.body}` (case {case}): {counts['passed QA']} passed QA, "
-        f"{counts['flagged']} flagged, {counts['built']} built but outside its scan, "
+        f"{counts['flagged']} flagged, {counts['excluded']} excluded, "
         f"{counts['missing']} missing, of {len(labels)}.",
+        "",
+        "Excluded means the reference set defines the structure but this body leaves",
+        "it out, because the scan cuts it or does not contain it; the row gives the",
+        "reason. Missing means it is not built yet.",
         "",
         "A flag is not a failure: the contact sheets show each one, and the QA PR",
         'explains the known false positives (single-vertex "spikes" on folds, and',
