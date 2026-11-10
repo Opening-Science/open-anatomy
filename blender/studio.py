@@ -12,7 +12,10 @@ down to a fill; the camera sees a plain light neutral backdrop, not the
 HDRI. Bone is a warm ivory with slight subsurface scattering, going to a
 warm brown in its crevices (ambient occlusion) and on edges that turn away;
 nodes marked modelled (the costal cartilages) are pale blue-white. The view
-transform is neutral, so the picture shows those colours.
+transform is neutral, so the picture shows those colours. As on a drawn
+plate, the far half of the skeleton pales toward the backdrop with
+distance, and hip bones, which leave the picture at its bottom edge, fade
+out there instead of being cut.
 
 The front view is orthographic, framed from the top of the shoulders to the
 top of the pelvis when the hip bones are in the file, else to the lowest
@@ -53,6 +56,8 @@ VIEW_TRANSFORMS = ("Khronos PBR Neutral", "Standard")  # the first one this Blen
 AO_DISTANCE = 0.03  # metres
 AO_POWER = 1.5
 EDGE = 0.5  # how far a surface turning away from the camera goes to its shade colour
+HAZE = 0.25  # how far the bones farthest from the camera fade into the backdrop
+FADE = 0.08  # share of the picture's height, from the bottom, over which bones fade out
 VIEWS = {"front": (0.0, 0.0), "three-quarter": (35.0, 8.0)}  # turn about Z, look down, degrees
 RESOLUTION = (1800, 2400)
 
@@ -63,10 +68,18 @@ def material(
     shade: tuple[float, float, float],
     roughness: float,
     subsurface: float,
+    middle: Vector,
+    reach: float,
+    fade: float,
 ) -> bpy.types.Material:
     """A Principled surface whose colour runs from `shade` in crevices
     (ambient occlusion) and on edges turning away from the camera to
-    `colour` in the open, with subsurface scattering."""
+    `colour` in the open, with subsurface scattering. Two things let it
+    dissolve into the backdrop, as on a drawn plate: distance (from
+    `middle` back, as the camera looks, it pales, by HAZE at `reach` metres
+    and beyond; the near half stays whole) and, with `fade`, the picture's
+    bottom edge (over that share of its height), so a bone that leaves the
+    picture there fades out instead of being cut."""
     mat = bpy.data.materials.new(name)
     mat.use_nodes = True
     nodes, links = mat.node_tree.nodes, mat.node_tree.links
@@ -103,6 +116,46 @@ def material(
     bsdf.inputs["Subsurface Weight"].default_value = subsurface
     bsdf.inputs["Subsurface Radius"].default_value = (1.0, 0.8, 0.6)
     bsdf.inputs["Subsurface Scale"].default_value = 0.003
+
+    # How much of the surface is left: 1 - HAZE at the far side, and nothing
+    # at the picture's bottom edge.
+    place = nodes.new("ShaderNodeNewGeometry")
+    offset = nodes.new("ShaderNodeVectorMath")
+    offset.operation = "SUBTRACT"
+    offset.inputs[1].default_value = middle
+    links.new(place.outputs["Position"], offset.inputs[0])
+    seen = nodes.new("ShaderNodeVectorTransform")
+    seen.vector_type, seen.convert_from, seen.convert_to = "VECTOR", "WORLD", "CAMERA"
+    links.new(offset.outputs["Vector"], seen.inputs["Vector"])
+    depth = nodes.new("ShaderNodeSeparateXYZ")
+    links.new(seen.outputs["Vector"], depth.inputs[0])
+    left = nodes.new("ShaderNodeMapRange")
+    left.inputs["From Min"].default_value = 0.0
+    left.inputs["From Max"].default_value = reach
+    left.inputs["To Min"].default_value = 1.0
+    left.inputs["To Max"].default_value = 1.0 - HAZE
+    links.new(depth.outputs["Z"], left.inputs["Value"])
+    amount = left.outputs["Result"]
+    if fade > 0:
+        window = nodes.new("ShaderNodeTexCoord")
+        height = nodes.new("ShaderNodeSeparateXYZ")
+        links.new(window.outputs["Window"], height.inputs[0])
+        ramp = nodes.new("ShaderNodeMapRange")
+        ramp.interpolation_type = "SMOOTHSTEP"
+        ramp.inputs["From Min"].default_value = 0.0
+        ramp.inputs["From Max"].default_value = fade
+        links.new(height.outputs["Y"], ramp.inputs["Value"])
+        both = math_node("MULTIPLY")
+        links.new(amount, both.inputs[0])
+        links.new(ramp.outputs["Result"], both.inputs[1])
+        amount = both.outputs[0]
+    paper = nodes.new("ShaderNodeEmission")
+    paper.inputs["Color"].default_value = (*BACKDROP, 1.0)
+    mix = nodes.new("ShaderNodeMixShader")
+    links.new(amount, mix.inputs["Fac"])
+    links.new(paper.outputs["Emission"], mix.inputs[1])
+    links.new(bsdf.outputs["BSDF"], mix.inputs[2])
+    links.new(mix.outputs["Shader"], nodes["Material Output"].inputs["Surface"])
     return mat
 
 
@@ -228,8 +281,15 @@ def main() -> None:
     skeleton = [o for o in objects if o.get("system") == "skeletal"]
     for o in objects:
         o.hide_render = o not in skeleton
-    bone = material("bone", BONE, BONE_SHADE, 0.5, 0.15)
-    cartilage = material("cartilage", CARTILAGE, CARTILAGE_SHADE, 0.5, 0.3)
+    # The haze runs across the skeleton's depth, whichever way the camera looks.
+    corners = [o.matrix_world @ Vector(c) for o in skeleton for c in o.bound_box]
+    low = Vector([min(c[i] for c in corners) for i in range(3)])
+    high = Vector([max(c[i] for c in corners) for i in range(3)])
+    middle, reach = (low + high) / 2, min(high.x - low.x, high.y - low.y) / 2
+    # Only a file with hip bones runs out of the picture's bottom edge.
+    fade = FADE if any("hip bone" in o.get("name", "") for o in skeleton) else 0.0
+    bone = material("bone", BONE, BONE_SHADE, 0.5, 0.15, middle, reach, fade)
+    cartilage = material("cartilage", CARTILAGE, CARTILAGE_SHADE, 0.5, 0.3, middle, reach, fade)
     for o in skeleton:
         o.data.materials.clear()
         o.data.materials.append(cartilage if o.get("modelled") else bone)
