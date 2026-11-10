@@ -184,7 +184,11 @@ def run_main(
     which: str = "reference",
     faces: set[str] | None = None,
     shares: dict[str, float] | None = None,
+    record: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """Runs main() on stubbed surfaces and returns the manifest. With record,
+    the case is a sourced one whose sources.json entry carries that record;
+    without, a synthetic one."""
     surfaced: list[str] = []
     shares = shares or {}
 
@@ -208,8 +212,14 @@ def run_main(
     monkeypatch.setattr(mesh, "cut_faces", fake_faces)
     seg = tmp_path / "seg"
     seg.mkdir(exist_ok=True)
-    argv = ["mesh.py", "--case", "c", "--synthetic", "--seg-dir", str(seg),
-            "--out-dir", str(tmp_path)]  # fmt: skip
+    argv = ["mesh.py", "--case", "c", "--seg-dir", str(seg), "--out-dir", str(tmp_path)]
+    if record is None:
+        argv.append("--synthetic")
+    else:
+        source = {"title": "Test set", "creator": "A. Tester", "doi": "10.0/t", "licence": "CC0"}
+        cases = {"c": {"source": "test", "record": record}}
+        monkeypatch.setattr(mesh, "SOURCES", {"sources": {"test": source}, "cases": cases})
+        argv += ["--ct", str(save_ct(tmp_path / "ct.nii.gz", np.zeros((8, 8, 8))))]
     monkeypatch.setattr(sys, "argv", [*argv, "--set", which])
     mesh.main()
     manifest: dict[str, Any] = json.loads((tmp_path / f"c.{which}.manifest.json").read_text())
@@ -803,6 +813,31 @@ def test_a_built_glb_follows_the_contract(tmp_path: Path, monkeypatch: pytest.Mo
     again = run_main(tmp_path, monkeypatch, {})
     assert (tmp_path / "c.reference.glb").read_bytes() == first
     assert again["nodes"] == manifest["nodes"] and again["sha256"] == manifest["sha256"]
+
+
+@pytest.mark.parametrize(
+    "record, typical",
+    [
+        ({"pathology": "tumour", "typical": False}, False),
+        ({"pathology": "none recorded", "typical": True}, True),
+        ({}, True),  # a record that does not say is taken as typical
+    ],
+)
+def test_a_pathological_case_marks_every_node_not_typical(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, record: dict[str, Any], typical: bool
+) -> None:
+    manifest = run_main(tmp_path, monkeypatch, {}, record=record)
+    gltf, _ = read_glb(tmp_path / "c.reference.glb")
+    assert len(gltf["nodes"]) == len(manifest["nodes"]) == len(REFERENCE)
+    assert all(node["extras"]["typical"] is typical for node in gltf["nodes"])
+    assert all(entry["typical"] is typical for entry in manifest["nodes"])
+    assert "Test set" in gltf["asset"]["copyright"]  # built as a sourced case, not a synthetic one
+
+
+def test_sources_json_marks_its_tumour_case_not_typical() -> None:
+    records = {case: entry["record"] for case, entry in mesh.SOURCES["cases"].items()}
+    assert all(isinstance(r.get("typical", True), bool) for r in records.values())
+    assert records["s1086"]["typical"] is False  # the dataset notes a tumour
 
 
 # The same contract on real masks: one ball per organ on a 1.5 mm grid, meshed
