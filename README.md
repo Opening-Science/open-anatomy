@@ -87,9 +87,16 @@ blender --background --factory-startup --python scripts/render.py -- \
 MD5 and SHA-256 against [sources.json](sources.json), and unpacks one case.
 `segment.py` runs TotalSegmentator's `total` task for ten structures and scores
 each against the dataset's own reference segmentation. `mesh.py` writes one GLB
-with a closed mesh per structure, named by UBERON ID, and a manifest; the same
-masks always give the same bytes. The GLB credits the dataset's creator, DOI
-and case in its asset copyright, so the attribution travels with the file.
+with a closed mesh per structure, named by its UBERON or FMA ID, and a
+manifest; the same masks always give the same bytes. Each node sits at its
+structure's centre (the vertices are relative to it, and it is the node's
+translation), and the node's extras, mirrored by the manifest, carry the term,
+the anatomical and plain-language names, one line on what it is, the system,
+layer and licence, whether it was modelled rather than segmented, its bounds
+and volume, and the direction and distance it moves in an exploded view, worked
+out so that at full separation no two structures' bounds overlap. The GLB
+credits the dataset's creator, DOI and case in its asset copyright, so the
+attribution travels with the file.
 
 ## Reference bodies
 
