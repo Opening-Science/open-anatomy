@@ -14,9 +14,9 @@ HDRI. Bone is a warm ivory with slight subsurface scattering, going to a
 warm brown in its crevices (ambient occlusion) and on edges that turn away;
 nodes marked modelled (the costal cartilages) are pale blue-white. The view
 transform is neutral, so the picture shows those colours. As on a drawn
-plate, the far half of the skeleton pales toward the backdrop with
-distance, and hip bones, which leave the picture at its bottom edge, fade
-out there instead of being cut.
+plate, the far half of the skeleton pales with distance, to a tone that
+still stands clear of the backdrop, and hip bones, which leave the picture
+at its bottom edge, fade out there instead of being cut.
 
 Both views are orthographic and framed from the top of the shoulders to the
 top of the pelvis when the hip bones are in the file, else to the lowest
@@ -63,11 +63,18 @@ VIEW_TRANSFORMS = ("Khronos PBR Neutral", "Standard")  # the first one this Blen
 AO_DISTANCE = 0.04  # metres
 AO_POWER = 1.75
 EDGE = 0.7  # how far a surface turning away from the camera goes to its shade colour
-HAZE = 0.4  # how far the bones farthest from the camera fade into the backdrop
+HAZE = 0.5  # how far the bones farthest from the camera pale to the far tone
+# The far tone is a warm grey a clear step darker than the backdrop: mixed
+# toward the backdrop itself, lit ivory, which is nearly as light, dissolves
+# into it and the far ribs seem to end in mid-air.
+FAR = (0.66, 0.62, 0.55)
+HAZE_DEPTH = 0.6  # share of the far half's depth over which the haze comes on
 FADE = 0.08  # share of the picture's height, from the bottom, over which bones fade out
 MARGIN = 0.04  # share of the picture left free between the bones and each of its other edges
 VIEWS = {"front": (0.0, 0.0), "three-quarter": (-45.0, 8.0)}  # turn about Z, look down, degrees
 RESOLUTION = (1800, 2400)
+BRIGHT = 7.5  # the self-check's strong light, as a strength of its plain white world
+CLEAR = 0.07  # how much darker than the backdrop a bone must be to stand clear of it
 
 
 def material(
@@ -82,12 +89,14 @@ def material(
 ) -> bpy.types.Material:
     """A Principled surface whose colour runs from `shade` in crevices
     (ambient occlusion) and on edges turning away from the camera to
-    `colour` in the open, with subsurface scattering. Two things let it
-    dissolve into the backdrop, as on a drawn plate: distance (from
-    `middle` back, as the camera looks, it pales, by HAZE at `reach` metres
-    and beyond; the near half stays whole) and, with `fade`, the picture's
-    bottom edge (over that share of its height), so a bone that leaves the
-    picture there fades out instead of being cut."""
+    `colour` in the open, with subsurface scattering. Two things soften
+    it, as on a drawn plate. Distance: from `middle` back, as the camera
+    looks, it pales and loses contrast, going by HAZE to the FAR tone at
+    `reach` metres and beyond; the near half stays whole, and the far half
+    stays opaque and apart from the backdrop. And, with `fade`, the
+    picture's bottom edge (over that share of its height), where it
+    dissolves into the backdrop, so a bone that leaves the picture there
+    fades out instead of being cut."""
     mat = bpy.data.materials.new(name)
     mat.use_nodes = True
     nodes, links = mat.node_tree.nodes, mat.node_tree.links
@@ -125,8 +134,8 @@ def material(
     bsdf.inputs["Subsurface Radius"].default_value = (1.0, 0.8, 0.6)
     bsdf.inputs["Subsurface Scale"].default_value = 0.003
 
-    # How much of the surface is left: 1 - HAZE at the far side, and nothing
-    # at the picture's bottom edge.
+    # How much of the surface is left: 1 - HAZE of it at the far side, the
+    # rest the far tone.
     place = nodes.new("ShaderNodeNewGeometry")
     offset = nodes.new("ShaderNodeVectorMath")
     offset.operation = "SUBTRACT"
@@ -143,8 +152,15 @@ def material(
     left.inputs["To Min"].default_value = 1.0
     left.inputs["To Max"].default_value = 1.0 - HAZE
     links.new(depth.outputs["Z"], left.inputs["Value"])
-    amount = left.outputs["Result"]
+    distance = nodes.new("ShaderNodeEmission")
+    distance.inputs["Color"].default_value = (*FAR, 1.0)
+    hazed = nodes.new("ShaderNodeMixShader")
+    links.new(left.outputs["Result"], hazed.inputs["Fac"])
+    links.new(distance.outputs["Emission"], hazed.inputs[1])
+    links.new(bsdf.outputs["BSDF"], hazed.inputs[2])
+    surface = hazed.outputs["Shader"]
     if fade > 0:
+        # And nothing of it is left at the picture's bottom edge, only the backdrop.
         window = nodes.new("ShaderNodeTexCoord")
         height = nodes.new("ShaderNodeSeparateXYZ")
         links.new(window.outputs["Window"], height.inputs[0])
@@ -153,21 +169,18 @@ def material(
         ramp.inputs["From Min"].default_value = 0.0
         ramp.inputs["From Max"].default_value = fade
         links.new(height.outputs["Y"], ramp.inputs["Value"])
-        both = math_node("MULTIPLY")
-        links.new(amount, both.inputs[0])
-        links.new(ramp.outputs["Result"], both.inputs[1])
-        amount = both.outputs[0]
-    paper = nodes.new("ShaderNodeEmission")
-    paper.inputs["Color"].default_value = (*BACKDROP, 1.0)
-    mix = nodes.new("ShaderNodeMixShader")
-    links.new(amount, mix.inputs["Fac"])
-    links.new(paper.outputs["Emission"], mix.inputs[1])
-    links.new(bsdf.outputs["BSDF"], mix.inputs[2])
-    links.new(mix.outputs["Shader"], nodes["Material Output"].inputs["Surface"])
+        paper = nodes.new("ShaderNodeEmission")
+        paper.inputs["Color"].default_value = (*BACKDROP, 1.0)
+        faded = nodes.new("ShaderNodeMixShader")
+        links.new(ramp.outputs["Result"], faded.inputs["Fac"])
+        links.new(paper.outputs["Emission"], faded.inputs[1])
+        links.new(surface, faded.inputs[2])
+        surface = faded.outputs["Shader"]
+    links.new(surface, nodes["Material Output"].inputs["Surface"])
     return mat
 
 
-def world(hdri: str | None) -> None:
+def world(hdri: str | None, strength: float = HDRI_STRENGTH) -> None:
     """The HDRI lights the bones, turned and tilted so that its key lamp
     stands to the upper left of the camera; the camera sees the plain
     backdrop. Without an HDRI (the self-check) the light is plain white."""
@@ -203,8 +216,8 @@ def world(hdri: str | None) -> None:
     floor.interpolation_type = "SMOOTHSTEP"
     floor.inputs["From Min"].default_value = -0.25
     floor.inputs["From Max"].default_value = 0.1
-    floor.inputs["To Min"].default_value = HDRI_STRENGTH * FLOOR
-    floor.inputs["To Max"].default_value = HDRI_STRENGTH
+    floor.inputs["To Min"].default_value = strength * FLOOR
+    floor.inputs["To Max"].default_value = strength
     links.new(up.outputs["Z"], floor.inputs["Value"])
     strength = nodes.new("ShaderNodeMath")
     strength.operation = "MULTIPLY"
@@ -227,11 +240,14 @@ def world(hdri: str | None) -> None:
 def stage(skeleton: list[bpy.types.Object], hdri: str | None, samples: int) -> None:
     """Dresses the bones and sets the scene for them: materials, light and
     backdrop, the camera, Cycles and the view transform."""
-    # The haze runs across the skeleton's depth, whichever way the camera looks.
+    # The haze runs across the skeleton's depth, whichever way the camera looks,
+    # and is whole by HAZE_DEPTH of the way back, so the ribs' far halves are of
+    # one tone up to the spine.
     corners = [o.matrix_world @ Vector(c) for o in skeleton for c in o.bound_box]
     low = Vector([min(c[i] for c in corners) for i in range(3)])
     high = Vector([max(c[i] for c in corners) for i in range(3)])
-    middle, reach = (low + high) / 2, min(high.x - low.x, high.y - low.y) / 2
+    middle = (low + high) / 2
+    reach = HAZE_DEPTH * min(high.x - low.x, high.y - low.y) / 2
     fade = fading(skeleton)
     bone = material("bone", BONE, BONE_SHADE, 0.55, 0.2, middle, reach, fade)
     cartilage = material("cartilage", CARTILAGE, CARTILAGE_SHADE, 0.6, 0.35, middle, reach, fade)
@@ -266,7 +282,9 @@ def look_check() -> int:
     """Blocks for bones, rendered small from the front under a plain white
     light: the backdrop is light and neutral, bone is warm, cartilage is
     blue-white, a far bone is paler than a near one, and a hip bone shows
-    above the picture's bottom edge and has faded into the backdrop on it."""
+    above the picture's bottom edge and has faded into the backdrop on it.
+    Then once more under a light strong enough to make bone as light as
+    the backdrop: the farthest bone still stands clear of it."""
     import tempfile
 
     from bpy_extras.object_utils import world_to_camera_view
@@ -286,17 +304,23 @@ def look_check() -> int:
         block("costal cartilage", (-0.10, -0.12, 0.22), 0.08),
         block("left hip bone", (0.10, 0.0, 0.0), 0.16),
         block("right hip bone", (-0.10, 0.0, 0.0), 0.16),
+        block("left twelfth rib", (0.10, 0.20, 0.22), 0.04),
     ]
     bones[2]["modelled"] = True
     stage(bones, None, 16)
     scene.render.resolution_percentage = 5
-    with tempfile.TemporaryDirectory() as tmp:
-        render(bones, "front", Path(tmp) / "front.png")
-        image = bpy.data.images.load(str(Path(tmp) / "front.png"))
-        width, height = image.size
-        picture = np.array(image.pixels[:]).reshape(height, width, 4)[:, :, :3]  # rows from below
 
-    def seen(x: float, y: float, z: float) -> np.ndarray:
+    def shot() -> np.ndarray:
+        """The front view as rows of colours, from the bottom row up."""
+        with tempfile.TemporaryDirectory() as tmp:
+            render(bones, "front", Path(tmp) / "front.png")
+            image = bpy.data.images.load(str(Path(tmp) / "front.png"))
+            return np.array(image.pixels[:]).reshape(image.size[1], image.size[0], 4)[:, :, :3]
+
+    picture = shot()
+    height, width = picture.shape[:2]
+
+    def seen(x: float, y: float, z: float, picture: np.ndarray = picture) -> np.ndarray:
         """The picture's colour where a point of the scene lands."""
         at = world_to_camera_view(scene, scene.camera, Vector((x, y, z)))
         return picture[min(int(at.y * height), height - 1), min(int(at.x * width), width - 1)]
@@ -312,6 +336,9 @@ def look_check() -> int:
         0,
         min(int(world_to_camera_view(scene, scene.camera, bones[3].location).x * width), width - 1),
     ]
+    world(None, BRIGHT)
+    bright = shot()
+    lit, farthest = seen(-0.10, -0.17, 0.40, bright), seen(0.10, 0.18, 0.22, bright)
 
     def placed(view: str) -> np.ndarray:
         """Where the blocks' corners inside the box to frame land in the picture."""
@@ -344,6 +371,10 @@ def look_check() -> int:
         "cartilage is blue-white": cartilage[2] > cartilage[1] > cartilage[0]
         and cartilage.min() > 0.4,
         "a far bone is paler than a near one": apart(far, paper) < apart(near, paper) - 0.02,
+        "the light of the second picture makes bone as light as the backdrop": lit.max()
+        > paper.max() - 0.03,
+        "and the farthest bone still stands clear of the backdrop": paper.mean() - farthest.mean()
+        > CLEAR,
         "a hip bone shows above the picture's bottom edge": apart(hip, paper) > 0.1,
         "a hip bone has faded into the backdrop on the edge": apart(edge, paper) < 0.05,
         "each view holds the bones above the hips with a margin": all(map(held, views.values())),
