@@ -578,7 +578,10 @@ def bone_kind(label: str) -> str:
 
 
 def settle_fragments(
-    seg_dir: Path, labels: list[str], left_out: list[str] | None = None
+    seg_dir: Path,
+    labels: list[str],
+    left_out: list[str] | None = None,
+    given: dict[str, np.ndarray] | None = None,
 ) -> tuple[dict[str, np.ndarray], list[dict]]:
     """Sorts out the detached pieces of the bones in labels before meshing.
 
@@ -594,8 +597,9 @@ def settle_fragments(
     chips, each under that limit, can be over it together.
     The neighbour may be a bone in left_out, one the scan cut and the body
     leaves out: its mislabelled piece leaves with it, and the note says so
-    ("exported": False). Returns the corrected masks of the bones in labels
-    and a note per piece moved or dropped.
+    ("exported": False). A mask in given (from whole_but_for_lumps) stands
+    in for the one on disk. Returns the corrected masks of the bones in
+    labels and a note per piece moved or dropped.
     """
     masks, affines = {}, {}
     left_out = [lab for lab in left_out or [] if lab not in labels]
@@ -605,6 +609,8 @@ def settle_fragments(
             image = nib.load(path)
             masks[label] = np.asanyarray(image.dataobj) > 0
             affines[label] = image.affine
+            if label in (given or {}):
+                masks[label] = given[label].copy()
     notes = []
     for label in [lab for lab in labels if lab in masks]:
         pieces, count = ndimage.label(masks[label], structure=np.ones((3, 3, 3)))
@@ -651,6 +657,101 @@ def settle_fragments(
                 notes.append({**note, "action": "dropped"})
                 loose -= share
     return {label: masks[label] for label in labels if label in masks}, notes
+
+
+def whole_but_for_lumps(
+    seg_dir: Path,
+    reasons: dict[str, str | None],
+    outside: tuple[np.ndarray, np.ndarray] | None = None,
+) -> tuple[dict[str, np.ndarray], list[dict]]:
+    """The bones the scan seems to cut only because their masks carry a lump
+    of a cut neighbour.
+
+    Where a scan ends through the spine, the segmentation may give part of
+    the vertebra above the label of the one below, joined to it by a thin
+    neck: the lump meets the scan's end, the bone itself ends well short of
+    it. For each bone in reasons that the scan cut, an opening (one voxel,
+    6-connected) takes the necks away and the largest piece, grown back, is
+    the bone. A piece left over is a neighbour's lump when it keeps a core of
+    its own through the opening, meets the scan's end and lies on a cut bone
+    of the same kind (NEIGHBOUR_CONTACT). When the lumps are within
+    REASSIGN_SHARE of the mask and the rest is clear of the scan's end, the
+    bone is whole and the lumps leave with the neighbour. A thin tip the scan
+    ends through has no core: it is the bone's own, and the bone stays cut;
+    so does a bone that is given such a lump. Returns the masks of the bones
+    found whole, and a note per lump ("neck": True, "exported": False).
+    """
+    six = ndimage.generate_binary_structure(3, 1)
+    images = {
+        label: nib.load(seg_dir / f"{label}.nii.gz")
+        for label, reason in reasons.items()
+        if (reason or "").startswith("cut by") and (seg_dir / f"{label}.nii.gz").exists()
+    }
+    masks = {label: np.asanyarray(image.dataobj) > 0 for label, image in images.items()}
+    whole, notes = {}, {}
+    for label, mask in masks.items():
+        others = [o for o in masks if o != label and bone_kind(o) == bone_kind(label)]
+        if not others:
+            continue
+        box = tuple(
+            slice(max(s.start - 2, 0), s.stop + 2)
+            for s in ndimage.find_objects(mask.astype(np.uint8))[0]
+        )  # the mask with two voxels round it, so the opening has room
+        bone = mask[box]
+        pad = np.zeros(bone.shape, bool)
+        if outside is not None:
+            pad = on_grid(images[label], outside)[box]
+        face = np.zeros(bone.shape, bool)  # the volume's own faces, where the box reaches them
+        for axis, s in enumerate(box):
+            if s.start == 0:
+                face[(slice(None),) * axis + (0,)] = True
+            if s.stop >= mask.shape[axis]:
+                face[(slice(None),) * axis + (-1,)] = True
+
+        def meets_end(part: np.ndarray, pad: np.ndarray = pad, face: np.ndarray = face) -> bool:
+            return bool((part & face).any() or (ndimage.binary_dilation(part) & pad).any())
+
+        opened = ndimage.binary_opening(bone, structure=six)
+        cores, count = ndimage.label(opened, structure=np.ones((3, 3, 3)))
+        if count < 2:
+            continue
+        main = cores == int(np.argmax(np.bincount(cores.ravel())[1:])) + 1
+        body = ndimage.binary_dilation(main, structure=six) & bone
+        rest, pieces = ndimage.label(bone & ~body, structure=np.ones((3, 3, 3)))
+        kept, lumps = bone.copy(), []
+        for piece in range(1, pieces + 1):
+            part = rest == piece
+            if not (part & opened).any() or not meets_end(part):
+                continue  # a thin tip, or a part the scan's end does not reach: the bone's own
+            grown = ndimage.binary_dilation(part)
+            contact = {o: int((grown & masks[o][box]).sum()) for o in others}
+            neighbour = max(contact, key=contact.get)
+            if contact[neighbour] >= NEIGHBOUR_CONTACT:
+                kept &= ~part
+                lumps.append((int(part.sum()), neighbour))
+        total = int(bone.sum())
+        if not lumps or sum(v for v, _ in lumps) > REASSIGN_SHARE * total or meets_end(kept):
+            continue
+        whole[label] = np.zeros_like(mask)
+        whole[label][box] = kept
+        voxel_ml = abs(float(np.linalg.det(images[label].affine[:3, :3]))) / 1000
+        notes[label] = [
+            {
+                "label": label,
+                "voxels": voxels,
+                "ml": round(voxels * voxel_ml, 2),
+                "share": round(voxels / total, 4),
+                "action": "moved",
+                "to": neighbour,
+                "neck": True,
+                "exported": False,
+            }
+            for voxels, neighbour in lumps
+        ]
+    while given := {note["to"] for label in whole for note in notes[label]} & set(whole):
+        for label in given:  # it takes a lump that meets the scan's end: cut after all
+            del whole[label]
+    return whole, [note for label in whole for note in notes[label]]
 
 
 def trim_knobs(mask: np.ndarray, voxel_ml: float) -> tuple[np.ndarray, float]:
@@ -1106,6 +1207,9 @@ def main() -> None:
     reasons = {label: cut_reason(seg_dir / f"{label}.nii.gz", outside) for label in labels}
     settled, fragments = {}, []
     if args.set in RULED_SETS:
+        # A bone that meets the scan's end only with a cut neighbour's lump is whole.
+        unmixed, lumps = whole_but_for_lumps(seg_dir, reasons, outside)
+        reasons.update(dict.fromkeys(unmixed))
         reasons = reference_rules(reasons)
         bones = [
             s.label
@@ -1119,7 +1223,8 @@ def main() -> None:
             if s.system == "skeletal" and s.label not in SETS_OF_PIECES
             and (reasons[s.label] or "").startswith(("cut by", "shoulder girdle", "its pair"))
         ]  # fmt: skip
-        settled, fragments = settle_fragments(seg_dir, bones, cut)
+        settled, fragments = settle_fragments(seg_dir, bones, cut, unmixed)
+        fragments = lumps + fragments
         for note in fragments:
             print(f"{note['label']}: {note['ml']} ml {note['action']}"
                   + (f" to {note['to']}" if note.get("to") else "")
