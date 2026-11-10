@@ -310,6 +310,16 @@ def test_a_humerus_cut_at_its_head_is_not_a_landmark(
     assert "humerus_right" in manifest["surfaced"]
 
 
+def test_a_cut_bone_says_which_side_the_scan_cut_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cut = {"clavicula_left": "cut by the scan's edge (unscanned padding)"}
+    notes = {d["label"]: d for d in run_main(tmp_path, monkeypatch, cut, faces={"S"})["dropped"]}
+    assert notes["clavicula_left"]["cut_at"] == "S"
+    assert "cut_at" not in notes["scapula_right"]  # dropped by the girdle rule, not cut
+    assert notes["scapula_right"]["reason"] == "shoulder girdle dropped: clavicula_left cut"
+
+
 @pytest.mark.parametrize(
     ("label", "reason", "faces", "ok"),
     [
@@ -347,6 +357,61 @@ def test_cut_faces_names_the_side_in_ras(
     else:
         mask[z, 10, 10] = True  # reaches the low or high x index
     assert mesh.cut_faces(save(tmp_path / "m.nii.gz", mask)) == {expected}
+
+
+def capped_ct(tmp_path: Path, shape: tuple[int, int, int] = (60, 40, 40)) -> Path:
+    """A CT that was never scanned above slice 34 or below slice 4: with the
+    blend, the padding starts at slice 32 and ends at slice 5."""
+    hu = np.full(shape, 40.0)
+    hu[:, :, 34:], hu[:, :, :4] = -1024, -1024
+    return save_ct(tmp_path / "ct.nii.gz", hu)
+
+
+def test_a_bone_lying_across_the_body_is_cut_where_the_padding_is(tmp_path: Path) -> None:
+    # A clavicle runs across the body and its outer end rises to the scan's
+    # last slice. The padding lies above it, so it is cut at S, although the
+    # contact is far to the side of the bone's middle and only a little above.
+    outside = mesh.scan_outside(capped_ct(tmp_path))
+    clavicle = box((60, 40, 40), (5, 15, 24), (50, 20, 28))
+    clavicle |= box((60, 40, 40), (44, 15, 24), (50, 20, 32))
+    path = save(tmp_path / "m.nii.gz", clavicle)
+    assert mesh.cut_reason(path, outside) == "cut by the scan's edge (unscanned padding)"
+    assert mesh.cut_faces(path, outside) == {"S"}
+
+
+def test_a_bone_cut_by_padding_at_both_ends_names_both(tmp_path: Path) -> None:
+    # A humerus running out of the scan at both ends: its head is cut, so it
+    # cannot give a joint centre, whichever end meets more padding.
+    outside = mesh.scan_outside(capped_ct(tmp_path))
+    shaft = box((60, 40, 40), (20, 16, 6), (24, 20, 32))
+    shaft |= box((60, 40, 40), (16, 12, 26), (28, 24, 32))  # the head, wider than the shaft
+    path = save(tmp_path / "m.nii.gz", shaft)
+    assert mesh.cut_faces(path, outside) == {"S", "I"}
+    assert not mesh.landmark_ok("humerus_left", "cut by the scan's edge (unscanned padding)",
+                                mesh.cut_faces(path, outside))  # fmt: skip
+
+
+@pytest.mark.parametrize(("top", "bottom", "expected"), [(34, 10, {"S"}), (20, 3, {"I"})])
+def test_a_mask_reaching_into_the_padding_is_cut_on_that_side(
+    tmp_path: Path, top: int, bottom: int, expected: set[str]
+) -> None:
+    # The segmentation may label a slice or two of the blend. The side is
+    # still where the scanned part of the mask goes over into the padding.
+    outside = mesh.scan_outside(capped_ct(tmp_path))
+    mask = box((60, 40, 40), (20, 16, bottom), (23, 19, top))  # thin, like a rib's tip
+    assert mesh.cut_faces(save(tmp_path / "m.nii.gz", mask), outside) == expected
+
+
+def test_padding_at_the_side_is_named_in_ras(tmp_path: Path) -> None:
+    # FLIPPED runs x towards the right as the index falls: padding at low x
+    # indices (a field of view narrower than the grid) cuts a bone at R.
+    hu = np.full((40, 40, 40), 40.0)
+    hu[:6] = -1024
+    outside = mesh.scan_outside(save_ct(tmp_path / "ct.nii.gz", hu))
+    mask = box((40, 40, 40), (8, 12, 12), (20, 20, 20))
+    assert mesh.cut_faces(save(tmp_path / "m.nii.gz", mask), outside) == {"R"}
+    clear = box((40, 40, 40), (10, 12, 12), (20, 20, 20))
+    assert mesh.cut_reason(save(tmp_path / "c.nii.gz", clear), outside) is None
 
 
 def test_trim_knobs_takes_off_a_lump_on_a_thin_neck_and_keeps_thin_rib() -> None:

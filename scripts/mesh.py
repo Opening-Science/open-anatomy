@@ -485,29 +485,42 @@ def cut_faces(path: Path, outside: tuple[np.ndarray, np.ndarray] | None = None) 
     """The sides of the body where the scan cuts a mask: "S" or "I" (its top
     or bottom slice), "L", "R", "A" or "P" (the in-plane border), named by the
     direction each face of the volume points in RAS. Where the mask meets
-    unscanned padding (outside), the side is the direction from the mask's
-    centre to where it meets it."""
+    unscanned padding (outside), each separate patch of contact names the
+    side the padding lies on there: the direction in which most of the patch
+    is one step on from the scanned part of the mask. A clavicle the scan
+    ends through is cut at "S", however it lies, and a bone cut at both ends
+    names both."""
     image = nib.load(path)
     data = np.asanyarray(image.dataobj) > 0
     faces = set()
+    sides = []  # (axis, step, side) for the six directions of the grid
     for axis in range(3):
-        k = np.flatnonzero(data.any(tuple(a for a in range(3) if a != axis)))
-        if len(k) == 0:
-            continue
         column = image.affine[:3, axis]
         ras = int(np.argmax(np.abs(column)))
         up, down = "RAS"[ras], "LPI"[ras]  # the RAS axis's positive and negative ends
         high, low = (up, down) if column[ras] > 0 else (down, up)
+        sides += [(axis, 1, high), (axis, -1, low)]
+        k = np.flatnonzero(data.any(tuple(a for a in range(3) if a != axis)))
+        if len(k) == 0:
+            continue
         if k[0] == 0:
             faces.add(low)
         if k[-1] == data.shape[axis] - 1:
             faces.add(high)
     if outside is not None:
-        contact = np.argwhere(ndimage.binary_dilation(data) & on_grid(image, outside))
-        if len(contact):
-            towards = image.affine[:3, :3] @ (contact.mean(0) - np.argwhere(data).mean(0))
-            ras = int(np.argmax(np.abs(towards)))
-            faces.add("RAS"[ras] if towards[ras] > 0 else "LPI"[ras])
+        pad = on_grid(image, outside)
+        met = ndimage.binary_dilation(data) & pad
+        scanned = data & ~pad
+        patches, count = ndimage.label(met, structure=np.ones((3, 3, 3)))
+        contact, patch = np.argwhere(met), patches[met]
+        reached = np.zeros((count + 1, len(sides)), dtype=np.int64)
+        for k, (axis, step, _) in enumerate(sides):
+            source = contact.copy()
+            source[:, axis] -= step  # the voxel this one is a step on from
+            inside = (source[:, axis] >= 0) & (source[:, axis] < data.shape[axis])
+            inside[inside] = scanned[tuple(source[inside].T)]
+            reached[:, k] = np.bincount(patch[inside], minlength=count + 1)
+        faces |= {sides[int(np.argmax(row))][2] for row in reached[1:] if row.any()}
     return faces
 
 
@@ -1114,11 +1127,15 @@ def main() -> None:
         if reason and not bone:
             sys.exit(f"{s.label}: {reason} in {args.case}; organs must be whole")
         if reason:
-            # Never exported, never capped. The femurs and humeri are still
-            # meshed into the landmarks file for their joint centres.
+            # Never exported, never capped; the manifest says which side of
+            # the body the scan cut it at (S for a shoulder the scan ends
+            # through). The femurs and humeri are still meshed into the
+            # landmarks file for their joint centres.
             dropped.append({"label": s.label, "reason": reason})
+            faces = cut_faces(path, outside) if reason.startswith("cut by") else set()
+            if faces:
+                dropped[-1]["cut_at"] = "".join(sorted(faces))
             if s.label in LANDMARK_BONES and not reason.startswith(("absent", "not segmented")):
-                faces = cut_faces(path, outside) if reason.startswith("cut by") else set()
                 if landmark_ok(s.label, reason, faces):
                     landmarks.append(s)
                 else:
