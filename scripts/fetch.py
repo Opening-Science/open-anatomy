@@ -109,7 +109,7 @@ def _member(archive: zipfile.ZipFile, case: str, label: str) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     parser.add_argument("--source", default=SOURCES["default"]["source"])
     parser.add_argument("--case", default=SOURCES["default"]["case"])
     parser.add_argument("--pick", action="store_true")

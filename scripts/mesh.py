@@ -46,7 +46,7 @@ os.environ.setdefault("VTK_SMP_BACKEND_IN_USE", "Sequential")
 import nibabel as nib  # noqa: E402
 import numpy as np  # noqa: E402
 import vtk  # noqa: E402
-from vtk.util.numpy_support import numpy_to_vtk, vtk_to_numpy  # noqa: E402
+from vtkmodules.util.numpy_support import numpy_to_vtk, vtk_to_numpy  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -117,15 +117,18 @@ def surface(path: Path, max_triangles: int) -> tuple[np.ndarray, np.ndarray, flo
     The dropped share is the part of the smoothed surface's volume that lies
     in pieces other than the largest one, which is the only one kept.
     """
-    image = nib.load(path)
+    image = nib.Nifti1Image.from_filename(path)
     data = np.asanyarray(image.dataobj) > 0
     if not data.any():
         raise ValueError(f"{path.name} is empty")
+    affine = image.affine
+    if affine is None:
+        raise ValueError(f"{path.name} has no affine")
     lo = np.maximum(np.argwhere(data).min(0) - 2, 0)
     hi = np.argwhere(data).max(0) + 3
     crop = np.pad(data[lo[0] : hi[0], lo[1] : hi[1], lo[2] : hi[2]], 1).astype(np.uint8)
 
-    spacing = np.linalg.norm(image.affine[:3, :3], axis=0)
+    spacing = np.linalg.norm(affine[:3, :3], axis=0)
     vtk_image = vtk.vtkImageData()
     vtk_image.SetDimensions(*crop.shape)
     vtk_image.SetSpacing(*spacing)
@@ -166,7 +169,7 @@ def surface(path: Path, max_triangles: int) -> tuple[np.ndarray, np.ndarray, flo
     triangles = triangles_of(poly)
     # The padded crop's first voxel sits at the origin.
     ijk = points / spacing + lo - 1
-    ras = ijk @ image.affine[:3, :3].T + image.affine[:3, 3]
+    ras = ijk @ affine[:3, :3].T + affine[:3, 3]
     return ras, triangles.astype(np.uint32), max(dropped, 0.0)
 
 
@@ -319,7 +322,7 @@ def write_glb(path: Path, parts: list[dict], attribution: dict | None = None) ->
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     parser.add_argument("--case", required=True)
     parser.add_argument("--seg-dir", type=Path, help="default: data/work/<case>/seg")
     parser.add_argument("--out-dir", type=Path, help="default: data/work/<case>")
