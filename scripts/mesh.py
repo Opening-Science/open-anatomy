@@ -348,14 +348,14 @@ def scan_outside(ct_path: Path) -> tuple[np.ndarray, np.ndarray]:
     the CT's affine, so masks can be checked against the same grid."""
     image = nib.Nifti1Image.from_filename(ct_path)
     fill = np.asanyarray(image.dataobj) <= PADDING_HU
-    pad = ndimage.binary_opening(fill, structure=np.ones((3, 3, 3)))
+    pad = ndimage.binary_opening(fill, structure=np.ones((3, 3, 3), dtype=bool))
     labels, _ = ndimage.label(pad)
     border = np.concatenate([
         labels[0].ravel(), labels[-1].ravel(), labels[:, 0].ravel(), labels[:, -1].ravel(),
         labels[:, :, 0].ravel(), labels[:, :, -1].ravel(),
     ])  # fmt: skip
     kept = np.isin(labels, np.setdiff1d(np.unique(border), [0]))
-    return ndimage.binary_propagation(kept, mask=fill), image.affine
+    return ndimage.binary_propagation(kept, mask=fill), affine_of(image)
 
 
 def cut_reason(path: Path, outside: tuple[np.ndarray, np.ndarray] | None = None) -> str | None:
@@ -385,7 +385,7 @@ def cut_reason(path: Path, outside: tuple[np.ndarray, np.ndarray] | None = None)
 def on_grid(image: nib.Nifti1Image, outside: tuple[np.ndarray, np.ndarray]) -> np.ndarray:
     """The unscanned padding, after checking the mask lies on the CT's own grid."""
     pad, affine = outside
-    if image.shape != pad.shape or not np.allclose(image.affine, affine, atol=1e-3):
+    if image.shape != pad.shape or not np.allclose(affine_of(image), affine, atol=1e-3):
         raise ValueError(f"{image.get_filename()} is not on the CT's grid")
     return pad
 
@@ -414,7 +414,7 @@ def cut_faces(path: Path, outside: tuple[np.ndarray, np.ndarray] | None = None) 
     if outside is not None:
         contact = np.argwhere(ndimage.binary_dilation(data) & on_grid(image, outside))
         if len(contact):
-            towards = image.affine[:3, :3] @ (contact.mean(0) - np.argwhere(data).mean(0))
+            towards = affine_of(image)[:3, :3] @ (contact.mean(0) - np.argwhere(data).mean(0))
             ras = int(np.argmax(np.abs(towards)))
             faces.add("RAS"[ras] if towards[ras] > 0 else "LPI"[ras])
     return faces
