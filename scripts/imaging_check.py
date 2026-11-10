@@ -20,7 +20,10 @@ Checks that the head guard (face_free_top and apply_head_guard)
   head comes within 2 cm of the scan's bottom slice;
 and that a body mask cut by the guard keeps no voxel of a synthetic face, for a
 head far above C7, a bowed head with the face level with C7, and a head just
-above the margin at the scan's bottom.
+above the margin at the scan's bottom; and that the 2x display upsample keeps
+flat regions flat, the mask binary and in place, and adds no dark fringe at
+the body's edge, also for an odd image size, a diagonal edge, a one-voxel strip
+and gap, and a tinted structure at the edge.
 """
 
 from __future__ import annotations
@@ -42,6 +45,7 @@ from imaging import (  # noqa: E402
     quad_corners,
     slice_image,
     to_reference,
+    upsample,
 )
 from structures import HEAD_GUARD  # noqa: E402
 
@@ -215,6 +219,45 @@ def main() -> int:
             check(False, f"a skull starting at slice {k} is refused")
         except ValueError:
             check(True, f"a skull starting at slice {k} is refused")
+
+    # The display upsample: twice the size, flat stays flat, no dark fringe at a
+    # transparent edge, and the body's edge stays where it was.
+    image = np.zeros((20, 30, 4), dtype=np.uint8)
+    image[:, 10:, :3] = 180
+    image[:, 10:, 3] = 255
+    big = upsample(image, 2)
+    check(big.shape == (40, 60, 4), "the display image is twice the size")
+    check(set(np.unique(big[..., 3])) <= {0, 255}, "the display mask stays binary")
+    # Lanczos-3 rings for up to 6 display pixels beside an edge; beyond that, flat.
+    check(bool((big[:, 27:, :3] == 180).all()), "a flat region stays flat")
+    check(int(big[:, 20:22, :3].min()) >= 170, "no dark fringe where the body meets the air")
+    check(bool((big[:, :20, 3] == 0).all() and (big[:, 20:, 3] == 255).all()),
+          "the body's edge stays at the same place")  # fmt: skip
+
+    # The hard cases: an odd size, a diagonal edge (a staircase of corners), a
+    # one-voxel strip of body and a one-voxel gap, and a tinted structure right
+    # at the edge.
+    height, width = 21, 33
+    r, c = np.mgrid[:height, :width]
+    inside = c > r + 3
+    inside[:, 2] = True  # a one-voxel strip of body in the air
+    inside[:, 25] = False  # a one-voxel gap of air in the body
+    hard = np.zeros((height, width, 4), dtype=np.uint8)
+    hard[..., :3], hard[..., 3] = 180, inside * 255
+    big = upsample(hard, 2)
+    native_mask = np.repeat(np.repeat(inside, 2, 0), 2, 1)
+    check(big.shape == (42, 66, 4), "an odd-sized image is upsampled to exactly twice its size")
+    check(bool((big[..., 3] == native_mask * 255).all()),
+          "diagonal, strip and gap: the display mask is the native mask, in place")  # fmt: skip
+    check(bool((big[native_mask, :3] == 180).all()),
+          "diagonal, strip and gap: a flat body stays exactly flat up to its edge")  # fmt: skip
+    tinted = hard.copy()
+    band = (c > r + 3) & (c < r + 8)  # a structure along the diagonal edge
+    tinted[band, :3] = (200, 80, 60)
+    big = upsample(tinted, 2)
+    shown = big[native_mask, :3].astype(int)
+    check(bool((shown >= (180, 80, 60)).all() and (shown <= (200, 180, 180)).all()),
+          "a structure tinted at the edge: no ring or fringe leaves its colours")  # fmt: skip
 
     print("imaging check passed" if not failures else f"imaging check failed: {len(failures)}")
     return 1 if failures else 0

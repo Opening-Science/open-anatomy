@@ -23,8 +23,15 @@ body cuts the same liver, kidneys and bones that the 3D layers show.
 | File | Content |
 | --- | --- |
 | `axial.png`, `coronal.png`, `sagittal.png` | one slice each, windowed for soft tissue (W400/L40) or bone (W1800/L400); each segmented structure is tinted 38% towards its display colour (converted from linear to sRGB first, so tints match the meshes); air outside the body is transparent |
-| `<body>.imaging.glb` | three double-sided, unlit quads (`KHR_materials_unlit`) carrying those PNGs, with `alphaMode` MASK |
-| `imaging.json` | each slice's plane, voxel index, pixel size, SHA-256, the structures it cuts (by UBERON or FMA ID) and its corners in metres |
+| `axial@2x.png`, `coronal@2x.png`, `sagittal@2x.png` | the same slices at twice the size, for display only: the colour is Lanczos-3 upsampled on premultiplied alpha and clamped to the range of the body voxels around each source voxel, so the edge gets no dark fringe and no ringing; the mask is the native mask with each pixel repeated 2 × 2, so it stays binary and exactly in place; the native PNGs stay the ones to measure on |
+| `<body>.imaging.glb` | three double-sided, unlit quads (`KHR_materials_unlit`) carrying the 2x PNGs, with `alphaMode` MASK |
+| `imaging.json` | each slice's plane, voxel index, pixel size, SHA-256 (native and display), the structures it cuts (by UBERON or FMA ID) and its corners in metres |
+
+The display PNGs are filtered in integer arithmetic, with the Lanczos weights
+in fixed point (steps of 1/4096), so their SHA-256 does not depend on the BLAS
+build or the thread count. The weights themselves are computed in floating
+point once; a machine whose `sin` differs in the last bit could only change a
+byte if a weight sat within that bit of a rounding boundary.
 
 The GLB loads together with `<body>.reference.glb`: the quads sit where their
 slices lie in the fitted body. They use the trunk fit from

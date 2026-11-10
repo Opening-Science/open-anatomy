@@ -10,7 +10,10 @@ used) and the body's report from blender/assemble.py (for the trunk fit). It
 writes, in data/imaging/<body>/:
 - axial.png, coronal.png, sagittal.png: the CT in a soft-tissue (W400/L40) or
   bone (W1800/L400) window, the segmented structures tinted in their display
-  colours, and the air outside the body transparent;
+  colours, and the air outside the body transparent, one pixel per voxel, for
+  measurement;
+- the same at twice the size (axial@2x.png and so on), Lanczos-3 upsampled, for
+  display only: the GLB's textures;
 - <body>.imaging.glb: three double-sided, unlit quads carrying those textures,
   each where its slice lies in the reference body (the trunk fit, not the
   girdle step), so the GLB can be loaded together with <body>.reference.glb;
@@ -50,6 +53,9 @@ WINDOWS = {"soft": (400, 40), "bone": (1800, 400)}
 TINT = 0.38  # share of a structure's colour mixed into its voxels
 SOURCE_LICENCE = "CC-BY-4.0"
 GUARD_MARGIN_MM = 20.0  # how far below the head or neck the guard cuts
+DISPLAY_FACTOR = 2  # the GLB textures are upsampled by this for display
+LANCZOS_TAPS = 3
+WEIGHT_ONE = 4096  # Lanczos weights are fixed point, in steps of 1/4096
 
 
 NECK = [f"vertebrae_C{i}" for i in range(1, 7)]
@@ -131,6 +137,82 @@ def srgb(linear) -> np.ndarray:
 
 def canonical(path: Path) -> nib.Nifti1Image:
     return nib.as_closest_canonical(nib.Nifti1Image.from_filename(path))  # voxel axes along R, A, S
+
+
+def lanczos_weights(size: int, factor: int, taps: int = LANCZOS_TAPS) -> np.ndarray:
+    """(size * factor, size) resampling matrix for a Lanczos-`taps` upsample.
+
+    Output pixel x samples the input at (x + 0.5) / factor - 0.5, so pixel
+    centres line up and the image's edges stay where they were; taps that fall
+    outside the image are clamped to its edge.
+    """
+    out = np.arange(size * factor)
+    centre = (out + 0.5) / factor - 0.5
+    base = np.floor(centre).astype(int)
+    matrix = np.zeros((size * factor, size))
+    for offset in range(-taps + 1, taps + 1):
+        source = base + offset
+        distance = centre - source
+        weight = np.sinc(distance) * np.sinc(distance / taps)
+        np.add.at(matrix, (out, np.clip(source, 0, size - 1)), weight)
+    return matrix / matrix.sum(1, keepdims=True)
+
+
+def fixed_point(matrix: np.ndarray) -> np.ndarray:
+    """Resampling weights as integers in steps of 1/WEIGHT_ONE, each row summing
+    to exactly WEIGHT_ONE (the rounding error goes onto the row's largest weight)."""
+    weights = np.round(matrix * WEIGHT_ONE).astype(np.int64)
+    weights[np.arange(len(weights)), np.abs(weights).argmax(1)] += WEIGHT_ONE - weights.sum(1)
+    return weights
+
+
+def upsample(rgba: np.ndarray, factor: int = 2) -> np.ndarray:
+    """Lanczos upsample of the colour for display; the mask is the native one.
+
+    Colour is filtered premultiplied by the native mask, so clear pixels add no
+    dark fringe: a flat colour stays exactly flat up to any edge. The display
+    mask is the native mask with each pixel repeated factor x factor times, so
+    it stays binary and exactly in place at corners, diagonals and one-voxel
+    features. The filter runs in integers (fixed-point weights, integer
+    products and sums), so the result does not depend on the BLAS build or the
+    thread count; the one float step before that, computing the weights,
+    would have to land within a rounding error of a 1/8192 boundary to change
+    a byte.
+    """
+    inside = rgba[..., 3] >= 128
+    premultiplied = np.dstack([rgba[..., :3] * inside[..., None], inside * 255]).astype(np.int64)
+    rows = fixed_point(lanczos_weights(rgba.shape[0], factor))
+    cols = fixed_point(lanczos_weights(rgba.shape[1], factor))
+    big = np.stack([rows @ premultiplied[..., c] @ cols.T for c in range(4)], -1)
+    weight = big[..., 3:].astype(np.float64)  # Lanczos alpha, times 255 * WEIGHT_ONE**2
+    nearest = np.repeat(np.repeat(rgba[..., :3], factor, 0), factor, 1) / 255
+    # Where the filtered alpha is small (a one-voxel feature, a sharp corner), the
+    # ratio is ill-conditioned: take the source voxel's own colour instead.
+    solid = weight > 0.25 * 255 * WEIGHT_ONE**2
+    rgb = np.where(solid, big[..., :3] / np.maximum(weight, 1), nearest)
+    # Lanczos rings beside a sharp change in colour (a tinted structure at the
+    # body's edge); keep each pixel within the range of the body voxels around
+    # its source voxel, so no ring can overshoot or darken the edge.
+    low, high = neighbourhood_range(rgba[..., :3] / 255, inside)
+    low, high = (np.repeat(np.repeat(v, factor, 0), factor, 1) for v in (low, high))
+    rgb = np.clip(rgb, np.minimum(low, nearest), np.maximum(high, nearest))
+    mask = np.repeat(np.repeat(inside, factor, 0), factor, 1)
+    return np.round(np.dstack([np.clip(rgb, 0, 1), mask]) * 255).astype(np.uint8)
+
+
+def neighbourhood_range(rgb: np.ndarray, inside: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Per-channel min and max over each pixel's 3 x 3 neighbours inside the body
+    (padded, not wrapped, at the image's border; +inf/-inf where none is inside)."""
+    height, width = inside.shape
+    low = np.pad(np.where(inside[..., None], rgb, np.inf), ((1, 1), (1, 1), (0, 0)),
+                 constant_values=np.inf)  # fmt: skip
+    high = np.pad(np.where(inside[..., None], rgb, -np.inf), ((1, 1), (1, 1), (0, 0)),
+                  constant_values=-np.inf)  # fmt: skip
+    shifts = [(dy, dx) for dy in range(3) for dx in range(3)]
+    return (
+        np.min([low[dy : dy + height, dx : dx + width] for dy, dx in shifts], 0),
+        np.max([high[dy : dy + height, dx : dx + width] for dy, dx in shifts], 0),
+    )
 
 
 def png(rgba: np.ndarray) -> bytes:
@@ -346,15 +428,23 @@ def main() -> None:
         image, shown = slice_image(ct, labels, body, axis, index, WINDOWS[args.window])
         data = png(image)
         (out / f"{plane}.png").write_bytes(data)
+        display = png(upsample(image, DISPLAY_FACTOR))
+        (out / f"{plane}@{DISPLAY_FACTOR}x.png").write_bytes(display)
         ras = quad_corners(origin, axis, index, zero, top)
         corners = to_reference(ras, centre, scale, shift)
-        planes.append({"plane": plane, "png": data, "corners": corners})
+        planes.append({"plane": plane, "png": display, "corners": corners})
         record.append({
             "plane": plane,
             "voxelIndex": int(index + offset[axis]),
             "image": f"{plane}.png",
             "pixels": [int(image.shape[1]), int(image.shape[0])],
             "sha256": hashlib.sha256(data).hexdigest(),
+            "display": {
+                "image": f"{plane}@{DISPLAY_FACTOR}x.png",
+                "pixels": [int(v) * DISPLAY_FACTOR for v in image.shape[1::-1]],
+                "resampling": f"Lanczos-{LANCZOS_TAPS}, premultiplied, fixed point; native mask",
+                "sha256": hashlib.sha256(display).hexdigest(),
+            },
             "structures": [REFERENCE[i - 1].term for i in shown],
             "cornersM": np.round(corners, 4).tolist(),
         })  # fmt: skip
