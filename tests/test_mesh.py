@@ -468,6 +468,149 @@ def test_a_thin_plate_keeps_its_voxel_volume(tmp_path: Path) -> None:
     )
 
 
+def test_a_bodys_wall_fluted_the_same_in_every_slice_comes_out_round(tmp_path: Path) -> None:
+    # A vertebral body as a 15 mm cylinder whose wall steps in and out by 0.8 mm
+    # every 3 mm round it, the same in every slice, as voxel steps are.
+    grid = np.indices((64, 64, 28)).transpose(1, 2, 3, 0) * SPACING
+    x, y, z = grid[..., 0] - 25.3, grid[..., 1] - 25.0, grid[..., 2] - 20.0
+    radius = 15 + 0.8 * np.sign(np.sin(30 * np.arctan2(y, x)))
+    path = save(tmp_path / "vertebrae_T9.nii.gz", (np.hypot(x, y) <= radius) & (np.abs(z) <= 12))
+    vertices, triangles, voxel_ml, _ = mesh.surface(path, 10**9, along_slices=True)
+    assert closed_volume_ml(vertices, triangles) == pytest.approx(voxel_ml, rel=0.01)
+    wall = np.abs(vertices[:, 2] - 20.0) < 2
+    around = np.hypot(-vertices[wall, 0] - 25.3, vertices[wall, 1] - 25.0)
+    assert around.mean() == pytest.approx(15.0, abs=0.3)
+    assert around.std() < 0.3  # the steps themselves have a spread of 0.8 mm
+
+
+def tube(line_mm: FloatArray, shape: tuple[int, int, int], radius: float, slab: int = 1) -> Mask:
+    """The voxels within radius of a line; with slab > 1 every slab of that many
+    slices repeats its middle slice, as a segmentation of thick slices does."""
+    from scipy.spatial import KDTree
+
+    grid = np.indices(shape).transpose(1, 2, 3, 0).astype(float)
+    grid[..., 2] = (grid[..., 2] // slab) * slab + (slab - 1) / 2
+    distance = KDTree(line_mm).query((grid * SPACING).reshape(-1, 3))[0]
+    return distance.reshape(shape) <= radius
+
+
+def climbing_arc() -> FloatArray:
+    """A quarter circle of 70 mm radius that climbs 70 mm through the slices, in mm."""
+    angle = np.linspace(0, np.pi / 2, 400)
+    return np.stack(
+        [8 + 70 * np.sin(angle), 78 - 70 * np.cos(angle), 10 + 70 * angle / (np.pi / 2)], 1
+    )
+
+
+def distance_to_line(vertices: FloatArray, line_mm: FloatArray) -> tuple[FloatArray, Any]:
+    """Each RAS vertex's distance to a line given in voxel millimetres, and the
+    nearest line point's index (FLIPPED turns x round)."""
+    from scipy.spatial import KDTree
+
+    return KDTree(line_mm * np.array([-1.0, 1.0, 1.0])).query(vertices)
+
+
+def test_a_stepped_rib_comes_out_smooth_along_its_length(tmp_path: Path) -> None:
+    # A 4 mm tube stepped in slabs of three slices: along its middle the surface
+    # should be a 4 mm tube again. Blurring along the slices leaves the steps.
+    line = climbing_arc()
+    path = save(tmp_path / "rib_left_5.nii.gz", tube(line, (110, 110, 60), 4.0, slab=3))
+    spread = {}
+    for centreline in (False, True):
+        vertices, triangles, voxel_ml, _ = mesh.surface(
+            path, 40000, along_slices=True, centreline=centreline
+        )
+        assert closed_volume_ml(vertices, triangles) == pytest.approx(voxel_ml, rel=0.01)
+        radius, nearest = distance_to_line(vertices, line)
+        middle = (nearest > 60) & (nearest < 340)
+        spread[centreline] = float(radius[middle].std())
+        if centreline:
+            assert radius[middle].mean() == pytest.approx(4.0, abs=0.2)
+            assert radius.max() < 6.0  # nothing strays from the tube, ends included
+    assert spread[True] < 0.2
+    assert spread[True] < spread[False] / 3
+
+
+def test_a_rib_cut_flat_ends_in_a_rounded_tip(tmp_path: Path) -> None:
+    bar = box((90, 30, 20), (10, 10, 7), (80, 20, 13))  # 56 x 8 x 9 mm, flat ends
+    path = save(tmp_path / "rib_left_5.nii.gz", bar)
+    share = {}
+    for centreline in (False, True):
+        vertices, triangles, voxel_ml, _ = mesh.surface(
+            path, 40000, along_slices=True, centreline=centreline
+        )
+        assert closed_volume_ml(vertices, triangles) == pytest.approx(voxel_ml, rel=0.01)
+        along = -vertices[:, 0]  # mm along the bar
+        tip = along > along.max() - 0.5
+        middle = np.abs(along - along.mean()) < 5
+        share[centreline] = float(np.ptp(vertices[tip, 1]) / np.ptp(vertices[middle, 1]))
+        assert abs(along.max() - 63.6) < 1.5  # the end stays where the mask ends
+    assert share[False] > 0.8  # a cut face, nearly as wide as the bar
+    assert share[True] < 0.75
+
+
+def test_a_bone_too_short_for_a_centreline_is_surfaced_as_before(tmp_path: Path) -> None:
+    blob = box((20, 20, 12), (6, 6, 4), (14, 14, 8))
+    assert mesh.unroll(np.pad(blob, mesh.PAD).astype(np.float32), SPACING) is None
+    path = save(tmp_path / "rib_left_12.nii.gz", blob)
+    plain = mesh.surface(path, 40000, along_slices=True)
+    followed = mesh.surface(path, 40000, along_slices=True, centreline=True)
+    np.testing.assert_array_equal(plain[0], followed[0])
+    np.testing.assert_array_equal(plain[1], followed[1])
+
+
+def test_a_bone_that_doubles_back_is_not_unrolled() -> None:
+    # A hairpin with arms 9 mm apart: the smoothed centreline cuts the bend, so
+    # the unrolled volume would miss part of the bone.
+    arm, turn = np.linspace(0, 50, 100), np.linspace(0, np.pi, 60)
+    line = np.vstack([
+        np.stack([10 + arm, np.full(100, 20.0), np.full(100, 15.0)], 1),
+        np.stack([60 + 4.5 * np.sin(turn), 24.5 - 4.5 * np.cos(turn), np.full(60, 15.0)], 1),
+        np.stack([60 - arm, np.full(100, 29.0), np.full(100, 15.0)], 1),
+    ])  # fmt: skip
+    hairpin = np.pad(tube(line, (100, 65, 20), 3.0), mesh.PAD).astype(np.float32)
+    assert mesh.unroll(hairpin, SPACING) is None
+
+
+def test_unrolling_keeps_the_rib_and_maps_it_back(tmp_path: Path) -> None:
+    line = climbing_arc()
+    mask = tube(line, (110, 110, 60), 4.0)
+    unrolled = mesh.unroll(np.pad(mask, mesh.PAD).astype(np.float32), SPACING)
+    assert unrolled is not None
+    straight, step, _ = unrolled
+    assert step == pytest.approx(SPACING.min() / mesh.UPSAMPLE)
+    assert straight.sum() * step**3 == pytest.approx(mask.sum() * SPACING.prod(), rel=0.03)
+    # Along the rib the unrolled tube is the same everywhere: a straight bar.
+    area = straight[100:-100].sum(axis=(1, 2)) * step**2
+    assert area.std() / area.mean() < 0.05
+
+
+def test_rib_axis_follows_the_bone_with_a_frame_that_does_not_twist() -> None:
+    from scipy.spatial import KDTree
+
+    line = climbing_arc()
+    voxels_mm = np.argwhere(tube(line, (110, 110, 60), 4.0)) * SPACING
+    axis = mesh.rib_axis(voxels_mm, SPACING, 0.4)
+    assert axis is not None
+    points, normals, binormals = axis
+    inside = (points[:, 2] > line[40, 2]) & (points[:, 2] < line[-40, 2])
+    assert KDTree(line).query(points[inside])[0].max() < 1.0
+    tangents = np.cross(normals, binormals)
+    np.testing.assert_allclose(np.linalg.norm(tangents, axis=1), 1.0, atol=1e-6)
+    np.testing.assert_allclose(np.einsum("ij,ij->i", normals, binormals), 0.0, atol=1e-6)
+    assert np.einsum("ij,ij->i", normals[1:], normals[:-1]).min() > 0.999
+    steps = np.linalg.norm(np.diff(points, axis=0), axis=1)
+    np.testing.assert_allclose(steps, 0.4, atol=0.02)
+
+
+def test_the_same_rib_gives_the_same_surface(tmp_path: Path) -> None:
+    path = save(tmp_path / "rib_left_5.nii.gz", tube(climbing_arc(), (110, 110, 60), 4.0))
+    a = mesh.surface(path, 5000, along_slices=True, centreline=True)
+    b = mesh.surface(path, 5000, along_slices=True, centreline=True)
+    np.testing.assert_array_equal(a[0], b[0])
+    np.testing.assert_array_equal(a[1], b[1])
+
+
 def test_the_surface_lies_where_the_affine_puts_the_mask(tmp_path: Path) -> None:
     mask = ellipsoid((40, 40, 24), np.array([10.0, 7.0, 12.0]))
     vertices, _, _, _ = mesh.surface(save(tmp_path / "e.nii.gz", mask), 40000)

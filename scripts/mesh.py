@@ -41,6 +41,7 @@ import json
 import os
 import struct
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 os.environ.setdefault("VTK_SMP_BACKEND_IN_USE", "Sequential")
@@ -64,9 +65,12 @@ SETS_OF_PIECES = {"costal_cartilages"}  # one node, several separate pieces
 MIN_PIECE_VOXELS = 150  # a piece smaller than this (0.5 ml) in a set is a loose blob
 LEVEL_STEPS = 12
 SLICE_SMOOTHED = ("sternum", "rib_", "vertebrae_", "costal_cartilages", "sacrum")
-SLICE_BLURS = ((0.5, 2.0), (0.5, 1.5), (0.25, 1.0))  # (in-plane, along slices), source voxels
+# (in-plane, along slices), in source voxels. Half a voxel in-plane left a
+# vertebral body's wall fluted: the voxel steps of each slice, drawn out along
+# the slice axis by the stronger blur there.
+SLICE_BLURS = ((1.0, 2.0), (0.5, 1.5), (0.25, 1.0))
 STERNUM_BLURS = ((1.0, 3.0), (0.75, 2.0), (0.5, 1.5))  # its ripples span several slices
-RIB_BLURS = ((0.75, 2.5), (0.5, 2.0), (0.5, 1.5))  # ribs ripple slice to slice the same way
+RIB_BLURS = ((0.75, 5.0), (0.75, 3.5), (0.75, 2.0))  # (across, along the rib) in mm: unroll()
 CARTILAGE_BLURS = ((1.0, 1.5), (0.75, 1.0), (0.5, 0.75))  # thin, lumpy segmentation
 CARTILAGE_MAX_MM = 170  # the 7th costal cartilage runs up to about 15 cm in a tall man
 JOIN_OVERLAP_MM = 6.0  # a modelled cartilage starts this far inside its rib's end
@@ -78,6 +82,8 @@ TANGENT_SHARE = 0.7  # of the rib-to-sternum span, for the cartilage curve's end
 KNOB_MAX_ML = 1.0  # a lump the opening separates from a rib is taken off below this volume
 RIB_BIN_MM = 3.0
 RIB_SMOOTH_MM = 9.0
+RIB_LEAD_MM = 30.0  # a rib's centreline runs on this far past its ends, for the blur's reach
+RIB_KEPT_SHARE = 0.9  # of a rib's volume must lie where its centreline puts it (real ribs: 0.96+)
 PAD = 2  # empty voxels around a crop, so the surface closes
 UPSAMPLE = 2
 BLUR_VOXELS = (1.0, 0.5, 0.25)  # Gaussian sigmas to try, in source voxels
@@ -743,26 +749,30 @@ def enclosed_volume(poly: vtk.vtkPolyData) -> float:
     return mass.GetVolume()
 
 
-def straighten(fine: np.ndarray, voxels_mm: np.ndarray, spacing: np.ndarray) -> np.ndarray:
-    """Removes steps along a long, thin bone (a rib) from its upsampled mask.
+def rib_axis(
+    voxels_mm: np.ndarray, spacing: np.ndarray, step: float
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    """A long, thin bone's centreline as a smooth curve sampled every step mm,
+    with a frame that does not twist: the points, and at each point two unit
+    directions across the bone (their cross product is the tangent).
 
     The centreline is found by walking the mask's voxels from one end (graph
     distance over 26 neighbours) and averaging them in RIB_BIN_MM bins, then
-    smoothed along its length (Gaussian, RIB_SMOOTH_MM). The mask is warped by
-    that smoothing's shift, interpolated along the walk distance of each fine
-    sample's nearest voxel, before it is blurred and contoured, so a sideways
-    step between scan slices (often breathing) becomes a gentle bend and the
-    surface is never sheared.
+    smoothed along its length (Gaussian, RIB_SMOOTH_MM), run on in a straight
+    line for RIB_LEAD_MM past both ends, and joined by a cubic spline. The
+    frame is carried along it by parallel transport. None when the bone is
+    too short to have a centreline.
     """
+    from scipy.interpolate import CubicSpline
     from scipy.sparse import coo_matrix
     from scipy.sparse.csgraph import dijkstra
-    from scipy.spatial import cKDTree
+    from scipy.spatial import KDTree
 
-    tree = cKDTree(voxels_mm)
+    tree = KDTree(voxels_mm)
     reach = float(np.sqrt(3) * spacing.max()) + 1e-3  # the 26-neighbourhood
     pairs = tree.query_pairs(r=reach, output_type="ndarray")
     if len(pairs) == 0:
-        return fine
+        return None
     lengths = np.linalg.norm(voxels_mm[pairs[:, 0]] - voxels_mm[pairs[:, 1]], axis=1)
     n = len(voxels_mm)
     graph = coo_matrix((lengths, (pairs[:, 0], pairs[:, 1])), shape=(n, n)).tocsr()
@@ -774,22 +784,87 @@ def straighten(fine: np.ndarray, voxels_mm: np.ndarray, spacing: np.ndarray) -> 
     used = count > 0
     raw = np.stack([np.bincount(bins, voxels_mm[reached][:, d]) for d in range(3)], 1)
     raw = raw[used] / count[used, None]
-    if len(raw) < 4:
-        return fine
-    shift = ndimage.gaussian_filter1d(raw, RIB_SMOOTH_MM / RIB_BIN_MM, axis=0, mode="nearest") - raw
-    stations = (np.flatnonzero(used) + 0.5) * RIB_BIN_MM
+    if len(raw) < 6:
+        return None
+    line = ndimage.gaussian_filter1d(raw, RIB_SMOOTH_MM / RIB_BIN_MM, axis=0, mode="nearest")
+    lead = np.arange(1, int(RIB_LEAD_MM / RIB_BIN_MM) + 1)[:, None] * RIB_BIN_MM
+    first, last = line[0] - line[2], line[-1] - line[-3]
+    first, last = first / np.linalg.norm(first), last / np.linalg.norm(last)
+    line = np.vstack([line[0] + lead[::-1] * first, line, line[-1] + lead * last])
+    chord = np.linalg.norm(np.diff(line, axis=0), axis=1)
+    line = line[np.concatenate([[True], chord > 1e-6])]
+    length = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(line, axis=0), axis=1))])
+    spline = CubicSpline(length, line)
+    at = np.arange(0.0, length[-1], step)
+    points, tangents = spline(at), spline(at, 1)
+    tangents /= np.linalg.norm(tangents, axis=1, keepdims=True)
+    across = np.eye(3)[int(np.argmin(np.abs(tangents[0])))]
+    normals = np.empty_like(points)
+    for i, tangent in enumerate(tangents):
+        across = across - (across @ tangent) * tangent
+        across /= np.linalg.norm(across)
+        normals[i] = across
+    return points, normals, np.cross(tangents, normals)
 
-    # Fine sample j sits at source index (j + 0.5) / UPSAMPLE - 0.5, i.e. in mm:
-    grid = np.indices(fine.shape).reshape(3, -1).T
-    mm = ((grid + 0.5) / UPSAMPLE - 0.5) * spacing
-    nearest = tree.query(mm)[1]
-    t = np.where(reached[nearest], along[nearest], stations[-1])
-    move = np.stack([np.interp(t, stations, shift[:, d]) for d in range(3)], 1)
-    # A sample at x takes the value from x - move: the shape moves by +move.
-    source = (mm - move) / spacing
-    source = (source + 0.5) * UPSAMPLE - 0.5
-    warped = ndimage.map_coordinates(fine, source.T, order=1, mode="constant")
-    return warped.reshape(fine.shape).astype(np.float32)
+
+def unroll(
+    crop: np.ndarray, spacing: np.ndarray
+) -> tuple[np.ndarray, float, Callable[[vtk.vtkPolyData], vtk.vtkPolyData]] | None:
+    """A rib's mask resampled along its own centreline: axis 0 runs along the
+    rib, axes 1 and 2 across it, all in steps of half a source voxel. Blurring
+    that volume along axis 0 smooths the rib along its length, whichever way
+    it runs through the scan; a blur along the slice axis cannot, because a
+    rib crosses the slices at a slant and is thinner than the blur. Returns
+    the volume, the step in mm, and a function that takes a surface of that
+    volume back to the crop's millimetres; or None when the bone has no
+    centreline to follow.
+
+    Every point of space is sampled only at the place on the centreline
+    nearest to it, so nothing is counted twice where the rib curls. If the
+    volume then holds less than RIB_KEPT_SHARE of the mask, the centreline
+    does not describe the bone and None is returned.
+    """
+    from scipy.spatial import KDTree
+
+    step = float(spacing.min()) / UPSAMPLE
+    voxels_mm = np.argwhere(crop > 0) * spacing
+    axis = rib_axis(voxels_mm, spacing, step)
+    if axis is None:
+        return None
+    curve, normals, binormals = axis
+    tree = KDTree(curve)
+    reach = float(tree.query(voxels_mm)[0].max() + 2 * spacing.max())
+    half = int(np.ceil(reach / step))
+    offsets = np.arange(-half, half + 1) * step
+    points = (
+        curve[:, None, None, :]
+        + offsets[None, :, None, None] * normals[:, None, None, :]
+        + offsets[None, None, :, None] * binormals[:, None, None, :]
+    ).reshape(-1, 3)
+    values = ndimage.map_coordinates(crop, (points / spacing).T, order=1, mode="constant")
+    station = np.repeat(np.arange(len(curve)), len(offsets) ** 2)
+    values[np.abs(tree.query(points)[1] - station) > 2] = 0.0
+    straight = values.reshape(len(curve), len(offsets), len(offsets)).astype(np.float32)
+    if straight.sum() * step**3 < RIB_KEPT_SHARE * (crop > 0).sum() * np.prod(spacing):
+        return None  # the bone doubles back more tightly than its centreline can follow
+
+    def back(poly: vtk.vtkPolyData) -> vtk.vtkPolyData:
+        # smoothest() puts sample j of each axis at (j - 0.5) * step.
+        index = vtk_to_numpy(poly.GetPoints().GetData()).astype(np.float64) / step + 0.5
+        along = np.clip(index[:, 0], 0, len(curve) - 1)
+        u, v = (index[:, 1] - half) * step, (index[:, 2] - half) * step
+        stations = np.arange(len(curve))
+        frame = [
+            np.stack([np.interp(along, stations, a[:, d]) for d in range(3)], 1)
+            for a in (curve, normals, binormals)
+        ]
+        moved = vtk.vtkPolyData()
+        moved.DeepCopy(poly)
+        mm = frame[0] + u[:, None] * frame[1] + v[:, None] * frame[2]
+        moved.GetPoints().SetData(numpy_to_vtk(mm, deep=True))
+        return moved
+
+    return straight, step, back
 
 
 def smoothest(
@@ -838,6 +913,13 @@ def surface(
     volume: a fixed 0.5 would shrink a thin bone such as a rib by up to 12%.
     A light windowed-sinc pass (Taubin-like, volume-keeping) removes the rest
     of the noise.
+
+    With along_slices the blur is stronger along the slice axis (flat bones
+    and vertebrae). With centreline (a rib) the mask is first resampled along
+    the bone's own centreline and blurred along that (RIB_BLURS, see
+    unroll()), which takes the slice-to-slice ripple off a rib wherever it
+    runs and rounds its ends; a bone too short or too curled for that is
+    surfaced as with along_slices.
     """
     image = nib.load(path)
     data = mask if mask is not None else np.asanyarray(image.dataobj) > 0
@@ -866,15 +948,24 @@ def surface(
         axis = int(np.argmax(np.abs(image.affine[2, :3])))
         label = path.name.removesuffix(".nii.gz")
         ladder = {"sternum": STERNUM_BLURS, "costal_cartilages": CARTILAGE_BLURS}.get(
-            label, RIB_BLURS if label.startswith("rib_") else SLICE_BLURS
+            label, SLICE_BLURS
         )
         blurs = [tuple(z if a == axis else xy for a in range(3)) for xy, z in ladder]
     else:
         blurs = list(BLUR_VOXELS)
-    if centreline:
-        fine = straighten(fine, np.argwhere(crop > 0) * spacing, spacing)
-    for blur in blurs:
-        poly = smoothest(fine, spacing, blur, target, pieces)
+    unrolled = unroll(crop, spacing) if centreline else None
+    if unrolled is not None:
+        # A rib is smoothed along its own length instead: see unroll().
+        fine, step, back = unrolled
+        samples = np.full(3, step * UPSAMPLE)  # smoothest() halves this again
+        tries = [
+            (samples, np.array([along, across, across]) / samples, back)
+            for across, along in RIB_BLURS
+        ]
+    else:
+        tries = [(spacing, blur, None) for blur in blurs]
+    for grid, blur, post in tries:
+        poly = smoothest(fine, grid, blur, target, pieces, post)
         if abs(enclosed_volume(poly) / target - 1) <= BLUR_TOLERANCE:
             break  # a thin, lobed organ (the pancreas) can need a lighter blur
     if pieces:
