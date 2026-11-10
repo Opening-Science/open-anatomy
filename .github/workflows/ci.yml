@@ -52,7 +52,7 @@ jobs:
         run: |
           python -m venv .venv
           .venv/bin/python -m pip install pip==26.3
-          .venv/bin/python -m pip install --group test -e '.[mesh]'
+          .venv/bin/python -m pip install --group test -e '.[mesh,qa]'
       - run: .venv/bin/pytest
       - name: Mesh check
         run: .venv/bin/python scripts/mesh_check.py
@@ -76,7 +76,7 @@ jobs:
         run: |
           python -m venv .venv
           .venv/bin/python -m pip install pip==26.3
-          .venv/bin/python -m pip install --group test -e '.[mesh]'
+          .venv/bin/python -m pip install --group test -e '.[mesh,qa]'
       - run: npx --yes pyright@1.1.414
 
   blender-self-check:
