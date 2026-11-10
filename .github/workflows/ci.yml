@@ -47,12 +47,15 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
-      - name: Install the test group
+      # The mesh extra brings nibabel, numpy and vtk for mesh.py and its check.
+      - name: Install the test group and the mesh extra
         run: |
           python -m venv .venv
           .venv/bin/python -m pip install pip==26.3
-          .venv/bin/python -m pip install --group test
+          .venv/bin/python -m pip install --group test -e '.[mesh]'
       - run: .venv/bin/pytest
+      - name: Mesh check
+        run: .venv/bin/python scripts/mesh_check.py
 
   type-check:
     name: Type check
@@ -64,12 +67,13 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
-      # Pyright reads .venv (see [tool.pyright] in pyproject.toml) to resolve pytest.
-      - name: Install the test group
+      # Pyright reads .venv (see [tool.pyright] in pyproject.toml) to resolve
+      # pytest and the mesh extra (nibabel, numpy, vtk).
+      - name: Install the test group and the mesh extra
         run: |
           python -m venv .venv
           .venv/bin/python -m pip install pip==26.3
-          .venv/bin/python -m pip install --group test
+          .venv/bin/python -m pip install --group test -e '.[mesh]'
       - run: npx --yes pyright@1.1.414
 
   blender-self-check:

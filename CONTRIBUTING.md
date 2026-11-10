@@ -10,10 +10,11 @@
    self-check, Secret scan, Data guard, Licence check):
 
    ```bash
-   uv venv .venv -p 3.12 && uv pip install --group test   # once
+   uv venv .venv -p 3.12 && uv pip install --group test -e '.[mesh]'   # once
    ruff check scripts tests && ruff format --check scripts tests
    shellcheck scripts/*.sh
    .venv/bin/pytest
+   .venv/bin/python scripts/mesh_check.py
    npx pyright@1.1.414
    python3 scripts/data_guard.py
    python3 scripts/licence_check.py
