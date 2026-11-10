@@ -126,20 +126,82 @@ SKELETON: tuple[Structure, ...] = (
          "The longest bone in the body, from the hip socket to the knee."),
 )  # fmt: skip
 
-# Cardiovascular: the heart and the vessels the "total" task names (aorta,
-# venae cavae, pulmonary vein, brachiocephalic trunk and veins, subclavian and
-# carotid arteries, portal and splenic vein, iliac arteries and veins).
+# Cardiovascular: the heart and every vessel the "total" task names (it has
+# the pulmonary veins but no pulmonary artery, and the left atrial appendage
+# but not the right). Arteries are red and veins blue, but the pulmonary veins
+# are red, as they carry oxygen-rich blood, and the portal vein is violet. A
+# name is the term's label on OLS or, where UBERON's label is the comparative
+# one (anterior vena cava, brachiocephalic artery, left atrium auricular
+# region, common carotid artery plus branches), the human synonym OLS lists
+# for it. UBERON has no sided term for the brachiocephalic and iliac veins, so
+# those take FMA's. Two kinds of mask hold more than their term names, and
+# their names say so: the portal and splenic veins are one mask under the
+# portal vein's term, the splenic vein being its tributary, and an iliac mask
+# runs from the aorta's fork to the groin, the common iliac vessel and its
+# external branch as one, under the common vessel's term.
+
+ARTERY = (0.78, 0.10, 0.09)
+VEIN = (0.17, 0.24, 0.68)
+
+
+def vessel(label: str, terms: tuple[str, str], name: str, colour: tuple[float, float, float],
+           plain: str, about: str) -> tuple[Structure, Structure]:  # fmt: skip
+    """The left and right of a paired vessel; terms are their IDs, left first."""
+    left, right = terms
+    return (
+        Structure(f"{label}_left", left, f"left {name}", "cardiovascular", colour,
+                  f"left {plain}", about),
+        Structure(f"{label}_right", right, f"right {name}", "cardiovascular", colour,
+                  f"right {plain}", about),
+    )  # fmt: skip
+
 
 CARDIOVASCULAR: tuple[Structure, ...] = (
     Structure("heart", "UBERON:0000948", "heart", "cardiovascular", (0.42, 0.14, 0.13),
               "heart", "The muscular pump that drives blood around the body."),
+    Structure("atrial_appendage_left", "UBERON:0006630", "left atrial appendage",
+              "cardiovascular", (0.52, 0.19, 0.16), "pouch on the heart (left atrial appendage)",
+              "A small ear-shaped pouch off the heart's upper left chamber that takes up blood "
+              "when pressure rises."),
     Structure("aorta", "UBERON:0000947", "aorta", "cardiovascular", (0.80, 0.08, 0.08),
               "main artery",
               "The body's largest artery, carrying blood from the heart down through the chest "
               "and belly."),
+    Structure("pulmonary_vein", "UBERON:0002016", "pulmonary vein", "cardiovascular",
+              (0.86, 0.27, 0.22), "lung veins",
+              "The veins that bring oxygen-rich blood back from the lungs to the heart."),
+    Structure("superior_vena_cava", "UBERON:0001585", "superior vena cava", "cardiovascular",
+              (0.20, 0.28, 0.74), "main vein of the upper body",
+              "The large vein that returns blood from the head, arms and chest to the heart."),
     Structure("inferior_vena_cava", "UBERON:0001072", "inferior vena cava", "cardiovascular",
               (0.15, 0.20, 0.65), "main vein of the lower body",
               "The large vein that returns blood from the legs and belly to the heart."),
+    Structure("brachiocephalic_trunk", "UBERON:0001529", "brachiocephalic trunk", "cardiovascular",
+              (0.84, 0.13, 0.10), "first branch of the main artery",
+              "The aorta's first branch; it soon divides to supply the right arm and the right "
+              "side of the head."),
+    *vessel("brachiocephalic_vein", ("FMA:4761", "FMA:4751"), "brachiocephalic vein", VEIN,
+            "vein from the head and arm",
+            "Collects blood from one side of the head and one arm; the two join into the main "
+            "vein of the upper body."),
+    *vessel("subclavian_artery", ("UBERON:0001584", "UBERON:0001534"), "subclavian artery", ARTERY,
+            "artery to the arm", "The artery that runs under the collarbone to supply the arm."),
+    *vessel("common_carotid_artery", ("UBERON:0001536", "UBERON:0001531"), "common carotid artery",
+            (0.86, 0.16, 0.12), "neck artery",
+            "The artery that runs up the side of the neck to supply the head and brain."),
+    Structure("portal_vein_and_splenic_vein", "UBERON:0001639",
+              "hepatic portal vein and splenic vein", "cardiovascular", (0.40, 0.22, 0.62),
+              "veins from the gut and spleen to the liver",
+              "Carry blood from the gut and the spleen to the liver, which processes it before "
+              "it returns to the heart."),
+    *vessel("iliac_artery", ("UBERON:0035529", "UBERON:0035322"),
+            "common and external iliac artery", (0.72, 0.09, 0.09), "artery to the leg",
+            "One of the two arteries the aorta forks into; it runs through the pelvis to supply "
+            "the leg."),
+    *vessel("iliac_vena", ("FMA:21388", "FMA:21387"), "common and external iliac vein",
+            (0.13, 0.18, 0.58), "vein from the leg",
+            "Returns blood from the leg through the pelvis; the two join into the main vein of "
+            "the lower body."),
 )  # fmt: skip
 
 # Respiratory: the five lung lobes and the trachea.

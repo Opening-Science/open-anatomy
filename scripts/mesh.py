@@ -15,7 +15,8 @@ box is centred on the origin. The share of a single structure's voxels outside
 its largest piece goes into the manifest as dropped_share; above
 MAX_DROPPED_SHARE the run stops (a structure in two pieces is a
 segmentation problem, not noise), unless the pieces are one bone split over
-thin bone, in line and within BRIDGE_GAP_MM: that gap is bridged and noted.
+thin bone, in line and within BRIDGE_GAP_MM, or one vessel with blood on the
+CT all the way between them: that gap is bridged and noted.
 
 --set organs (the default) needs every organ; --set reference adds the trunk
 skeleton and lists, rather than meshes, a bone the scan misses or cuts (the
@@ -65,7 +66,8 @@ from structures import RULED_SETS, SETS, Structure, node_name  # noqa: E402
 MIN_ML = 0.3  # a mask smaller than this is a stray label, not a bone (volume, not voxels)
 PADDING_HU = -1020  # at or below: a scanner's fill beyond what it scanned, never tissue
 PADDING_BLEND = 2  # voxels: resampling blends the fill into the last scanned slice this far
-SETS_OF_PIECES = {"costal_cartilages"}  # one node, several separate pieces
+# One node, several separate pieces: the pulmonary veins enter the heart one by one.
+SETS_OF_PIECES = {"costal_cartilages", "pulmonary_vein"}
 ORGANS_WHOLE = {"reference"}  # the reference bodies need every organ; the atlas sets list a cut one
 MIN_PIECE_VOXELS = 150  # a piece smaller than this (0.5 ml) in a set is a loose blob
 LEVEL_STEPS = 12
@@ -105,6 +107,36 @@ BRIDGEABLE = ("rib", "clavicula", "humerus", "femur")  # long bones a gap can sp
 FRAGMENT_SHARE = 0.05  # a detached piece under this share of a bone is a segmentation fragment
 REASSIGN_SHARE = 0.25  # up to this share, a piece touching a neighbour of the same kind is its
 NEIGHBOUR_CONTACT = 20  # voxels of contact that make a piece a neighbour's
+# How near the scan's edge a mask may come, in voxels, before it counts as cut
+# there (1: it touches). The segmentation tapers a vessel that runs out of
+# the scan and stops it a slice short of the last one scanned, so a vessel
+# that ends two voxels from the edge is cut by it. Per system; a system not
+# listed here keeps 1.
+EDGE_VOXELS = {"cardiovascular": 2}
+# Paired vessels go together, as paired ribs do.
+PAIRED_VESSELS = ("brachiocephalic_vein", "subclavian_artery", "common_carotid_artery",
+                  "iliac_artery", "iliac_vena")  # fmt: skip
+# Vessels that are one tube: a gap in the mask with blood in it is a segmentation gap.
+TUBES = ("aorta", "inferior_vena_cava", "superior_vena_cava", "brachiocephalic_",
+         "subclavian_artery_", "common_carotid_artery_", "iliac_artery_",
+         "iliac_vena_")  # fmt: skip
+BLOOD_PERCENTILE = 5  # of the HU inside a vessel: the CT in a bridged gap is at least this dense
+# The heart and the wide vessels show the voxel grid as terraces and lumps at
+# BLUR_VOXELS' one voxel, and are wide enough to take a stronger blur without
+# losing shape: at these sigmas, in source voxels, no part of either atlas
+# case's mask ends more than 3.5 mm outside its surface. The
+# thin arteries and the branching veins keep BLUR_VOXELS, as a stronger blur
+# eats their ends and branches. Each ladder falls back to the lighter blurs.
+VESSEL_BLURS = {
+    "heart": (1.5, 1.0, 0.5, 0.25),
+    "aorta": (2.0, 1.5, 1.0, 0.5, 0.25),
+    **dict.fromkeys(
+        ("superior_vena_cava", "inferior_vena_cava", "brachiocephalic_trunk",
+         "brachiocephalic_vein_left", "brachiocephalic_vein_right", "iliac_vena_left",
+         "iliac_vena_right"),
+        (1.5, 1.0, 0.5, 0.25),
+    ),
+}  # fmt: skip
 
 
 def triangles_of(poly: vtk.vtkPolyData) -> np.ndarray:
@@ -453,14 +485,18 @@ def scan_outside(ct_path: Path) -> tuple[np.ndarray, np.ndarray]:
     return ndimage.binary_dilation(outside, iterations=PADDING_BLEND), image.affine
 
 
-def cut_reason(path: Path, outside: tuple[np.ndarray, np.ndarray] | None = None) -> str | None:
+def cut_reason(
+    path: Path, outside: tuple[np.ndarray, np.ndarray] | None = None, margin: int = 1
+) -> str | None:
     """Why a mask cannot be a whole structure, or None if it is whole.
 
     Smaller than MIN_ML (measured with the voxel size from the affine, so the
     limit is the same at 0.8 mm and 1.5 mm), touching any face of the volume
     (the first or last slice, or the in-plane border), or touching the part of
     the volume that was never scanned (outside, from scan_outside, blend
-    included): the scan cut it. A mask on another grid than the CT's raises
+    included): the scan cut it. A margin above 1 also counts a mask that ends
+    within that many voxels of a face or of the unscanned part (EDGE_VOXELS
+    says for which structures). A mask on another grid than the CT's raises
     ValueError.
     """
     if not path.exists():
@@ -471,10 +507,18 @@ def cut_reason(path: Path, outside: tuple[np.ndarray, np.ndarray] | None = None)
         return "absent or a stray label"
     for axis in range(3):
         k = np.flatnonzero(data.any(tuple(a for a in range(3) if a != axis)))
-        if k[0] == 0 or k[-1] == data.shape[axis] - 1:
+        if k[0] < margin or k[-1] >= data.shape[axis] - margin:
             return f"cut by the scan's edge (axis {axis})"
-    if outside is not None and (ndimage.binary_dilation(data) & on_grid(image, outside)).any():
-        return "cut by the scan's edge (unscanned padding)"
+    if outside is not None:
+        # Only the mask's own box, grown by the margin, can hold a contact.
+        hit = np.argwhere(data)
+        box = tuple(
+            slice(max(int(a) - margin, 0), int(b) + margin + 1)
+            for a, b in zip(hit.min(0), hit.max(0), strict=True)
+        )
+        near = ndimage.binary_dilation(data[box], iterations=margin)
+        if (near & on_grid(image, outside)[box]).any():
+            return "cut by the scan's edge (unscanned padding)"
     return None
 
 
@@ -562,6 +606,65 @@ def bridge_gap(mask: np.ndarray, spacing: np.ndarray) -> tuple[np.ndarray, float
     inside = np.einsum("ij,jk,ik->i", offset, shape, offset) <= 1.9**2
     bridged = mask.copy()
     bridged[tuple(grid[inside].T)] = True
+    return bridged, round(gap, 1)
+
+
+def bridge_vessel(
+    mask: np.ndarray, spacing: np.ndarray, ct: nib.Nifti1Image
+) -> tuple[np.ndarray, float | None]:
+    """One vessel the segmentation left in two pieces where the CT shows it
+    running on. A vessel forks and bends, so bridge_gap's test (the gap in
+    line with the bone's end) does not fit it; the CT decides instead. When
+    the two largest pieces lie within BRIDGE_GAP_MM and the CT on the straight
+    line between their facing ends is everywhere as dense as the vessel's own
+    blood (BLOOD_PERCENTILE of the HU inside the mask), the gap is filled with
+    a tube of the thinner end's radius. Fat between the pieces, which is what
+    a vessel lies in, means they are two things: the mask comes back as it
+    was, with None, and the split stops the build. Returns the mask and the
+    gap bridged in mm."""
+    from scipy.spatial import cKDTree
+
+    hit = np.argwhere(mask)
+    box = tuple(
+        slice(max(int(a) - 2, 0), int(b) + 3) for a, b in zip(hit.min(0), hit.max(0), strict=True)
+    )
+    crop = mask[box]
+    labels, count = ndimage.label(crop, structure=np.ones((3, 3, 3)))
+    sizes = np.bincount(labels.ravel())[1:]
+    if count < 2 or np.sort(sizes)[-2] <= MAX_DROPPED_SHARE * sizes.sum():
+        return mask, None  # whole, or stray voxels that the surface drops anyway
+    order = np.argsort(sizes)[::-1]
+    a = np.argwhere(labels == order[0] + 1)
+    b = np.argwhere(labels == order[1] + 1)
+    distance, nearest = cKDTree(a * spacing).query(b * spacing)
+    gap = float(distance.min())
+    if gap > BRIDGE_GAP_MM:
+        return mask, None
+    close = distance <= gap + spacing.max()
+    pb = b[close].mean(0)
+    pa = a[np.unique(nearest[close])].mean(0)
+    hu = np.asanyarray(ct.dataobj[box], dtype=np.float32)
+    inside = ndimage.binary_erosion(crop)
+    blood = float(np.percentile(hu[inside if inside.any() else crop], BLOOD_PERCENTILE))
+    samples = max(int(np.ceil(2 * gap / spacing.min())), 2)
+    line = pa + np.linspace(0, 1, samples + 1)[:, None] * (pb - pa)
+    if ndimage.map_coordinates(hu, line.T, order=1).min() < blood:
+        return mask, None  # not blood all the way: two things, not one vessel
+    # The radius of the largest ball that fits in the vessel near each end
+    # (a mask's distance map reads half a voxel beyond it), the thinner of the two.
+    depth = ndimage.distance_transform_edt(crop, sampling=spacing)
+
+    def ball(end: np.ndarray, p: np.ndarray) -> float:
+        near = end[np.linalg.norm((end - p) * spacing, axis=1) < BRIDGE_END_MM]
+        return float(depth[tuple(near.T)].max())
+
+    radius = max(min(ball(a, pa), ball(b, pb)) - float(spacing.mean()) / 2, float(spacing.max()))
+    grid = np.indices(crop.shape).reshape(3, -1).T
+    span = (pb - pa) * spacing
+    along = np.clip(((grid - pa) * spacing) @ span / max(float(span @ span), 1e-12), 0, 1)
+    offset = (grid - pa) * spacing - along[:, None] * span
+    bridged = mask.copy()
+    bridged[box] |= (np.linalg.norm(offset, axis=1) <= radius).reshape(crop.shape)
     return bridged, round(gap, 1)
 
 
@@ -656,7 +759,8 @@ def reference_rules(reasons: dict[str, str | None]) -> dict[str, str | None]:
 
     A shoulder girdle with any bone cut is dropped on both sides, arm
     included, so a reference body is symmetric and nothing floats. Paired
-    ribs go together: a rib whose partner is cut or missing is dropped too.
+    ribs go together: a rib whose partner is cut or missing is dropped too,
+    and so is a paired vessel (PAIRED_VESSELS).
     Returns a new mapping; every dropped label has its reason.
     """
     reasons = dict(reasons)
@@ -666,8 +770,9 @@ def reference_rules(reasons: dict[str, str | None]) -> dict[str, str | None]:
     if cut:
         for g in girdle:
             reasons[g] = reasons.get(g) or f"shoulder girdle dropped: {', '.join(cut)} cut"
-    for k in range(1, 13):
-        pair = (f"rib_left_{k}", f"rib_right_{k}")
+    pairs = [(f"rib_left_{k}", f"rib_right_{k}") for k in range(1, 13)]
+    pairs += [(f"{vessel}_left", f"{vessel}_right") for vessel in PAIRED_VESSELS]
+    for pair in pairs:
         for a, b in (pair, pair[::-1]):
             if reasons.get(a) and not reasons.get(b):
                 reasons[b] = f"its pair {a} is missing"
@@ -846,7 +951,8 @@ def surface(
 
     The mask is upsampled 2x and blurred (Gaussian, one source voxel; half or a
     quarter where a thin, lobed structure would come apart), so the surface
-    follows a smooth field instead of voxel steps. The contour level is
+    follows a smooth field instead of voxel steps (the heart and the wide
+    vessels start from a stronger blur, VESSEL_BLURS). The contour level is
     then chosen, by bisection, so the surface encloses the mask's own voxel
     volume: a fixed 0.5 would shrink a thin bone such as a rib by up to 12%.
     A light windowed-sinc pass (Taubin-like, volume-keeping) removes the rest
@@ -883,7 +989,7 @@ def surface(
         )
         blurs = [tuple(z if a == axis else xy for a in range(3)) for xy, z in ladder]
     else:
-        blurs = list(BLUR_VOXELS)
+        blurs = list(VESSEL_BLURS.get(path.name.removesuffix(".nii.gz"), BLUR_VOXELS))
     if centreline:
         fine = straighten(fine, np.argwhere(crop > 0) * spacing, spacing)
     for blur in blurs:
@@ -1083,7 +1189,10 @@ def main() -> None:
     if not ct_path.exists() and not args.synthetic:
         sys.exit(f"{ct_path} is missing: the CT is needed to see where the scan ends")
     outside = scan_outside(ct_path) if ct_path.exists() else None
-    reasons = {label: cut_reason(seg_dir / f"{label}.nii.gz", outside) for label in labels}
+    reasons = {
+        s.label: cut_reason(seg_dir / f"{s.label}.nii.gz", outside, EDGE_VOXELS.get(s.system, 1))
+        for s in SETS[args.set]
+    }
     settled, fragments = {}, []
     if args.set in RULED_SETS:
         reasons = reference_rules(reasons)
@@ -1144,6 +1253,17 @@ def main() -> None:
                 knobless, bridged_mm = bridge_gap(knobless, spacing)
             if s.label.startswith("rib_"):
                 knobless, trimmed_ml = trim_knobs(knobless, float(np.prod(spacing)) / 1000)
+        elif (
+            s.label.startswith(TUBES)
+            and args.set in RULED_SETS
+            and path.exists()
+            and ct_path.exists()
+        ):
+            image = nib.load(path)
+            spacing = np.linalg.norm(image.affine[:3, :3], axis=0)
+            knobless, bridged_mm = bridge_vessel(
+                np.asanyarray(image.dataobj) > 0, spacing, nib.load(ct_path)
+            )
         try:
             ras, triangles, voxel_ml, share = surface(
                 path, cap, pieces=s.label in SETS_OF_PIECES,

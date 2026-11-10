@@ -114,6 +114,30 @@ def test_a_mask_ending_where_the_fill_blends_in_is_cut(tmp_path: Path) -> None:
     assert mesh.cut_reason(whole, outside) is None
 
 
+@pytest.mark.parametrize(("top", "cut"), [(30, True), (29, False)])
+def test_a_margin_counts_a_mask_that_ends_a_slice_short_of_the_padding_as_cut(
+    tmp_path: Path, top: int, cut: bool
+) -> None:
+    # The fill starts at slice 34 and its blend at 32, so 31 is the last slice
+    # scanned: a mask that ends at 30 stops one slice short of it.
+    outside = mesh.scan_outside(padded_ct(tmp_path))
+    path = save(tmp_path / "m.nii.gz", box((40, 40, 40), (12, 12, 20), (20, 20, top + 1)))
+    assert mesh.cut_reason(path, outside) is None
+    reason = mesh.cut_reason(path, outside, margin=2)
+    assert reason == ("cut by the scan's edge (unscanned padding)" if cut else None)
+
+
+@pytest.mark.parametrize(("first", "cut"), [(1, True), (2, False)])
+def test_a_margin_counts_a_mask_that_ends_a_slice_short_of_a_face_as_cut(
+    tmp_path: Path, first: int, cut: bool
+) -> None:
+    path = save(tmp_path / "m.nii.gz", box((40, 40, 40), (12, 12, first), (20, 20, 30)))
+    assert mesh.cut_reason(path) is None
+    assert mesh.cut_reason(path, margin=2) == ("cut by the scan's edge (axis 2)" if cut else None)
+    high = save(tmp_path / "h.nii.gz", box((40, 40, 40), (12, 12, 10), (20, 20, 40 - first)))
+    assert (mesh.cut_reason(high, margin=2) is not None) is cut
+
+
 def test_air_round_the_body_is_not_padding(tmp_path: Path) -> None:
     outside, _ = mesh.scan_outside(padded_ct(tmp_path))
     assert not outside[:, :, :30].any()  # noisy air below the fill value's band stays scanned
@@ -205,9 +229,11 @@ def run_main(
     shares: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     surfaced: list[str] = []
+    margins: dict[str, int] = {}
     shares = shares or {}
 
-    def fake_reason(path: Path, outside: object = None) -> str | None:
+    def fake_reason(path: Path, outside: object = None, margin: int = 1) -> str | None:
+        margins[path.name.removesuffix(".nii.gz")] = margin
         return reasons.get(path.name.removesuffix(".nii.gz"))
 
     def fake_surface(path: Path, max_triangles: int, **_: object) -> tuple[Any, Any, float, float]:
@@ -233,6 +259,7 @@ def run_main(
     mesh.main()
     manifest: dict[str, Any] = json.loads((tmp_path / f"c.{which}.manifest.json").read_text())
     manifest["surfaced"] = surfaced
+    manifest["margins"] = margins
     return manifest
 
 
@@ -379,6 +406,42 @@ def test_when_both_ribs_of_a_pair_are_cut_each_keeps_its_own_reason(
     assert dropped(run_main(tmp_path, monkeypatch, cut)) == cut
 
 
+@pytest.mark.parametrize("vessel", mesh.PAIRED_VESSELS)
+def test_a_vessel_whose_pair_is_cut_is_dropped_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, vessel: str
+) -> None:
+    cut = {f"{vessel}_right": "cut by the scan's edge (unscanned padding)"}
+    manifest = run_main(tmp_path, monkeypatch, cut, "cardiovascular")
+    assert dropped(manifest) == {**cut, f"{vessel}_left": f"its pair {vessel}_right is missing"}
+    assert len(manifest["nodes"]) == len(SETS["cardiovascular"]) - 2
+
+
+def test_every_sided_vessel_is_paired_and_the_unpaired_ones_stand_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sided = {s.label.rsplit("_", 1)[0] for s in SETS["cardiovascular"]
+             if s.label.endswith("_right")}  # fmt: skip
+    assert sided == set(mesh.PAIRED_VESSELS)
+    cut = {"aorta": "cut by the scan's edge (unscanned padding)"}
+    assert dropped(run_main(tmp_path, monkeypatch, cut, "cardiovascular")) == cut
+
+
+def test_vessels_are_cut_a_slice_short_of_the_edge_and_the_rest_at_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    margins = run_main(tmp_path, monkeypatch, {}, "body")["margins"]
+    for s in SETS["body"]:
+        assert margins[s.label] == (2 if s.system == "cardiovascular" else 1), s.label
+
+
+def test_the_pulmonary_veins_are_one_node_of_several_pieces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    nodes = run_main(tmp_path, monkeypatch, {}, "cardiovascular")["nodes"]
+    several = [n["label"] for n in nodes if n["pieces"] == "several"]
+    assert several == ["pulmonary vein"]
+
+
 def test_the_organ_set_ignores_cuts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     manifest = run_main(
         tmp_path, monkeypatch, {"liver": "cut by the scan's edge (axis 2)"}, "organs"
@@ -470,6 +533,144 @@ def test_a_bridged_rib_is_whole_and_its_gap_is_recorded(tmp_path: Path) -> None:
     assert share_before > mesh.MAX_DROPPED_SHARE
     assert share_after == 0.0
     assert gap is not None and gap > 0
+
+
+CUBIC = np.diag([-1.5, 1.5, 1.5, 1.0])  # the atlas cases' grid
+
+
+def two_piece_vessel(gap_voxels: int, between_hu: float) -> tuple[Mask, nib.Nifti1Image]:
+    """A vessel 6 voxels across along z in two pieces, the upper one thinner (4
+    across), and its CT: blood (about 120 HU) in the pieces, fat round them,
+    and between_hu where the vessel would run through the gap."""
+    shape = (30, 30, 70)
+    mask = np.zeros(shape, bool)
+    mask[12:18, 12:18, 5:30] = True
+    mask[13:17, 13:17, 30 + gap_voxels : 65] = True
+    hu = np.full(shape, -90.0)
+    hu[mask] = np.random.default_rng(0).normal(120, 8, int(mask.sum()))
+    hu[12:18, 12:18, 30 : 30 + gap_voxels] = between_hu
+    return mask, nib.Nifti1Image(hu.astype(np.int16), CUBIC)
+
+
+def test_bridge_vessel_joins_two_pieces_with_blood_between_them() -> None:
+    mask, ct = two_piece_vessel(gap_voxels=6, between_hu=115)
+    bridged, gap = mesh.bridge_vessel(mask, np.full(3, 1.5), ct)
+    assert gap == pytest.approx(7 * 1.5, abs=0.1)  # voxel centres 7 apart
+    _, count = mesh.ndimage.label(bridged, structure=np.ones((3, 3, 3)))
+    assert count == 1
+    assert (bridged >= mask).all()  # nothing of the vessel is taken away
+    section = bridged[:, :, 33]  # the bridge, mid-gap: no wider than the thinner end
+    assert section[15, 15] and not section[12, 12] and section.sum() <= 16
+
+
+@pytest.mark.parametrize(
+    ("gap_voxels", "between_hu"),
+    [(6, -90.0), (6, 30.0), (16, 115.0)],  # fat, soft tissue less dense than blood, too far
+)
+def test_bridge_vessel_leaves_pieces_the_ct_does_not_join(
+    gap_voxels: int, between_hu: float
+) -> None:
+    mask, ct = two_piece_vessel(gap_voxels, between_hu)
+    bridged, gap = mesh.bridge_vessel(mask, np.full(3, 1.5), ct)
+    assert gap is None
+    assert (bridged == mask).all()
+
+
+def test_bridge_vessel_leaves_a_whole_vessel_and_stray_voxels_alone() -> None:
+    mask, ct = two_piece_vessel(gap_voxels=6, between_hu=115)
+    whole = mask.copy()
+    whole[:, :, 36:] = False  # the second piece is gone
+    assert mesh.bridge_vessel(whole, np.full(3, 1.5), ct)[1] is None
+    stray = whole.copy()
+    stray[14:16, 14:16, 36:38] = True  # 8 voxels, under MAX_DROPPED_SHARE of the vessel
+    bridged, gap = mesh.bridge_vessel(stray, np.full(3, 1.5), ct)
+    assert gap is None and (bridged == stray).all()
+
+
+def build_vessel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, between_hu: float
+) -> dict[str, Any]:
+    """Runs main() on a seg folder holding only a two-piece aorta, with its CT."""
+    mask, ct = two_piece_vessel(gap_voxels=6, between_hu=between_hu)
+    seg = tmp_path / "seg"
+    seg.mkdir()
+    save(seg / "aorta.nii.gz", mask, CUBIC)
+    nib.save(ct, tmp_path / "ct.nii.gz")
+    paths = ["--seg-dir", str(seg), "--out-dir", str(tmp_path), "--ct", str(tmp_path / "ct.nii.gz")]
+    argv = ["mesh.py", "--case", "c", "--synthetic", *paths, "--set", "cardiovascular"]
+    monkeypatch.setattr(sys, "argv", argv)
+    mesh.main()
+    manifest: dict[str, Any] = json.loads((tmp_path / "c.cardiovascular.manifest.json").read_text())
+    return manifest
+
+
+def test_a_bridged_vessel_is_built_whole_and_its_gap_is_recorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest = build_vessel(tmp_path, monkeypatch, between_hu=115)
+    (node,) = manifest["nodes"]
+    assert node["label"] == "aorta"
+    assert node["bridged_gap_mm"] == pytest.approx(10.5, abs=0.1)
+    assert node["dropped_share"] == 0.0
+    assert abs(node["volume_drift"]) <= mesh.MAX_VOLUME_DRIFT
+    reasons = dropped(manifest)
+    assert set(reasons) == {s.label for s in SETS["cardiovascular"]} - {"aorta"}
+    assert reasons["heart"] == "not segmented"
+
+
+def test_a_vessel_split_over_fat_stops_the_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with pytest.raises(SystemExit, match="aorta: .* a split structure stops the build"):
+        build_vessel(tmp_path, monkeypatch, between_hu=-90)
+
+
+def test_only_one_tube_vessels_are_bridged() -> None:
+    bridged = {s.label for s in SETS["cardiovascular"] if s.label.startswith(mesh.TUBES)}
+    assert bridged == {s.label for s in SETS["cardiovascular"]} - {
+        "heart", "atrial_appendage_left", "pulmonary_vein", "portal_vein_and_splenic_vein"
+    }  # fmt: skip
+
+
+def blurs_tried(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, label: str) -> list[Any]:
+    """The blurs surface() tries for a label when none of them holds the volume."""
+    tried: list[Any] = []
+    real = mesh.smoothest
+
+    def recording(fine: Any, spacing: Any, blur: Any, target: float, pieces: bool) -> Any:
+        tried.append(blur)
+        return real(fine, spacing, blur, target * 2, pieces)  # never within the tolerance
+
+    monkeypatch.setattr(mesh, "smoothest", recording)
+    path = save(tmp_path / f"{label}.nii.gz", ellipsoid((24, 24, 24), np.array([6.0, 6.0, 12.0])))
+    mesh.surface(path, 2000)
+    return tried
+
+
+def test_the_heart_and_wide_vessels_start_from_a_stronger_blur(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert blurs_tried(tmp_path, monkeypatch, "aorta") == [2.0, 1.5, 1.0, 0.5, 0.25]
+    assert blurs_tried(tmp_path, monkeypatch, "heart") == [1.5, 1.0, 0.5, 0.25]
+    assert blurs_tried(tmp_path, monkeypatch, "iliac_vena_left") == [1.5, 1.0, 0.5, 0.25]
+    for label in ("subclavian_artery_left", "portal_vein_and_splenic_vein", "liver"):
+        assert blurs_tried(tmp_path, monkeypatch, label) == list(mesh.BLUR_VOXELS)
+
+
+def test_every_vessel_ladder_is_a_vessels_and_falls_back_to_the_lighter_blurs() -> None:
+    labels = {s.label for s in SETS["cardiovascular"]}
+    for label, ladder in mesh.VESSEL_BLURS.items():
+        assert label in labels
+        assert list(ladder) == sorted(ladder, reverse=True) and ladder[0] > mesh.BLUR_VOXELS[0]
+        assert set(mesh.BLUR_VOXELS) <= set(ladder)
+    for vessel in ("brachiocephalic_vein", "iliac_vena"):  # a pair is blurred alike
+        assert mesh.VESSEL_BLURS[f"{vessel}_left"] == mesh.VESSEL_BLURS[f"{vessel}_right"]
+
+
+def test_a_stronger_blur_still_keeps_the_voxel_volume(tmp_path: Path) -> None:
+    organ = ellipsoid((40, 40, 60), np.array([9.0, 9.0, 30.0]))  # a tube 18 mm across
+    ras, triangles, voxel_ml, _ = mesh.surface(save(tmp_path / "aorta.nii.gz", organ), 20000)
+    assert closed_volume_ml(ras, triangles) == pytest.approx(voxel_ml, rel=0.02)
 
 
 def test_a_cut_organ_stops_the_reference_set(
