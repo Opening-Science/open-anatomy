@@ -9,6 +9,9 @@ an open, rigged ANNY body. The same inputs give the same files.
 **These models are for research, education and software. They are not
 clinically validated and must not guide care.**
 
+How a person's clinician-verified facts would change the body is designed in
+[docs/personalisation.md](docs/personalisation.md); nothing of it is built yet.
+
 ## What a build gives you
 
 For each reference body, in the gitignored `data/` folder:
