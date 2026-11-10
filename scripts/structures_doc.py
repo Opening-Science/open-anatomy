@@ -99,9 +99,12 @@ def per_body(references: dict) -> list[str]:
 
 
 def main() -> None:
-    from totalsegmentator.map_to_binary import class_map
+    # TotalSegmentator is in the pipeline extra only, which the type check does not install.
+    from totalsegmentator.map_to_binary import (  # pyright: ignore[reportMissingImports]
+        class_map,
+    )
 
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     parser.add_argument("--body", default="anny-adult-f", help="the body the rows describe")
     args = parser.parse_args()
     references = json.loads((ROOT / "sources.json").read_text()).get("references", {})
