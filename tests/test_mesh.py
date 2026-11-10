@@ -983,6 +983,27 @@ def test_small_pieces_that_add_up_past_the_limit_are_settled_largest_first(tmp_p
     assert 12 / 1012 <= mesh.MAX_DROPPED_SHARE
 
 
+def test_a_small_piece_on_the_neighbour_is_moved_when_the_loose_share_is_past_the_limit(
+    tmp_path: Path,
+) -> None:
+    seg = vertebra_pair(tmp_path, chip=None, moved=False)
+    t1 = np.asanyarray(nib.load(seg / "vertebrae_T1.nii.gz").dataobj) > 0
+    on_t2 = t1 | box(t1.shape, (15, 25, 20), (25, 26, 22))  # 20 voxels flat against T2, 1.96%
+    save(seg / "vertebrae_T1.nii.gz", on_t2)
+    masks, notes = mesh.settle_fragments(seg, ["vertebrae_T1", "vertebrae_T2"])
+    assert notes == [] and masks["vertebrae_T1"].sum() == 1020  # noise on its own: it stays
+    # A far chip of 1.2% takes the loose share to 3.1%: the larger piece is
+    # settled first, and as it lies on T2 it is moved there, not dropped.
+    save(seg / "vertebrae_T1.nii.gz", on_t2 | box(t1.shape, (3, 3, 48), (5, 6, 50)))
+    masks, notes = mesh.settle_fragments(seg, ["vertebrae_T1", "vertebrae_T2"])
+    assert [(n["voxels"], n["action"], n.get("to")) for n in notes] == [
+        (20, "moved", "vertebrae_T2")
+    ]
+    assert masks["vertebrae_T1"].sum() == 1012  # the far chip is within the limit now and stays
+    assert masks["vertebrae_T2"].sum() == 1020
+    assert mesh.ndimage.label(masks["vertebrae_T2"], structure=np.ones((3, 3, 3)))[1] == 1
+
+
 def test_a_large_loose_piece_is_left_for_the_build_to_stop_on(tmp_path: Path) -> None:
     seg = vertebra_pair(tmp_path, chip=None, moved=False)
     t1 = np.asanyarray(nib.load(seg / "vertebrae_T1.nii.gz").dataobj) > 0
