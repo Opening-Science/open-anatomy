@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+message: "If you use open-anatomy in your work, please cite it as below."
+type: software
+title: open-anatomy
+abstract: >-
+  Open, imaging-based human anatomy models built by scripts from openly
+  licensed CT data and open body models. Meshes are named by UBERON or FMA IDs
+  and released as glTF.
+authors:
+  - family-names: Dike
+    given-names: Peter
+    alias: CPD9
+    email: peter.dike@unibe.ch
+    affiliation: University of Bern
+repository-code: "https://github.com/Opening-Science/open-anatomy"
+license: Apache-2.0
+version: 0.0.0
+keywords:
+  - anatomy
+  - computed tomography
+  - segmentation
+  - glTF
+  - UBERON
+  - open data
