@@ -100,7 +100,7 @@ A person's clinician-verified facts will adjust the layers at load time. For
 example, after a nephrectomy the model shows one kidney. A small rule map from
 FHIR Condition and Procedure codes to anatomy edits will drive this, applied
 on the person's own machine. The released base models stay generic. This is a
-design only for now.
+design only for now: see [docs/personalisation.md](docs/personalisation.md).
 
 ## Build one case
 
