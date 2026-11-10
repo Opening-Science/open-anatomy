@@ -67,7 +67,7 @@ A person's clinician-verified facts will adjust the layers at load time. For
 example, after a nephrectomy the model shows one kidney. A small rule map from
 FHIR Condition and Procedure codes to anatomy edits will drive this, applied
 on the person's own machine. The released base models stay generic. This is a
-design only for now.
+design only for now: see [docs/personalisation.md](docs/personalisation.md).
 
 ## Build one case
 
@@ -88,7 +88,8 @@ MD5 and SHA-256 against [sources.json](sources.json), and unpacks one case.
 `segment.py` runs TotalSegmentator's `total` task for ten structures and scores
 each against the dataset's own reference segmentation. `mesh.py` writes one GLB
 with a closed mesh per structure, named by UBERON ID, and a manifest; the same
-masks always give the same bytes.
+masks always give the same bytes. The GLB credits the dataset's creator, DOI
+and case in its asset copyright, so the attribution travels with the file.
 
 ## Reference bodies
 
@@ -101,7 +102,8 @@ uv run --script scripts/bake_anny.py male data/bodies/anny-adult-m.rigged.glb
 uv run --script scripts/bake_anny.py female data/bodies/anny-adult-f.rigged.glb
 ```
 
-The bake is pinned by SHA-256 in [sources.json](sources.json).
+The bake is pinned by SHA-256 in [sources.json](sources.json);
+`python3 scripts/bake_check.py --bake` bakes both again and compares.
 
 Each reference body puts one CT's organs and trunk skeleton inside an ANNY
 body and attaches every structure to ANNY's skeleton. The male uses case s0903,
@@ -115,7 +117,10 @@ the female s0859, both from the TotalSegmentator dataset (CC BY 4.0):
 from the hip and shoulder joints, width and depth from the trunk outlines. It
 reports each joint's residual and the share of every structure inside the
 skin. The CT was taken lying down and ANNY stands, so the organs sit as they do
-supine. Other headless Blender 5.2.x scripts in [`blender/`](blender/) clean
+supine. The ages do not match either: ANNY's bodies are young adults, while
+s0903 was 88 and s0859 74 when scanned, so the organs and bones are an older
+person's inside a young adult's shape. The released GLB's asset copyright credits the TotalSegmentator dataset
+(creator, DOI, case) and ANNY. Other headless Blender 5.2.x scripts in [`blender/`](blender/) clean
 meshes up and fit an atlas to a body limb by limb; `scripts/blender.py` runs
 them all.
 
@@ -132,6 +137,7 @@ as textured planes inside the body. See
 .venv/bin/python scripts/mesh_check.py   # meshes synthetic ellipsoids; no download
 .venv/bin/python scripts/imaging_check.py   # the imaging layer's orientation
 scripts/self-check.sh                     # every Blender self-check; skips without Blender
+python3 scripts/bake_check.py             # the bake's lock, and any baked body
 ```
 
 See [CONTRIBUTING](CONTRIBUTING.md) to take part.

@@ -2,7 +2,8 @@
 Per-limb fit of a reference atlas to a rigged ANNY demo body. Blender 5.2.x, headless.
 
 Inputs (after `--`):
-  --atlas <glb> --scheme bodyparts3d|hra   an atlas GLB (BodyParts3D output is CC BY-SA)
+  --atlas <glb> --scheme bodyparts3d|hra   an atlas GLB; bodyparts3d also needs
+                                           --allow-share-alike (its licence may be CC BY-SA)
   --body <glb>                             a pinned rigged ANNY body (its bind pose and bones)
   --out <glb>                              the fitted atlas (meshopt, node names and extras kept)
   --report <json>                          joints before and after, segment stretch, notes
@@ -603,6 +604,21 @@ def style_for_render(
     r.paint(body_mesh, r.material("check-body", (0.55, 0.72, 0.98, 0.22)))
 
 
+def share_alike_refusal(scheme: str | None, args: list[str]) -> str | None:
+    """Why the scheme may not run, or None.
+
+    BodyParts3D was relicensed CC BY 4.0 in 2025, but DBCLS has not confirmed
+    it and the worst case is CC BY-SA, which must not end up in a CC BY build
+    by accident. So it runs only when --allow-share-alike says it may.
+    """
+    if scheme == "bodyparts3d" and "--allow-share-alike" not in args:
+        return (
+            "BodyParts3D's licence may be CC BY-SA, so --scheme bodyparts3d needs "
+            "--allow-share-alike, and its output must not go into a CC BY release.\n"
+        )
+    return None
+
+
 def run(args: list[str]) -> None:
     atlas_path, body_path = option(args, "--atlas"), option(args, "--body")
     scheme, out, report_path = (
@@ -614,6 +630,9 @@ def run(args: list[str]) -> None:
         sys.stderr.write(
             "fit_atlas.py needs --atlas, --body, --scheme bodyparts3d|hra, --out and --report.\n"
         )
+        sys.exit(2)
+    if refusal := share_alike_refusal(scheme, args):
+        sys.stderr.write(refusal)
         sys.exit(2)
     empty_scene()
     body_objs = import_glb(body_path)
@@ -730,6 +749,12 @@ def self_check() -> int:
         failures.append("the organ did not move rigidly")
     if abs(shift[2]) > 1e-12:
         failures.append("the trunk moved vertically")
+    if not share_alike_refusal("bodyparts3d", ["--scheme", "bodyparts3d"]):
+        failures.append("bodyparts3d ran without --allow-share-alike")
+    if share_alike_refusal("bodyparts3d", ["--allow-share-alike"]) or share_alike_refusal(
+        "hra", []
+    ):
+        failures.append("a permitted scheme was refused")
     for line in failures:
         print(f"SELF-CHECK FAIL {line}")
     print("fit_atlas self-check: " + ("ok" if not failures else f"{len(failures)} failed"))
