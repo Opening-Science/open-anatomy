@@ -21,7 +21,7 @@ out there instead of being cut.
 Both views are orthographic and framed from the top of the shoulders to the
 top of the pelvis when the hip bones are in the file, else to the lowest
 vertebra: the picture is fitted to those bones as the view sees them, with
-a small margin, so none is cut by its edge. The three-quarter view turns 40
+a small margin, so none is cut by its edge. The three-quarter view turns 45
 degrees to the body's right, so the sternum is on the right as in Gray's
 plate 114, and looks down 8 degrees. Writes <name>.<view>.png. --self-check
 renders blocks for bones and checks the colours, the haze, the fade and the
@@ -66,7 +66,7 @@ EDGE = 0.7  # how far a surface turning away from the camera goes to its shade c
 HAZE = 0.4  # how far the bones farthest from the camera fade into the backdrop
 FADE = 0.08  # share of the picture's height, from the bottom, over which bones fade out
 MARGIN = 0.04  # share of the picture left free between the bones and each of its other edges
-VIEWS = {"front": (0.0, 0.0), "three-quarter": (-40.0, 8.0)}  # turn about Z, look down, degrees
+VIEWS = {"front": (0.0, 0.0), "three-quarter": (-45.0, 8.0)}  # turn about Z, look down, degrees
 RESOLUTION = (1800, 2400)
 
 
