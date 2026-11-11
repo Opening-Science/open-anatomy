@@ -35,8 +35,8 @@ and fail only if MAX_ENTERING_MM is set.
 (d) Anatomy, on the meshes: twelve pairs of ribs; each rib within RIB_JOINT_MM
 of the vertebrae it articulates with (rib_joints); cartilage at the front end
 of ribs 1 to 10 and none at ribs 11 and 12; seven separate contacts on each
-side of the sternum, cartilages 1 to 7 in order, and cartilages 8 to 10 of
-one piece with the one above (cartilages); the sternum's jugular notch,
+side of the sternum, cartilages 1 to 7 in order, and cartilages 8 to 10 each
+lapping onto the one above (cartilages, arch_laps); the sternum's jugular notch,
 sternal angle and xiphoid process (sternum_shape).
 
 It prints one line per node, per pair of nodes that enter each other, per
@@ -91,6 +91,10 @@ LOCATOR_MAX_PARTS = 24  # an edge is cut into at most this many for that
 LOCATOR_NEAREST = 8  # the triangles of this many nearest points are measured exactly
 # The manifest rounds each volume to 0.01 ml and the dropped share to 0.0001.
 DECLARED_SLACK_ML = 0.05
+# The manifest's per-node volumes, in ml, of what mesh.py added to a mask
+# before contouring it and of what it took off. A new declared change goes here.
+DECLARED_ADDED = ("end_filled_ml", "bridged_ml", "head_grown_ml")
+DECLARED_REMOVED = ("knobs_trimmed_ml", "end_lumps_trimmed_ml")
 
 # (c) Topology.
 MIN_PIECE_ML = 0.5  # a piece of a set under this is a loose blob (mesh.py's MIN_PIECE_VOXELS)
@@ -133,6 +137,14 @@ JOINED_FAILS = False  # one of those in one piece with another is reported; the 
 # A band of ribs 8 to 10 ends at least this far from the sternum: a band's
 # half width (9 mm at most in mesh.py) and the contact's reach.
 ARCH_CLEAR_MM = 10.0
+# Cartilages 8, 9 and 10 lap onto the one above: a piece of its own each,
+# lying against it. Against means within LAP_GAP_MM (the interchondral joints
+# are synovial clefts under a millimetre wide), over LAP_MM or more of length:
+# the facets are oblong, about as long as a cartilage is wide, and 10 mm is a
+# narrow lower cartilage's width. Both figures are a proposal, not a norm.
+LAP_GAP_MM = 1.0
+LAP_MM = 10.0
+FUSED_FAILS = True  # two cartilages in one piece fail: the bar wants each a piece of its own
 # The sternum. The definitions follow data/work/tmp/round7/findings.md, which
 # measured the same on masks and meshes.
 MANUBRIUM_MM = 45.0  # the top of the sternum that gives its midline: a manubrium's length
@@ -165,6 +177,7 @@ WIDTH_BIN_MM = 3.0  # the sternum's width is read every this much of height
 LIMITS = {
     "meanMm": MAX_MEAN_MM, "p95Mm": MAX_P95_MM, "declaredSlackMl": DECLARED_SLACK_ML,
     "minPieceMl": MIN_PIECE_ML, "enteringMm": MAX_ENTERING_MM, "ribJointMm": RIB_JOINT_MM,
+    "lapGapMm": LAP_GAP_MM, "lapMm": LAP_MM,
     "costochondralMm": COSTOCHONDRAL_MM, "floatClearMm": FLOAT_CLEAR_MM, "contactMm": CONTACT_MM,
     "sternalAngleDeg": STERNAL_ANGLE_DEG, "angleAtSecondMm": ANGLE_AT_SECOND_MM,
     "jugularNotchMm": JUGULAR_NOTCH_MM, "xiphoidMm": XIPHOID_MM,
@@ -1123,6 +1136,87 @@ def contact_patches(sternum: Body, cartilage: Body, piece: Ints) -> list[dict[st
     return sorted(patches, key=lambda p: -p["centre"][2])
 
 
+def arch_laps(
+    cartilage: Body,
+    piece: Ints,
+    side: str,
+    ribs: dict[int, int | None],
+    tips: dict[str, Floats],
+    bands: list[dict[str, Any]] | None,
+    seventh: Floats | None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """How cartilages 8, 9 and 10 of one side lie on the one above, and
+    what fails. ribs gives the cartilage piece at each rib's front end,
+    tips the ribs' front tips, seventh the middle of the seventh
+    cartilage's contact with the sternum.
+
+    A cartilage in a piece of its own is "lapped" when points spread over
+    it lie in the piece above, or within LAP_GAP_MM of it, along at least
+    LAP_MM (the longest extent of those points); otherwise it is "apart".
+    Its row gives the least gap, the lap's length and how far its tip ends
+    from the sternal end of the cartilage above. The tip and that end are
+    the manifest's band ends (end_ras_mm) where it has them; otherwise the
+    tip is the point of the lap furthest from the cartilage's own rib, and
+    the end above is the seventh's contact, or the tip of the one above.
+    Two cartilages in one piece are "fused": nothing can be measured
+    between them, and the row says which they are."""
+    rows, failures = [], []
+    ends = {int(b["number"]): np.array(b["end_ras_mm"], dtype=np.float64)
+            for b in bands or [] if b["side"] == side}  # fmt: skip
+    if 7 not in ends and seventh is not None:
+        ends[7] = seventh
+    parts: dict[int, tuple[Surface, Floats]] = {}
+
+    def part(k: int) -> tuple[Surface, Floats]:
+        """One piece of the cartilage: its surface, and points spread over it."""
+        if k not in parts:
+            own = Mesh(cartilage.mesh.vertices, cartilage.mesh.triangles[piece == k])
+            parts[k] = (Surface(own), sample_points(own))
+        return parts[k]
+
+    for n in (8, 9, 10):
+        if rib_label(side, n) not in tips:
+            continue
+        row: dict[str, Any] = {"side": side, "cartilage": n, "gapMm": None, "lapMm": None,
+                               "tipToEndAboveMm": None}  # fmt: skip
+        rows.append(row)
+        mine, above = ribs.get(n), ribs.get(n - 1)
+        if mine is None or above is None:
+            row["state"] = "no cartilage"
+            failures.append(f"{side}: cartilage {n if mine is None else n - 1} is missing, "
+                            f"so {n} cannot lap onto {n - 1}")  # fmt: skip
+            continue
+        if mine == above:
+            row["state"] = "fused"
+            row["with"] = [m for m in range(1, 11) if ribs.get(m) == mine]
+            if FUSED_FAILS:
+                failures.append(f"{side}: cartilage {n} is fused with cartilage {n - 1} "
+                                f"(one piece: cartilages {row['with']})")  # fmt: skip
+            continue
+        surface, _ = part(above)
+        points = part(mine)[1]
+        distance = surface.distance(points)
+        distance[surface.inside(points)] = 0.0
+        row["gapMm"] = round(float(distance.min()), 2)
+        lap = points[distance <= LAP_GAP_MM]
+        row["lapMm"] = 0.0
+        if len(lap) >= 3:
+            along = np.linalg.svd(lap - lap.mean(0), full_matrices=False)[2][0]
+            row["lapMm"] = round(float(np.ptp(lap @ along)), 1)
+            if n not in ends:
+                tip = tips[rib_label(side, n)]
+                ends[n] = lap[np.argmax(np.linalg.norm(lap - tip, axis=1))]
+        if n in ends and n - 1 in ends:
+            row["tipToEndAboveMm"] = round(float(np.linalg.norm(ends[n] - ends[n - 1])), 1)
+        row["state"] = "lapped" if row["lapMm"] >= LAP_MM else "apart"
+        if row["state"] == "apart":
+            failures.append(
+                f"{side}: cartilage {n} lies against cartilage {n - 1} over {row['lapMm']} mm "
+                f"(least gap {row['gapMm']} mm), under {LAP_MM}"
+            )
+    return rows, failures
+
+
 def cartilages(
     bodies: dict[str, Body], bands: list[dict[str, Any]] | None
 ) -> tuple[dict[str, Any], dict[str, list[str]]]:
@@ -1140,21 +1234,23 @@ def cartilages(
       made by the cartilage piece that reaches that rib; where one piece
       reaches several of ribs 1 to 7 it must make as many patches, taken in
       order. A patch made by two pieces is shared and is nobody's.
-    - "costal arch": cartilages 8, 9 and 10 are of one piece with the
-      cartilage above, and so reach the sternum only through it (an eighth
-      patch would fail the rule above).
+    - "costal arch": cartilages 8, 9 and 10 each lap onto the cartilage
+      above (arch_laps): a piece of its own, within LAP_GAP_MM of the piece
+      above over at least LAP_MM of length. Two of them in one piece are
+      reported as fused, and fail when FUSED_FAILS says so. None reaches the
+      sternum itself (an eighth patch would fail the rule above).
     With the manifest's band records (mesh.py writes one per band: rib,
     what it joins, where it ends) the declared ends are held to the same:
     bands 1 to 7 join the sternum and end in or on it, bands 8 to 10 join
-    the band above and end in cartilage, ARCH_CLEAR_MM or more from the
-    sternum.
+    the band above and end in the cartilage or on its surface (within
+    LAP_GAP_MM), ARCH_CLEAR_MM or more from the sternum.
     Cartilages of ribs 1 to 4 that are of one piece with another are listed
     under "joined" (no interchondral joint lies there), and fail "sternum
     contacts" only when JOINED_FAILS says so."""
     failures: dict[str, list[str]] = {
         "cartilage to rib": [], "floating ribs": [], "sternum contacts": [], "costal arch": [],
     }  # fmt: skip
-    report: dict[str, Any] = {"ribs": [], "patches": [], "joined": []}
+    report: dict[str, Any] = {"ribs": [], "patches": [], "joined": [], "arch": []}
     cartilage, sternum = bodies.get("costal_cartilages"), bodies.get("sternum")
     if cartilage is None:
         for rule in ("cartilage to rib", "sternum contacts", "costal arch"):
@@ -1162,12 +1258,14 @@ def cartilages(
         return report, failures
     piece = pieces_of(cartilage.mesh)
     reached: dict[str, int | None] = {}  # the cartilage piece at each rib's front end
+    tips: dict[str, Floats] = {}  # each rib's front tip
     for side in ("left", "right"):
         for number in range(1, 13):
             rib = bodies.get(rib_label(side, number))
             if rib is None:
                 continue
             _, front = rib_tips(rib)
+            tips[rib.label] = front
             end = rib.points[np.linalg.norm(rib.points - front, axis=1) <= RIB_END_MM]
             found = gap(rib, cartilage, end)
             row = {"rib": rib.label, "gapMm": round(found, 2), "piece": None}
@@ -1228,13 +1326,12 @@ def cartilages(
         placed = [n for n in order if n is not None]
         if placed != sorted(placed):
             failures["sternum contacts"].append(f"{side}: the patches run {order} from the top")
-        for n in (8, 9, 10):
-            if rib_label(side, n) not in bodies:
-                continue
-            if ribs[n] is None or ribs[n] != ribs[n - 1]:
-                failures["costal arch"].append(
-                    f"{side}: cartilage {n} is not of one piece with cartilage {n - 1}"
-                )
+        seventh = [p["centre"] for p in mine if p.get("rib") == 7]
+        rows, failed = arch_laps(
+            cartilage, piece, side, ribs, tips, bands, np.array(seventh[0]) if seventh else None
+        )
+        report["arch"] += rows
+        failures["costal arch"] += failed
     for band in bands or []:
         number, rib = int(band["number"]), str(band["rib"])
         end = np.array([band["end_ras_mm"]], dtype=np.float64)
@@ -1247,8 +1344,10 @@ def cartilages(
             failures[rule].append(f"{rib}: its band ends {off:.1f} mm from the sternum")
         if number > 7 and (off < ARCH_CLEAR_MM or sternum.surface.inside(end)[0]):
             failures[rule].append(f"{rib}: its band ends {off:.1f} mm from the sternum")
-        if number > 7 and not cartilage.surface.inside(end)[0]:
-            failures[rule].append(f"{rib}: its band's end is not in cartilage")
+        # A band's centreline ends on its own rounded tip, so on the surface.
+        away = float(cartilage.surface.distance(end)[0])
+        if number > 7 and away > LAP_GAP_MM and not cartilage.surface.inside(end)[0]:
+            failures[rule].append(f"{rib}: its band ends {away:.1f} mm out of the cartilage")
     report["bands"] = bands
     return report, failures
 
@@ -1497,14 +1596,13 @@ def declared_change(
 ) -> tuple[float, float]:
     """The volume, in ml, that the manifest says mesh.py added to a node's
     mask and took off it before contouring it (kept_ml of mask). Added: a
-    rib's end filled in (end_filled_ml), a gap bridged (bridged_ml), pieces
+    rib's end filled in, a gap bridged, a rib's head grown from the CT
+    (DECLARED_ADDED), pieces
     moved here from a neighbour (fragments with "to"). Taken off: knobs and
     end lumps trimmed, its own pieces moved away or dropped (fragments),
     and the share outside its largest piece (dropped_share)."""
-    added = float(node.get("end_filled_ml", 0.0)) + float(node.get("bridged_ml", 0.0))
-    removed = float(node.get("knobs_trimmed_ml", 0.0)) + float(
-        node.get("end_lumps_trimmed_ml", 0.0)
-    )
+    added = sum(float(node.get(key, 0.0)) for key in DECLARED_ADDED)
+    removed = sum(float(node.get(key, 0.0)) for key in DECLARED_REMOVED)
     share = float(node.get("dropped_share", 0.0))
     if 0 < share < 1:
         removed += kept_ml * share / (1 - share)
@@ -1654,18 +1752,24 @@ def check(glb: Path, manifest_path: Path, seg_dir: Path) -> dict[str, Any]:
 
     pairs = [n for n in range(1, 13)
              if all(rib_label(side, n) in bodies for side in ("left", "right"))]  # fmt: skip
-    lacking = []
+    lacking, cut, missing = [], [], []
     for n in sorted(set(range(1, 13)) - set(pairs)):
         why = {dropped[r] for r in (rib_label("left", n), rib_label("right", n)) if r in dropped}
-        lacking.append(f"pair {n} is not in the build"
-                       + (f" (manifest: {'; '.join(sorted(why))})" if why else ""))  # fmt: skip
+        if any(w.startswith("cut by") for w in why):
+            cut.append(n)
+            lacking.append(f"pair {n} is cut by the scan (manifest: {'; '.join(sorted(why))})")
+        else:
+            missing.append(n)
+            lacking.append(f"pair {n} is missing from the build"
+                           + (f" (manifest: {'; '.join(sorted(why))})" if why else ""))  # fmt: skip
     rule("rib pairs", lacking, "12 of 12 pairs")
     joints, failures = rib_joints(bodies, dropped)
     shifted = [j for j in joints if j.get("nearest") and j["nearest"] != f"T{rib_number(j['rib'])}"]
+    notes = []
     if joints and len(shifted) > len(joints) / 2:
-        failures.append(
-            f"note: {len(shifted)} of {len(joints)} ribs lie nearest another vertebra than "
-            "their own; the segmentation may number ribs and vertebrae apart"
+        notes.append(
+            f"{len(shifted)} of {len(joints)} ribs lie nearest another vertebra than their "
+            "own: the segmentation may number ribs and vertebrae one apart"
         )
     rule("rib joints", failures, f"every rib within {RIB_JOINT_MM} mm of its vertebrae")
     cartilage, failed = cartilages(bodies, entries.get(NAMES["costal_cartilages"], {}).get("bands"))
@@ -1673,7 +1777,8 @@ def check(glb: Path, manifest_path: Path, seg_dir: Path) -> dict[str, Any]:
         "cartilage to rib": f"reaches the front end of ribs 1 to 10 within {COSTOCHONDRAL_MM} mm",
         "floating ribs": f"none within {FLOAT_CLEAR_MM} mm of the front end of ribs 11 and 12",
         "sternum contacts": "seven separate patches a side, cartilages 1 to 7 in order",
-        "costal arch": "cartilages 8 to 10 of one piece with the one above",
+        "costal arch": f"cartilages 8 to 10 each lap onto the one above: a piece of their "
+        f"own, within {LAP_GAP_MM} mm of it over {LAP_MM} mm or more",
     }
     for name, what in failed.items():
         rule(name, what, passed[name])
@@ -1708,7 +1813,9 @@ def check(glb: Path, manifest_path: Path, seg_dir: Path) -> dict[str, Any]:
         "limits": LIMITS,
         "nodes": nodes,
         "entering": entering,
+        "ribPairs": {"present": pairs, "cutByScan": cut, "missing": missing},
         "ribJoints": joints,
+        "notes": notes,
         "cartilages": cartilage,
         "sternum": sternum,
         "rules": rules,
@@ -1765,6 +1872,15 @@ def print_report(report: dict[str, Any]) -> None:
         print(f"patch      {patch['side']:5s} cartilage {patch.get('rib', '?')!s:2s} "
               f"z {patch['zLow']:.1f} to {patch['zHigh']:.1f}  {patch['areaMm2']:.0f} mm2  "
               f"cartilage pieces {patch['pieces']}")  # fmt: skip
+    for lap in report["cartilages"].get("arch", []):
+        what = (f"one piece with cartilages {lap['with']}" if lap["state"] == "fused" else
+                f"gap {lap['gapMm']} mm, lap {lap['lapMm']} mm, tip {lap['tipToEndAboveMm']} mm "
+                f"from the sternal end of cartilage {lap['cartilage'] - 1}")  # fmt: skip
+        if lap["state"] == "no cartilage":
+            what = ""
+        print(
+            f"arch       {lap['side']:5s} cartilage {lap['cartilage']:2d} {lap['state']:7s} {what}"
+        )
     for joined in report["cartilages"].get("joined", []):
         print(f"joined     {joined['side']} cartilages {joined['cartilages']} are one piece")
     sternum = report["sternum"]
@@ -1783,6 +1899,8 @@ def print_report(report: dict[str, Any]) -> None:
     for r in report["rules"]:
         state = {True: "pass", False: "FAIL", None: "    "}[r["pass"]]
         print(f"rule       {r['rule']:17s} {state}  {r['detail']}")
+    for note in report["notes"]:
+        print(f"note       {note}")
     failed = [r["rule"] for r in report["rules"] if r["pass"] is False]
     print(f"atlas check passed: {report['glb']}" if not failed
           else f"atlas check failed: {', '.join(failed)}")  # fmt: skip

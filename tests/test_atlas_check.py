@@ -405,8 +405,8 @@ def test_a_mesh_with_a_lobe_the_mask_lacks_fails_from_the_mesh_to_the_mask() -> 
 
 
 def test_declared_change_adds_up_what_the_manifest_says() -> None:
-    node = {"knobs_trimmed_ml": 0.3, "end_lumps_trimmed_ml": 0.2, "end_filled_ml": 0.4,
-            "bridged_ml": 0.1, "dropped_share": 0.02}  # fmt: skip
+    node = {"knobs_trimmed_ml": 0.3, "end_lumps_trimmed_ml": 0.2, "end_filled_ml": 0.3,
+            "head_grown_ml": 0.1, "bridged_ml": 0.1, "dropped_share": 0.02}  # fmt: skip
     fragments = [
         {"label": "rib_left_4", "ml": 1.0, "action": "dropped"},
         {"label": "rib_left_4", "ml": 0.5, "action": "moved", "to": "rib_left_5"},
@@ -701,11 +701,27 @@ def vertebra(n: int) -> ac.Mesh:
 
 
 def cartilage(side: str, n: int, to: int | None = None, start: float = 3.0) -> ac.Mesh:
-    """The cartilage of one of ribs 1 to 6: from start mm inside its rib's
+    """The cartilage of one of ribs 1 to 7: from start mm inside its rib's
     end to 3 mm inside the sternum's flank, at the height of rib `to`."""
     x = SIDES[side]
     back = np.array([x * 62, 92, level(n)]) - start * np.array([x * 22, 62, 0]) / np.hypot(22, 62)
     return tube([tuple(back), (x * 12, 106, level(n if to is None else to))], 3.0)
+
+
+LAP_STARTS = {8: 4.0, 9: 12.0, 10: 20.0}  # mm along its rib's line before a band turns up
+
+
+def lapping(side: str, n: int, run: float = 24.0, under: float = 5.5) -> ac.Mesh:
+    """The cartilage of one of ribs 8 to 10 as a piece of its own: out from
+    its rib's end, up, and then run mm along under the cartilage above,
+    its middle `under` below that one's (two 3 mm tubes: 6 is touching)."""
+    x = SIDES[side]
+    along = np.array([x * -50.0, 14.0, 0.0]) / np.hypot(50, 14)  # the seventh's line
+    tip = np.array([x * 62, 92, level(n)])
+    height = level(7) - 5.5 * (n - 8) - under
+    start = tip + LAP_STARTS[n] * along
+    turn = np.array([start[0], start[1], height])
+    return tube([tuple(tip), tuple(start), tuple(turn), tuple(turn + run * along)], 3.0)
 
 
 def arch(side: str, ribs: tuple[int, ...] = (10, 9, 8, 7)) -> ac.Mesh:
@@ -732,9 +748,14 @@ def chest(cartilages: list[ac.Mesh] | None = None, **changed: ac.Mesh) -> dict[s
 
 
 def whole_cartilages(but: tuple[tuple[str, int], ...] = ()) -> list[ac.Mesh]:
-    """Cartilages 1 to 6 and the arch of 7 to 10 on both sides, but for some."""
-    pieces = [cartilage(side, n) for side in SIDES for n in range(1, 7) if (side, n) not in but]
-    return pieces + [arch(side) for side in SIDES]
+    """Cartilages 1 to 7 to the sternum and 8 to 10 lapping onto the one
+    above, each a piece of its own, on both sides, but for some."""
+    return [
+        cartilage(side, n) if n <= 7 else lapping(side, n)
+        for side in SIDES
+        for n in range(1, 11)
+        if (side, n) not in but
+    ]
 
 
 def test_a_ribs_two_ends_are_told_apart() -> None:
@@ -792,8 +813,17 @@ def test_the_chests_cartilages_pass_every_rule() -> None:
             assert patch["areaMm2"] == pytest.approx(np.pi * 3.5**2, rel=0.25)
     reach = {row["rib"]: row for row in report["ribs"]}
     assert all(reach[f"rib_left_{n}"]["gapMm"] == 0 for n in range(1, 11))
-    assert reach["rib_left_7"]["piece"] == reach["rib_left_10"]["piece"]
-    assert reach["rib_left_6"]["piece"] != reach["rib_left_7"]["piece"]
+    assert len({reach[f"rib_left_{n}"]["piece"] for n in range(1, 11)}) == 10
+    assert [(row["side"], row["cartilage"], row["state"]) for row in report["arch"]] == [
+        (side, n, "lapped") for side in SIDES for n in (8, 9, 10)
+    ]
+    eighth, ninth = report["arch"][0], report["arch"][1]
+    assert eighth["gapMm"] == 0.0  # 5.5 mm between the middles of two 3 mm tubes
+    assert eighth["lapMm"] == pytest.approx(24.0, abs=4.0)
+    assert ninth["lapMm"] == pytest.approx(18.0, abs=5.0)  # it starts 8 mm further along
+    # The eighth ends 28 mm along the seventh, whose patch is 50 mm along it.
+    assert eighth["tipToEndAboveMm"] == pytest.approx(24.0, abs=4.0)
+    assert ninth["tipToEndAboveMm"] == pytest.approx(8.0, abs=4.0)
     assert reach["rib_right_11"]["piece"] is None and reach["rib_right_11"]["gapMm"] > 5
     assert report["joined"] == []
 
@@ -842,22 +872,63 @@ def test_cartilages_that_reach_the_sternum_out_of_order_fail() -> None:
     ]
 
 
-def test_a_lower_cartilage_must_be_of_one_piece_with_the_one_above() -> None:
-    # The arch of ribs 8 to 10 hangs free of the seventh's cartilage.
-    loose = [cartilage(side, n) for side in SIDES for n in range(1, 7)]
-    loose += [arch("right"), arch("left", ribs=(7,))]
-    loose += [tube([(-62, 92, level(10) - 1), (-62, 92, level(8) + 1)], 3.0)]
-    _, failures = ac.cartilages(chest(loose), None)
-    assert failures["costal arch"] == ["left: cartilage 8 is not of one piece with cartilage 7"]
+def test_a_lower_cartilage_must_lie_against_the_one_above() -> None:
+    off = whole_cartilages(but=(("left", 8),)) + [lapping("left", 8, under=7.5)]
+    report, failures = ac.cartilages(chest(off), None)
+    row = next(r for r in report["arch"] if r["side"] == "left" and r["cartilage"] == 8)
+    assert row["state"] == "apart" and row["gapMm"] == pytest.approx(1.5, abs=0.3)
+    assert failures["costal arch"] == [
+        f"left: cartilage 8 lies against cartilage 7 over 0.0 mm (least gap {row['gapMm']} mm), "
+        "under 10.0"
+    ]
     assert failures["sternum contacts"] == []
 
 
+def test_a_lap_shorter_than_a_cartilage_is_wide_fails() -> None:
+    short = whole_cartilages(but=(("right", 10),)) + [lapping("right", 10, run=1.0)]
+    report, failures = ac.cartilages(chest(short), None)
+    row = report["arch"][-1]
+    assert row["state"] == "apart" and row["gapMm"] == 0.0 and row["lapMm"] < 10
+    assert failures["costal arch"] == [
+        f"right: cartilage 10 lies against cartilage 9 over {row['lapMm']} mm "
+        "(least gap 0.0 mm), under 10.0"
+    ]
+
+
+def test_cartilages_fused_into_one_piece_are_reported_as_fused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fused = [cartilage(side, n) for side in SIDES for n in range(1, 7)]
+    fused += [arch("left")] + [cartilage("right", 7)] + [lapping("right", n) for n in (8, 9, 10)]
+    report, failures = ac.cartilages(chest(fused), None)
+    left = [row for row in report["arch"] if row["side"] == "left"]
+    assert [row["state"] for row in left] == ["fused"] * 3
+    assert all(row["with"] == [7, 8, 9, 10] and row["lapMm"] is None for row in left)
+    assert failures["costal arch"] == [
+        f"left: cartilage {n} is fused with cartilage {n - 1} (one piece: cartilages [7, 8, 9, 10])"
+        for n in (8, 9, 10)
+    ]
+    assert failures["sternum contacts"] == []
+    monkeypatch.setattr(ac, "FUSED_FAILS", False)
+    report, failures = ac.cartilages(chest(fused), None)
+    assert failures["costal arch"] == [] and report["arch"][0]["state"] == "fused"
+
+
+def test_a_lower_cartilage_without_cartilage_cannot_lap() -> None:
+    _, failures = ac.cartilages(chest(whole_cartilages(but=(("left", 9),))), None)
+    assert failures["costal arch"] == [
+        "left: cartilage 9 is missing, so 9 cannot lap onto 8",
+        "left: cartilage 9 is missing, so 10 cannot lap onto 9",
+    ]
+
+
 def test_an_eighth_cartilage_on_the_sternum_fails() -> None:
-    own = [cartilage(side, n) for side in SIDES for n in range(1, 7)]
-    own += [arch("left"), arch("right", ribs=(7,)), arch("right", ribs=(10, 9, 8))]
+    own = whole_cartilages(but=(("right", 8),)) + [arch("right", ribs=(8,))]
     _, failures = ac.cartilages(chest(own), None)
     assert failures["sternum contacts"] == ["right: 8 contact patches, not 7"]
-    assert failures["costal arch"] == ["right: cartilage 8 is not of one piece with cartilage 7"]
+    assert failures["costal arch"][0].startswith(
+        "right: cartilage 8 lies against cartilage 7 over 0.0 mm"
+    )
 
 
 def test_upper_cartilages_in_one_piece_are_reported(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -893,7 +964,7 @@ def band(side: str, n: int, joins: str, end: tuple[float, float, float]) -> dict
 
 def test_the_manifests_band_records_are_held_to_the_rules() -> None:
     good = [band("left", 3, "sternum", (-12, 106, level(3))),
-            band("left", 8, "rib_left_7", (-62, 92, level(7) - 5))]  # fmt: skip
+            band("left", 8, "rib_left_7", (-48.5, 95.9, level(7) - 5.5))]  # fmt: skip
     report, failures = ac.cartilages(chest(), good)
     assert failures["sternum contacts"] == [] and failures["costal arch"] == []
     assert report["bands"] == good
@@ -910,7 +981,7 @@ def test_the_manifests_band_records_are_held_to_the_rules() -> None:
     assert failures["costal arch"] == [
         "rib_left_8: the manifest says it joins sternum",
         "rib_left_8: its band ends 1.0 mm from the sternum",
-        "rib_right_9: its band's end is not in cartilage",
+        "rib_right_9: its band ends 17.4 mm out of the cartilage",
     ]
 
 
@@ -1169,9 +1240,11 @@ def test_check_reports_every_node_and_every_rule(tmp_path: Path) -> None:
     assert "measured against the raw masks" in found["declared changes"]["detail"]
     assert found["entering"]["pass"] is None and report["entering"] == []
     assert found["rib pairs"]["pass"] is False
-    assert "pair 1 is not in the build;" in found["rib pairs"]["detail"]
-    assert ("pair 12 is not in the build (manifest: cut by the scan's edge (axis 2); "
+    assert "pair 1 is missing from the build;" in found["rib pairs"]["detail"]
+    assert ("pair 12 is cut by the scan (manifest: cut by the scan's edge (axis 2); "
             "its pair rib_left_12 is missing)") in found["rib pairs"]["detail"]  # fmt: skip
+    assert report["ribPairs"] == {"present": [], "cutByScan": [12], "missing": list(range(1, 12))}
+    assert report["notes"] == []
     assert found["sternum contacts"]["pass"] is False
     assert report["pass"] is False
     assert report["limits"]["meanMm"] == 1.0 and report["limits"]["p95Mm"] == 2.0
@@ -1256,3 +1329,27 @@ def test_main_with_a_case_reads_what_atlas_py_built(
     monkeypatch.setattr(sys, "argv", ["atlas_check.py", "--glb", str(atlas / "c.skeleton.glb")])
     with pytest.raises(SystemExit):
         ac.main()
+
+
+def test_ribs_numbered_one_apart_from_the_vertebrae_are_noted_in_the_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Every rib nearest the vertebra above its own: the gaps still fail as
+    they are, and a note at the end says what it looks like."""
+
+    def one_apart(bodies: dict[str, ac.Body], dropped: dict[str, str]) -> tuple[Any, list[str]]:
+        rows = [{"rib": f"rib_left_{n}", "node": "n", "gaps": {f"T{n}": 20.0}, "pass": False,
+                 "nearest": f"T{n - 1}", "nearestMm": 1.0} for n in (2, 3, 4)]  # fmt: skip
+        return rows, [f"rib_left_{n} is 20.0 mm from T{n}" for n in (2, 3, 4)]
+
+    monkeypatch.setattr(ac, "rib_joints", one_apart)
+    report = ac.check(*build(tmp_path))
+    assert report["notes"] == [
+        "3 of 3 ribs lie nearest another vertebra than their own: the segmentation may "
+        "number ribs and vertebrae one apart"
+    ]
+    assert rules(report)["rib joints"]["detail"].count("note") == 0
+    ac.print_report(report)
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[-2] == "note       " + report["notes"][0]
+    assert any("T2 20.00 mm" in line and "nearest T1 1.00 mm" in line for line in lines)
