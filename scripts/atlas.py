@@ -14,7 +14,8 @@ Stage 1 is the thorax only: ribs, costal cartilages and the costal arch,
 sternum, and the spine as far as the scan has it. The shoulder girdle
 (clavicles, scapulae, humeri) is not part of it: both Stage 1 scans end
 through the shoulders, and a structure the scan cuts is never exported.
-atlas.json says so and names the girdle bones the build left out.
+atlas.json says so and names the girdle bones the build left out; the girdle
+is Stage 2's, issue 45.
 Each step is a script on its own; this runs them in order and stops at the
 first that fails.
 """
@@ -32,7 +33,7 @@ SOURCES = json.loads((ROOT / "sources.json").read_text())
 PLATE = ROOT / "data" / "reference" / "gray112.png"
 SCOPE = (
     "Stage 1, thorax only: ribs, costal cartilages and arch, sternum, and the spine as far "
-    "as the scan has it. The shoulder girdle is not part of Stage 1."
+    "as the scan has it. The shoulder girdle is not part of Stage 1 (issue 45)."
 )
 GIRDLE = ("clavicula", "scapula", "humerus")
 HDRI = ROOT / "data" / "studio" / "studio_small_09_2k.hdr"

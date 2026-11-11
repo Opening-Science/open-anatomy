@@ -34,6 +34,7 @@ def test_an_unpinned_case_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_stage_1_says_it_is_the_thorax_without_the_girdle() -> None:
     assert "thorax only" in atlas.SCOPE
     assert "girdle is not part of Stage 1" in atlas.SCOPE
+    assert "issue 45" in atlas.SCOPE
 
 
 def test_girdle_left_out_lists_only_the_girdle_bones_the_build_dropped() -> None:
