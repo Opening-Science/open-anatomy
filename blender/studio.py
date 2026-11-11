@@ -4,7 +4,8 @@ Studio renders of a skeleton GLB, framed like a textbook plate. Blender
 
   blender --background --factory-startup --python blender/studio.py -- \
       --in <glb> --hdri <hdr> --out-dir <dir> --name <stem> [--views front,three-quarter]
-      [--samples 256] [--pitch <degrees>|upright] [--look NAME=value,...]
+      [--samples 256] [--pitch <degrees>|upright] [--only thorax|<name>,...]
+      [--look NAME=value,...]
   blender --background --factory-startup --python blender/studio.py -- --self-check
 
 Lighting is a CC0 studio HDRI, turned and tilted so that its key lamp
@@ -35,10 +36,17 @@ second thoracic vertebra's body, where Gray has it in the erect body. No
 mesh is moved or changed. Without --pitch the view is the scan's own.
 --look tries other values of the look's constants for one run.
 
+--only shows part of the skeleton and fits the picture to that part: a
+scope by name (`thorax`: ribs, costal cartilages, sternum and thoracic
+vertebrae, which is Stage 1; no lumbar vertebra, sacrum or hip bone) or
+words from the nodes' names, joined by commas (`thorax,first lumbar`). The
+pitch is still measured on the whole skeleton. Without --only every
+skeletal node is shown.
+
 Writes <name>.<view>.png and <name>.view.json (the pitch used, how it was
-asked for, and the measure behind `upright`). --self-check renders blocks
+asked for, the measure behind `upright`, and what was shown). --self-check renders blocks
 for bones and checks the colours, the haze, the fade, the framing of both
-views, and that a scene leaning back, taken at its upright pitch, gives the
+views, what a scope keeps, and that a scene leaning back, taken at its upright pitch, gives the
 picture of the same scene standing.
 """
 
@@ -100,6 +108,8 @@ SCATTER_RADIUS = (1.0, 0.8, 0.6)
 ROUGHNESS, CARTILAGE_ROUGHNESS = 0.55, 0.6
 CARTILAGE_COAT = 0.0  # a clear coat on cartilage, for a soft sheen
 LOOK = "None"  # the view transform's look
+# What --only can ask for by name: words that the names of a scope's nodes hold.
+SCOPES = {"thorax": ("rib", "costal cartilage", "sternum", "thoracic vertebra")}
 RULE = "the jugular notch level with the lower border of the second thoracic vertebra's body"
 LEAN = 15.0  # degrees the self-check's second scene leans back
 NOTCH = 0.002  # metres: the top of the sternum is what lies this close under its highest point
@@ -464,6 +474,20 @@ def look_check() -> int:
         return bool(across > 1 - 2 * MARGIN - 0.01 or upward > 1 - MARGIN - FADE - 0.01)
 
     views = {view: placed(view) for view in VIEWS}
+    thorax = chosen(bones, "thorax")
+    kept = {o["name"] for o in thorax}
+    lowest = min(in_room(o)[:, 2].min() for o in thorax)
+    scoped = {
+        "the thorax scope keeps sternum, cartilages, ribs and thoracic vertebrae": kept
+        == {b["name"] for b in bones} - {"left scapula", "left hip bone", "right hip bone"},
+        "a word more brings a bone back": len(chosen(bones, "thorax,left hip")) == len(thorax) + 1,
+        "and nothing asked for keeps all": len(chosen(bones, "")) == len(bones),
+        "without the hips the frame ends at the lowest bone shown and nothing fades": abs(
+            frame(thorax)[0][2] - lowest
+        )
+        < 1e-6
+        and fading(thorax) == 0.0,
+    }
     # The same blocks leaning back, as a thorax lies in a CT, at the pitch the
     # rule finds for them.
     bones = blocks(LEAN)
@@ -492,6 +516,7 @@ def look_check() -> int:
         "a hip bone has faded into the backdrop on the edge": apart(edge, paper) < 0.05,
         "each view holds the bones above the hips with a margin": all(map(held, views.values())),
         "and is filled by them": all(map(filled, views.values())),
+        **scoped,
         "blocks standing upright need no pitch": abs(standing["pitch"]) < 0.5,
         "blocks leaning back need the pitch they lean by": abs(leaning["pitch"] - LEAN) < 0.5,
         "and at that pitch give the picture of the blocks standing": np.abs(stood - picture).mean()
@@ -545,6 +570,14 @@ def upright(objects: list[bpy.types.Object]) -> dict[str, float] | None:
         "notch_above_t2_t3_disc_mm": round(1000 * above, 1),
         "notch_ahead_of_t2_t3_disc_mm": round(1000 * ahead, 1),
     }
+
+
+def chosen(objects: list[bpy.types.Object], only: str) -> list[bpy.types.Object]:
+    """The objects --only asks for: those whose name holds one of its
+    words, a scope's name standing for the scope's words. All of them when
+    nothing is asked for."""
+    words = [w for item in filter(None, only.split(",")) for w in SCOPES.get(item, (item,))]
+    return [o for o in objects if not words or any(w in o.get("name", "") for w in words)]
 
 
 def room() -> Matrix:
@@ -636,6 +669,12 @@ def main() -> None:
     for o in objects:
         o.hide_render = o not in skeleton
     measured = upright(skeleton)
+    only = option(args, "--only", "")
+    skeleton = chosen(skeleton, only)
+    if not skeleton:
+        sys.exit(f"studio.py: --only {only} leaves nothing to show")
+    for o in objects:
+        o.hide_render = o not in skeleton
     if asked == "upright" and measured is None:
         sys.exit("studio.py: --pitch upright needs the sternum and the second and third vertebrae")
     pitch = measured["pitch"] if asked == "upright" else float(asked)
@@ -645,7 +684,9 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
     for view in views:
         render(skeleton, view, out / f"{name}.{view}.png")
+    shown = sorted(o.get("name", o.name) for o in skeleton)
     view = {"pitch": pitch, "asked": asked, "rule": RULE, "upright": measured}
+    view |= {"only": only or None, "shown": shown}
     write_json(str(out / f"{name}.view.json"), view)
     print(f"studio: {len(views)} view(s) of {len(skeleton)} nodes on {device} -> {out}")
 
