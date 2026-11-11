@@ -4,7 +4,7 @@ Studio renders of a skeleton GLB, framed like a textbook plate. Blender
 
   blender --background --factory-startup --python blender/studio.py -- \
       --in <glb> --hdri <hdr> --out-dir <dir> --name <stem> [--views front,three-quarter]
-      [--samples 256]
+      [--samples 256] [--pitch <degrees>|upright] [--look NAME=value,...]
   blender --background --factory-startup --python blender/studio.py -- --self-check
 
 Lighting is a CC0 studio HDRI, turned and tilted so that its key lamp
@@ -24,9 +24,22 @@ top of the pelvis when the hip bones are in the file, else to the lowest
 vertebra: the picture is fitted to those bones as the view sees them, with
 a small margin, so none is cut by its edge. The three-quarter view turns 45
 degrees to the body's right, so the sternum is on the right as in Gray's
-plate 114, and looks down 8 degrees. Writes <name>.<view>.png. --self-check
-renders blocks for bones and checks the colours, the haze, the fade and the
-framing of both views.
+plate 114, and looks down 8 degrees.
+
+A CT is taken lying down and the thorax in it leans back. --pitch turns the
+camera, with its light, about the body's left-right axis through the
+skeleton's middle, for both views: by so many degrees (positive looks down on
+the thorax, which tips its top toward the viewer), or, with `upright`, by
+the angle that brings the jugular notch level with the lower border of the
+second thoracic vertebra's body, where Gray has it in the erect body. No
+mesh is moved or changed. Without --pitch the view is the scan's own.
+--look tries other values of the look's constants for one run.
+
+Writes <name>.<view>.png and <name>.view.json (the pitch used, how it was
+asked for, and the measure behind `upright`). --self-check renders blocks
+for bones and checks the colours, the haze, the fade, the framing of both
+views, and that a scene leaning back, taken at its upright pitch, gives the
+picture of the same scene standing.
 """
 
 from __future__ import annotations
@@ -39,7 +52,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import bpy  # noqa: E402
 import numpy as np  # noqa: E402
-from mathutils import Vector  # noqa: E402
+from mathutils import Matrix, Vector  # noqa: E402
 from twinblend.blender_env import (  # noqa: E402
     coords,
     empty_scene,
@@ -47,6 +60,7 @@ from twinblend.blender_env import (  # noqa: E402
     option,
     require_blender,
     script_args,
+    write_json,
 )
 
 # Colours are scene-linear. Each material has a lit colour and the colour its
@@ -79,10 +93,36 @@ FADE = 0.08  # share of the picture's height, from the bottom, over which bones 
 MARGIN = 0.04  # share of the picture left free between the bones and each of its other edges
 VIEWS = {"front": (0.0, 0.0), "three-quarter": (-45.0, 8.0)}  # turn about Z, look down, degrees
 RESOLUTION = (1800, 2400)
+# Scattering in bone and in cartilage: how much of the light goes under the
+# surface, and how far (metres, times the radius red travels farthest by).
+SCATTER, CARTILAGE_SCATTER = (0.2, 0.003), (0.35, 0.003)
+SCATTER_RADIUS = (1.0, 0.8, 0.6)
+ROUGHNESS, CARTILAGE_ROUGHNESS = 0.55, 0.6
+CARTILAGE_COAT = 0.0  # a clear coat on cartilage, for a soft sheen
+LOOK = "None"  # the view transform's look
+RULE = "the jugular notch level with the lower border of the second thoracic vertebra's body"
+LEAN = 15.0  # degrees the self-check's second scene leans back
+NOTCH = 0.002  # metres: the top of the sternum is what lies this close under its highest point
+BODY = 0.3  # share of a vertebra's depth, from its front, that is its body
 BRIGHT = 7.5  # the self-check's strong light, as a strength of its plain white world
 # How much darker than the backdrop a bone must be to stand clear of it, and
 # how far a far cartilage's colour must be from the backdrop's and a far bone's.
 CLEAR = 0.07
+
+
+def trial(settings: str) -> None:
+    """Sets constants of the look for this run only, to try a variation
+    without adopting it: NAME=value pairs joined by commas, the values of
+    a tuple joined by colons (`--look AO_DISTANCE=0.06,BONE=0.9:0.8:0.6`)."""
+    for pair in filter(None, settings.split(",")):
+        name, _, value = pair.partition("=")
+        old = globals().get(name)
+        if not name.isupper() or not isinstance(old, (float, int, str, tuple)):
+            sys.exit(f"--look: {name} is not a constant of the look")
+        if isinstance(old, tuple):
+            globals()[name] = tuple(type(old[0])(v) for v in value.split(":"))
+        else:
+            globals()[name] = type(old)(value)
 
 
 def material(
@@ -90,7 +130,8 @@ def material(
     colour: tuple[float, float, float],
     shade: tuple[float, float, float],
     roughness: float,
-    subsurface: float,
+    scatter: tuple[float, float],
+    coat: float,
     middle: Vector,
     reach: float,
     fade: float,
@@ -140,9 +181,11 @@ def material(
     links.new(tone.outputs["Result"], bsdf.inputs["Base Color"])
     bsdf.inputs["Roughness"].default_value = roughness
     bsdf.inputs["Specular IOR Level"].default_value = 0.35
-    bsdf.inputs["Subsurface Weight"].default_value = subsurface
-    bsdf.inputs["Subsurface Radius"].default_value = (1.0, 0.8, 0.6)
-    bsdf.inputs["Subsurface Scale"].default_value = 0.003
+    bsdf.inputs["Subsurface Weight"].default_value = scatter[0]
+    bsdf.inputs["Subsurface Radius"].default_value = SCATTER_RADIUS
+    bsdf.inputs["Subsurface Scale"].default_value = scatter[1]
+    bsdf.inputs["Coat Weight"].default_value = coat
+    bsdf.inputs["Coat Roughness"].default_value = 0.3
 
     # How much of the surface is left: 1 - HAZE of it at the far side, the
     # rest the far tone.
@@ -190,18 +233,27 @@ def material(
     return mat
 
 
-def world(hdri: str | None, strength: float = HDRI_STRENGTH) -> None:
+def world(hdri: str | None, strength: float | None = None) -> None:
     """The HDRI lights the bones, turned and tilted so that its key lamp
     stands to the upper left of the camera; the camera sees the plain
-    backdrop. Without an HDRI (the self-check) the light is plain white."""
+    backdrop. Without an HDRI (the self-check) the light is plain white.
+    Needs the scene's camera: the light stands in its room."""
     scene = bpy.context.scene
+    strength = HDRI_STRENGTH if strength is None else strength
     w = bpy.data.worlds.new("studio")
     w.use_nodes = True
     nodes, links = w.node_tree.nodes, w.node_tree.links
     coords = nodes.new("ShaderNodeTexCoord")
     turn = nodes.new("ShaderNodeMapping")
     turn.inputs["Rotation"].default_value = (math.radians(HDRI_TILT), 0.0, math.radians(HDRI_TURN))
-    links.new(coords.outputs["Generated"], turn.inputs["Vector"])
+    around = coords.outputs["Generated"]
+    if scene.camera.parent:
+        # The light is the room's and turns with it under a view pitch.
+        pitched = nodes.new("ShaderNodeMapping")
+        pitched.inputs["Rotation"].default_value = room().inverted().to_euler()
+        links.new(around, pitched.inputs["Vector"])
+        around = pitched.outputs["Vector"]
+    links.new(around, turn.inputs["Vector"])
     if hdri:
         env = nodes.new("ShaderNodeTexEnvironment")
         env.image = bpy.data.images.load(hdri)
@@ -221,7 +273,7 @@ def world(hdri: str | None, strength: float = HDRI_STRENGTH) -> None:
     lamps.inputs["To Max"].default_value = 1.0
     links.new(brightness.outputs["Val"], lamps.inputs["Value"])
     up = nodes.new("ShaderNodeSeparateXYZ")
-    links.new(coords.outputs["Generated"], up.inputs[0])
+    links.new(around, up.inputs[0])
     floor = nodes.new("ShaderNodeMapRange")
     floor.interpolation_type = "SMOOTHSTEP"
     floor.inputs["From Min"].default_value = -0.25
@@ -247,27 +299,51 @@ def world(hdri: str | None, strength: float = HDRI_STRENGTH) -> None:
     scene.world = w
 
 
-def stage(skeleton: list[bpy.types.Object], hdri: str | None, samples: int) -> None:
-    """Dresses the bones and sets the scene for them: materials, light and
-    backdrop, the camera, Cycles and the view transform."""
+def stage(
+    skeleton: list[bpy.types.Object], hdri: str | None, samples: int, pitch: float = 0.0
+) -> None:
+    """Dresses the bones and sets the scene for them: the camera, pitched
+    by `pitch` degrees, materials, light and backdrop, Cycles and the view
+    transform."""
+    scene = bpy.context.scene
+    camera = bpy.data.objects.new("camera", bpy.data.cameras.new("camera"))
+    scene.collection.objects.link(camera)
+    scene.camera = camera
+    camera.data.clip_end = 50
+    if pitch:
+        # The camera hangs on a rig at the skeleton's middle, turned about the
+        # body's left-right axis. No bone moves.
+        rig = bpy.data.objects.new("rig", None)
+        scene.collection.objects.link(rig)
+        points = np.concatenate([in_room(o) for o in skeleton])
+        rig.location = (points.min(axis=0) + points.max(axis=0)) / 2
+        rig.rotation_euler = (-math.radians(pitch), 0.0, 0.0)
+        camera.parent = rig
     # The haze runs across the skeleton's depth, whichever way the camera looks,
     # and is whole by HAZE_DEPTH of the way back, so the ribs' far halves are of
     # one tone up to the spine.
-    corners = [o.matrix_world @ Vector(c) for o in skeleton for c in o.bound_box]
-    low = Vector([min(c[i] for c in corners) for i in range(3)])
-    high = Vector([max(c[i] for c in corners) for i in range(3)])
-    middle = (low + high) / 2
-    reach = HAZE_DEPTH * min(high.x - low.x, high.y - low.y) / 2
+    points = np.concatenate([in_room(o) for o in skeleton])
+    low, high = points.min(axis=0), points.max(axis=0)
+    middle = room() @ Vector((low + high) / 2)
+    reach = HAZE_DEPTH * min(high[0] - low[0], high[1] - low[1]) / 2
     fade = fading(skeleton)
-    bone = material("bone", BONE, BONE_SHADE, 0.55, 0.2, middle, reach, fade, FAR)
+    bone = material("bone", BONE, BONE_SHADE, ROUGHNESS, SCATTER, 0.0, middle, reach, fade, FAR)
     cartilage = material(
-        "cartilage", CARTILAGE, CARTILAGE_SHADE, 0.6, 0.35, middle, reach, fade, CARTILAGE_FAR
+        "cartilage",
+        CARTILAGE,
+        CARTILAGE_SHADE,
+        CARTILAGE_ROUGHNESS,
+        CARTILAGE_SCATTER,
+        CARTILAGE_COAT,
+        middle,
+        reach,
+        fade,
+        CARTILAGE_FAR,
     )
     for o in skeleton:
         o.data.materials.clear()
         o.data.materials.append(cartilage if o.get("modelled") else bone)
         o.data.shade_smooth()
-    scene = bpy.context.scene
     scene.render.engine = "CYCLES"
     scene.cycles.samples = samples
     scene.cycles.use_denoising = True
@@ -281,13 +357,9 @@ def stage(skeleton: list[bpy.types.Object], hdri: str | None, samples: int) -> N
             break
         except TypeError:
             continue
-    scene.view_settings.look = "None"
+    scene.view_settings.look = LOOK
     scene.view_settings.exposure = EXPOSURE
     world(hdri)
-    camera = bpy.data.objects.new("camera", bpy.data.cameras.new("camera"))
-    scene.collection.objects.link(camera)
-    scene.camera = camera
-    camera.data.clip_end = 50
 
 
 def look_check() -> int:
@@ -303,25 +375,37 @@ def look_check() -> int:
 
     from bpy_extras.object_utils import world_to_camera_view
 
-    empty_scene()
-    scene = bpy.context.scene
-
     def block(name: str, at: tuple[float, float, float], size: float) -> bpy.types.Object:
         bpy.ops.mesh.primitive_cube_add(size=size, location=at)
         obj = bpy.context.active_object
         obj["system"], obj["name"] = "skeletal", name
         return obj
 
-    bones = [
-        block("sternum", (-0.10, -0.12, 0.40), 0.10),
-        block("left scapula", (0.10, 0.12, 0.40), 0.10),
-        block("costal cartilage", (-0.10, -0.12, 0.22), 0.08),
-        block("left hip bone", (0.10, 0.0, 0.0), 0.16),
-        block("right hip bone", (-0.10, 0.0, 0.0), 0.16),
-        block("left twelfth rib", (0.10, 0.20, 0.22), 0.04),
-        block("far costal cartilage", (0.0, 0.11, 0.31), 0.08),
-    ]
-    bones[2]["modelled"] = bones[6]["modelled"] = True
+    def blocks(lean: float = 0.0) -> list[bpy.types.Object]:
+        """A fresh scene of blocks, standing, or leaning back by `lean`
+        degrees as one. The two vertebrae hide behind the sternum, whose
+        top is level with the disc between them."""
+        empty_scene()
+        made = [
+            block("sternum", (-0.10, -0.12, 0.40), 0.10),
+            block("left scapula", (0.10, 0.12, 0.40), 0.10),
+            block("costal cartilage", (-0.10, -0.12, 0.22), 0.08),
+            block("left hip bone", (0.10, 0.0, 0.0), 0.16),
+            block("right hip bone", (-0.10, 0.0, 0.0), 0.16),
+            block("left twelfth rib", (0.10, 0.20, 0.22), 0.04),
+            block("far costal cartilage", (0.0, 0.11, 0.31), 0.08),
+            block("second thoracic vertebra", (-0.10, 0.0, 0.47), 0.03),
+            block("third thoracic vertebra", (-0.10, 0.0, 0.43), 0.03),
+        ]
+        made[2]["modelled"] = made[6]["modelled"] = True
+        for o in made:
+            o.matrix_world = Matrix.Rotation(-math.radians(lean), 4, "X") @ o.matrix_world
+        bpy.context.view_layer.update()
+        return made
+
+    bones = blocks()
+    scene = bpy.context.scene
+    standing = upright(bones)
     stage(bones, None, 16)
     scene.render.resolution_percentage = 5
 
@@ -360,7 +444,7 @@ def look_check() -> int:
         """Where the blocks' corners inside the box to frame land in the picture."""
         aim(bones, view)
         bpy.context.view_layer.update()
-        floor = frame(bones)[0].z
+        floor = frame(bones)[0][2]
         corners = [o.matrix_world @ Vector(c) for o in bones for c in o.bound_box]
         at = [world_to_camera_view(scene, scene.camera, c) for c in corners if c.z > floor]
         return np.array([(a.x, a.y) for a in at])
@@ -380,6 +464,13 @@ def look_check() -> int:
         return bool(across > 1 - 2 * MARGIN - 0.01 or upward > 1 - MARGIN - FADE - 0.01)
 
     views = {view: placed(view) for view in VIEWS}
+    # The same blocks leaning back, as a thorax lies in a CT, at the pitch the
+    # rule finds for them.
+    bones = blocks(LEAN)
+    leaning = upright(bones)
+    stage(bones, None, 16, leaning["pitch"])
+    bpy.context.scene.render.resolution_percentage = 5
+    stood = shot()
     checks = {
         "the backdrop is light": paper.min() > 0.85,
         "the backdrop is neutral": paper.max() - paper.min() < 0.03,
@@ -401,6 +492,11 @@ def look_check() -> int:
         "a hip bone has faded into the backdrop on the edge": apart(edge, paper) < 0.05,
         "each view holds the bones above the hips with a margin": all(map(held, views.values())),
         "and is filled by them": all(map(filled, views.values())),
+        "blocks standing upright need no pitch": abs(standing["pitch"]) < 0.5,
+        "blocks leaning back need the pitch they lean by": abs(leaning["pitch"] - LEAN) < 0.5,
+        "and at that pitch give the picture of the blocks standing": np.abs(stood - picture).mean()
+        < 0.01
+        and np.percentile(np.abs(stood - picture), 99) < 0.08,
     }
     for name, ok in checks.items():
         print(("ok   " if ok else "FAIL ") + name)
@@ -422,24 +518,67 @@ def gpu() -> str:
     return "CPU"
 
 
-def frame(objects: list[bpy.types.Object]) -> tuple[Vector, Vector]:
-    """The box to frame: the whole skeleton, from the top of the shoulders
-    down to the top of the hip bones (or the lowest vertebra)."""
-    points = [o.matrix_world @ Vector(c) for o in objects for c in o.bound_box]
-    lo = Vector([min(p[i] for p in points) for i in range(3)])
-    hi = Vector([max(p[i] for p in points) for i in range(3)])
+def upright(objects: list[bpy.types.Object]) -> dict[str, float] | None:
+    """The view pitch that stands a lying thorax upright, by Gray's level
+    (1918, surface anatomy of the thorax): in the erect body the jugular
+    notch is in the same horizontal plane as the lower border of the body
+    of the second thoracic vertebra. Measured in the scan, in the body's
+    sagittal plane: how many degrees the top of the sternum stands above
+    the level of the disc between the second and third thoracic vertebrae,
+    as seen from that disc. That angle is the pitch. None when the sternum
+    or one of the two vertebrae is not in the file."""
+    named = {o.get("name", ""): o for o in objects}
+    parts = [
+        named.get(n) for n in ("sternum", "second thoracic vertebra", "third thoracic vertebra")
+    ]
+    if not all(parts):
+        return None
+    sternum, *vertebrae = (coords(o) @ np.array(o.matrix_world.to_3x3()).T
+                           + np.array(o.matrix_world.translation) for o in parts)  # fmt: skip
+    notch = sternum[sternum[:, 2] > sternum[:, 2].max() - NOTCH].mean(axis=0)
+    # A vertebra's body is its front part; the disc lies midway between two bodies.
+    bodies = [v[v[:, 1] < v[:, 1].min() + BODY * np.ptp(v[:, 1])].mean(axis=0) for v in vertebrae]
+    disc = (bodies[0] + bodies[1]) / 2
+    above, ahead = notch[2] - disc[2], disc[1] - notch[1]
+    return {
+        "pitch": round(math.degrees(math.atan2(above, ahead)), 1),
+        "notch_above_t2_t3_disc_mm": round(1000 * above, 1),
+        "notch_ahead_of_t2_t3_disc_mm": round(1000 * ahead, 1),
+    }
+
+
+def room() -> Matrix:
+    """The studio as it stands around the bones: the camera, the light,
+    the haze and the box to frame are all set in it. A view pitch turns
+    it, on the camera's rig, about the body's left-right axis; without one
+    it is the scene itself."""
+    rig = bpy.context.scene.camera.parent
+    return rig.matrix_basis.copy() if rig else Matrix()
+
+
+def in_room(o: bpy.types.Object) -> np.ndarray:
+    """An object's vertices as they stand in the room."""
+    world = np.array(room().inverted() @ o.matrix_world)
+    return coords(o) @ world[:3, :3].T + world[:3, 3]
+
+
+def frame(objects: list[bpy.types.Object]) -> tuple[np.ndarray, np.ndarray]:
+    """The box to frame, in the room: the whole skeleton, from the top of
+    the shoulders down to the top of the hip bones (or the lowest
+    vertebra)."""
+    points = np.concatenate([in_room(o) for o in objects])
+    lo, hi = points.min(axis=0), points.max(axis=0)
     hips = [o for o in objects if "hip bone" in o.get("name", "")]
     if hips:
-        tops = [max((o.matrix_world @ Vector(c)).z for c in o.bound_box) for o in hips]
-        lo.z = min(tops) - 0.02
+        lo[2] = min(in_room(o)[:, 2].max() for o in hips) - 0.02
     return lo, hi
 
 
 def fading(objects: list[bpy.types.Object]) -> float:
     """The share of the picture's height over which bones fade out at its
     bottom edge: FADE when some reach below the box to frame, else none."""
-    floor = frame(objects)[0].z
-    lowest = min((o.matrix_world @ Vector(c)).z for o in objects for c in o.bound_box)
+    floor = frame(objects)[0][2]
+    lowest = min(in_room(o)[:, 2].min() for o in objects)
     return FADE if lowest < floor - 1e-4 else 0.0
 
 
@@ -453,11 +592,8 @@ def aim(objects: list[bpy.types.Object], view: str) -> None:
     camera.data.type = "ORTHO"
     camera.rotation_euler = (math.pi / 2 - tilt, 0, turn)
     right, up, back = (np.array(axis) for axis in camera.rotation_euler.to_matrix().transposed())
-    lo, hi = (np.array(corner) for corner in frame(objects))
-    points = np.concatenate([
-        coords(o) @ np.array(o.matrix_world.to_3x3()).T + np.array(o.matrix_world.translation)
-        for o in objects
-    ])  # fmt: skip
+    lo, hi = frame(objects)
+    points = np.concatenate([in_room(o) for o in objects])
     points = points[np.all((points >= lo - 1e-4) & (points <= hi + 1e-4), axis=1)]
     across, upward, toward = points @ right, points @ up, points @ back
     wide, tall = np.ptp(across), np.ptp(upward)
@@ -492,17 +628,25 @@ def main() -> None:
         sys.exit(2)
     views = option(args, "--views", "front,three-quarter").split(",")
     samples = int(option(args, "--samples", "256"))
+    asked = option(args, "--pitch", "0")
+    trial(option(args, "--look", ""))
     empty_scene()
     objects = [o for o in import_glb(source) if o.type == "MESH"]
     skeleton = [o for o in objects if o.get("system") == "skeletal"]
     for o in objects:
         o.hide_render = o not in skeleton
-    stage(skeleton, hdri, samples)
+    measured = upright(skeleton)
+    if asked == "upright" and measured is None:
+        sys.exit("studio.py: --pitch upright needs the sternum and the second and third vertebrae")
+    pitch = measured["pitch"] if asked == "upright" else float(asked)
+    stage(skeleton, hdri, samples, pitch)
     device = gpu()
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     for view in views:
         render(skeleton, view, out / f"{name}.{view}.png")
+    view = {"pitch": pitch, "asked": asked, "rule": RULE, "upright": measured}
+    write_json(str(out / f"{name}.view.json"), view)
     print(f"studio: {len(views)} view(s) of {len(skeleton)} nodes on {device} -> {out}")
 
 
