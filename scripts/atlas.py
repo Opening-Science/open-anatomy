@@ -9,6 +9,13 @@ skeleton), retopologises every bone into quads (blender/retopo.py), runs the
 close-up QA (blender/qa.py and its contact sheets), renders the studio views
 (blender/studio.py) and lays each render beside Gray's plate 112 at the same
 height, for the difference check. Everything goes to data/atlas/<case>/.
+
+Stage 1 is the thorax only: ribs, costal cartilages and the costal arch,
+sternum, and the spine as far as the scan has it. The shoulder girdle
+(clavicles, scapulae, humeri) is not part of it: both Stage 1 scans end
+through the shoulders, and a structure the scan cuts is never exported.
+atlas.json says so and names the girdle bones the build left out; the girdle
+is Stage 2's, issue 45.
 Each step is a script on its own; this runs them in order and stops at the
 first that fails.
 """
@@ -24,6 +31,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SOURCES = json.loads((ROOT / "sources.json").read_text())
 PLATE = ROOT / "data" / "reference" / "gray112.png"
+SCOPE = (
+    "Stage 1, thorax only: ribs, costal cartilages and arch, sternum, and the spine as far "
+    "as the scan has it. The shoulder girdle is not part of Stage 1 (issue 45)."
+)
+GIRDLE = ("clavicula", "scapula", "humerus")
 HDRI = ROOT / "data" / "studio" / "studio_small_09_2k.hdr"
 
 
@@ -45,6 +57,11 @@ def side_by_side(render: Path, plate: Path, out: Path, height: int = 1400) -> No
     sheet.paste(a, (0, 0))
     sheet.paste(b, (a.width + 24, 0))
     sheet.save(out)
+
+
+def girdle_left_out(manifest: dict) -> list[dict]:
+    """The manifest's entries for the girdle bones the build left out."""
+    return [d for d in manifest.get("dropped", []) if d["label"].startswith(GIRDLE)]
 
 
 def main() -> None:
@@ -87,6 +104,8 @@ def main() -> None:
     report = {
         "case": case,
         "record": record["record"],
+        "scope": SCOPE,
+        "girdleLeftOut": girdle_left_out(json.loads(manifest.read_text())),
         "manifest": str(manifest.relative_to(ROOT)),
         "skeleton": str(retopo.relative_to(ROOT)),
         "renders": [str(p.relative_to(ROOT)) for p in sorted(out.glob(f"{case}.*.png"))],
