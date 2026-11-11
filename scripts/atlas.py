@@ -16,6 +16,12 @@ sternum, and the spine as far as the scan has it. The shoulder girdle
 through the shoulders, and a structure the scan cuts is never exported.
 atlas.json says so and names the girdle bones the build left out; the girdle
 is Stage 2's, issue 45.
+
+Two things in the skeleton are modelled, not scanned, and atlas.json lists
+both: the costal cartilages, which CT barely shows, and the bone filled in at
+the front ends of ribs 2 to 10, where the segmentation leaves out the
+low-density bone behind a rib's end plate (mesh.py's even_end). The filled
+volume is given per rib, in millilitres, beside what was trimmed there.
 Each step is a script on its own; this runs them in order and stops at the
 first that fails.
 """
@@ -64,6 +70,26 @@ def girdle_left_out(manifest: dict) -> list[dict]:
     return [d for d in manifest.get("dropped", []) if d["label"].startswith(GIRDLE)]
 
 
+def modelled(manifest: dict) -> dict:
+    """What the manifest declares as modelled rather than scanned: whole nodes,
+    and the bone filled in at each rib's front end with what was trimmed there."""
+    nodes = manifest.get("nodes", [])
+    return {
+        "nodes": [n["label"] for n in nodes if n.get("modelled")],
+        "ribEnds": [
+            {
+                "label": n["label"],
+                "filledMl": n["end_filled_ml"],
+                "lumpsTrimmedMl": n.get("end_lumps_trimmed_ml", 0.0),
+                "knobsTrimmedMl": n.get("knobs_trimmed_ml", 0.0),
+                "volumeMl": n.get("volume_ml"),
+            }
+            for n in nodes
+            if n.get("end_filled_ml")
+        ],
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("case")
@@ -106,6 +132,7 @@ def main() -> None:
         "record": record["record"],
         "scope": SCOPE,
         "girdleLeftOut": girdle_left_out(json.loads(manifest.read_text())),
+        "modelled": modelled(json.loads(manifest.read_text())),
         "manifest": str(manifest.relative_to(ROOT)),
         "skeleton": str(retopo.relative_to(ROOT)),
         "renders": [str(p.relative_to(ROOT)) for p in sorted(out.glob(f"{case}.*.png"))],

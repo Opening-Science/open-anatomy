@@ -52,3 +52,34 @@ def test_girdle_left_out_lists_only_the_girdle_bones_the_build_dropped() -> None
     assert [d["label"] for d in left_out] == ["clavicula_left", "scapula_right", "humerus_left"]
     assert left_out[0]["cut_at"] == "S"
     assert atlas.girdle_left_out({}) == []
+
+
+def test_modelled_lists_the_cartilages_and_the_bone_filled_in_at_each_rib_end() -> None:
+    manifest = {
+        "nodes": [
+            {"label": "sternum", "modelled": False, "volume_ml": 90.0},
+            {"label": "set of costal cartilages", "modelled": True, "volume_ml": 126.8},
+            {
+                "label": "left fifth rib",
+                "modelled": False,
+                "volume_ml": 18.9,
+                "knobs_trimmed_ml": 0.07,
+                "end_lumps_trimmed_ml": 0.05,
+                "end_filled_ml": 0.51,
+            },
+            {"label": "left first rib", "modelled": False, "volume_ml": 9.0, "end_filled_ml": 0.0},
+            {"label": "left twelfth rib", "modelled": False, "volume_ml": 4.0},
+        ]
+    }
+    declared = atlas.modelled(manifest)
+    assert declared["nodes"] == ["set of costal cartilages"]
+    assert declared["ribEnds"] == [
+        {
+            "label": "left fifth rib",
+            "filledMl": 0.51,
+            "lumpsTrimmedMl": 0.05,
+            "knobsTrimmedMl": 0.07,
+            "volumeMl": 18.9,
+        }
+    ]
+    assert atlas.modelled({}) == {"nodes": [], "ribEnds": []}
