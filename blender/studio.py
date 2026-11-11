@@ -14,9 +14,10 @@ HDRI. Bone is a warm ivory with slight subsurface scattering, going to a
 warm brown in its crevices (ambient occlusion) and on edges that turn away;
 nodes marked modelled (the costal cartilages) are pale blue-white. The view
 transform is neutral, so the picture shows those colours. As on a drawn
-plate, the far half of the skeleton pales with distance, to a tone that
-still stands clear of the backdrop, and hip bones, which leave the picture
-at its bottom edge, fade out there instead of being cut.
+plate, the far half of the skeleton pales with distance, bone to a warm
+grey and cartilage to a grey-blue that still stand clear of the backdrop
+and of each other, and hip bones, which leave the picture at its bottom
+edge, fade out there instead of being cut.
 
 Both views are orthographic and framed from the top of the shoulders to the
 top of the pelvis when the hip bones are in the file, else to the lowest
@@ -51,7 +52,9 @@ from twinblend.blender_env import (  # noqa: E402
 # Colours are scene-linear. Each material has a lit colour and the colour its
 # crevices and turning edges go to, so shade on bone stays warm, not grey.
 BONE, BONE_SHADE = (0.87, 0.80, 0.66), (0.38, 0.29, 0.20)
-CARTILAGE, CARTILAGE_SHADE = (0.80, 0.88, 0.97), (0.45, 0.58, 0.76)
+# Cartilage holds its red back: the warm light and the scattering add some,
+# and with more of it the blue-white reads as grey-lilac.
+CARTILAGE, CARTILAGE_SHADE = (0.76, 0.88, 0.98), (0.42, 0.58, 0.76)
 BACKDROP = (0.93, 0.93, 0.92)
 HDRI_TURN = 310.0  # degrees about Z: the key lamp to the picture's left of the camera
 HDRI_TILT = 25.0  # degrees about X, after the turn: lifts the lamps in front of the bones
@@ -68,13 +71,18 @@ HAZE = 0.5  # how far the bones farthest from the camera pale to the far tone
 # toward the backdrop itself, lit ivory, which is nearly as light, dissolves
 # into it and the far ribs seem to end in mid-air.
 FAR = (0.66, 0.62, 0.55)
+# Cartilage has a far tone of its own, a grey-blue: blue-white mixed toward the
+# warm grey loses its hue and comes out a light grey next to the backdrop's.
+CARTILAGE_FAR = (0.55, 0.64, 0.77)
 HAZE_DEPTH = 0.6  # share of the far half's depth over which the haze comes on
 FADE = 0.08  # share of the picture's height, from the bottom, over which bones fade out
 MARGIN = 0.04  # share of the picture left free between the bones and each of its other edges
 VIEWS = {"front": (0.0, 0.0), "three-quarter": (-45.0, 8.0)}  # turn about Z, look down, degrees
 RESOLUTION = (1800, 2400)
 BRIGHT = 7.5  # the self-check's strong light, as a strength of its plain white world
-CLEAR = 0.07  # how much darker than the backdrop a bone must be to stand clear of it
+# How much darker than the backdrop a bone must be to stand clear of it, and
+# how far a far cartilage's colour must be from the backdrop's and a far bone's.
+CLEAR = 0.07
 
 
 def material(
@@ -86,17 +94,19 @@ def material(
     middle: Vector,
     reach: float,
     fade: float,
+    far: tuple[float, float, float],
 ) -> bpy.types.Material:
     """A Principled surface whose colour runs from `shade` in crevices
     (ambient occlusion) and on edges turning away from the camera to
     `colour` in the open, with subsurface scattering. Two things soften
     it, as on a drawn plate. Distance: from `middle` back, as the camera
-    looks, it pales and loses contrast, going by HAZE to the FAR tone at
+    looks, it pales and loses contrast, going by HAZE to the tone `far` at
     `reach` metres and beyond; the near half stays whole, and the far half
-    stays opaque and apart from the backdrop. And, with `fade`, the
-    picture's bottom edge (over that share of its height), where it
-    dissolves into the backdrop, so a bone that leaves the picture there
-    fades out instead of being cut."""
+    stays opaque and apart from the backdrop. `far` is of the material's
+    own hue, so far cartilage is still told from far bone. And, with
+    `fade`, the picture's bottom edge (over that share of its height),
+    where it dissolves into the backdrop, so a bone that leaves the
+    picture there fades out instead of being cut."""
     mat = bpy.data.materials.new(name)
     mat.use_nodes = True
     nodes, links = mat.node_tree.nodes, mat.node_tree.links
@@ -153,7 +163,7 @@ def material(
     left.inputs["To Max"].default_value = 1.0 - HAZE
     links.new(depth.outputs["Z"], left.inputs["Value"])
     distance = nodes.new("ShaderNodeEmission")
-    distance.inputs["Color"].default_value = (*FAR, 1.0)
+    distance.inputs["Color"].default_value = (*far, 1.0)
     hazed = nodes.new("ShaderNodeMixShader")
     links.new(left.outputs["Result"], hazed.inputs["Fac"])
     links.new(distance.outputs["Emission"], hazed.inputs[1])
@@ -249,8 +259,10 @@ def stage(skeleton: list[bpy.types.Object], hdri: str | None, samples: int) -> N
     middle = (low + high) / 2
     reach = HAZE_DEPTH * min(high.x - low.x, high.y - low.y) / 2
     fade = fading(skeleton)
-    bone = material("bone", BONE, BONE_SHADE, 0.55, 0.2, middle, reach, fade)
-    cartilage = material("cartilage", CARTILAGE, CARTILAGE_SHADE, 0.6, 0.35, middle, reach, fade)
+    bone = material("bone", BONE, BONE_SHADE, 0.55, 0.2, middle, reach, fade, FAR)
+    cartilage = material(
+        "cartilage", CARTILAGE, CARTILAGE_SHADE, 0.6, 0.35, middle, reach, fade, CARTILAGE_FAR
+    )
     for o in skeleton:
         o.data.materials.clear()
         o.data.materials.append(cartilage if o.get("modelled") else bone)
@@ -281,10 +293,12 @@ def stage(skeleton: list[bpy.types.Object], hdri: str | None, samples: int) -> N
 def look_check() -> int:
     """Blocks for bones, rendered small from the front under a plain white
     light: the backdrop is light and neutral, bone is warm, cartilage is
-    blue-white, a far bone is paler than a near one, and a hip bone shows
-    above the picture's bottom edge and has faded into the backdrop on it.
-    Then once more under a light strong enough to make bone as light as
-    the backdrop: the farthest bone still stands clear of it."""
+    blue-white, a far bone is paler than a near one, a far cartilage is
+    paler than a near one, still blue and apart from a far bone, and a hip
+    bone shows above the picture's bottom edge and has faded into the
+    backdrop on it. Then once more under a light strong enough to make
+    bone as light as the backdrop: the farthest bone still stands clear of
+    it, and the far cartilage of it and of a far bone."""
     import tempfile
 
     from bpy_extras.object_utils import world_to_camera_view
@@ -305,8 +319,9 @@ def look_check() -> int:
         block("left hip bone", (0.10, 0.0, 0.0), 0.16),
         block("right hip bone", (-0.10, 0.0, 0.0), 0.16),
         block("left twelfth rib", (0.10, 0.20, 0.22), 0.04),
+        block("far costal cartilage", (0.0, 0.11, 0.31), 0.08),
     ]
-    bones[2]["modelled"] = True
+    bones[2]["modelled"] = bones[6]["modelled"] = True
     stage(bones, None, 16)
     scene.render.resolution_percentage = 5
 
@@ -330,7 +345,7 @@ def look_check() -> int:
 
     paper = picture[height - 1, 0]
     near, far = seen(-0.10, -0.17, 0.40), seen(0.10, 0.07, 0.40)  # the blocks' front faces
-    cartilage = seen(-0.10, -0.16, 0.22)
+    cartilage, far_cartilage = seen(-0.10, -0.16, 0.22), seen(0.0, 0.07, 0.31)
     hip = seen(0.10, -0.08, 0.07)
     edge = picture[
         0,
@@ -339,6 +354,7 @@ def look_check() -> int:
     world(None, BRIGHT)
     bright = shot()
     lit, farthest = seen(-0.10, -0.17, 0.40, bright), seen(0.10, 0.18, 0.22, bright)
+    lit_cartilage, lit_far = seen(0.0, 0.07, 0.31, bright), seen(0.10, 0.07, 0.40, bright)
 
     def placed(view: str) -> np.ndarray:
         """Where the blocks' corners inside the box to frame land in the picture."""
@@ -371,10 +387,16 @@ def look_check() -> int:
         "cartilage is blue-white": cartilage[2] > cartilage[1] > cartilage[0]
         and cartilage.min() > 0.4,
         "a far bone is paler than a near one": apart(far, paper) < apart(near, paper) - 0.02,
+        "a far cartilage is paler than a near one": apart(far_cartilage, paper)
+        < apart(cartilage, paper) - 0.02,
+        "and still blue": far_cartilage[2] > far_cartilage[1] > far_cartilage[0] + 0.03,
+        "and stands clear of a far bone": apart(far_cartilage, far) > CLEAR,
         "the light of the second picture makes bone as light as the backdrop": lit.max()
         > paper.max() - 0.03,
         "and the farthest bone still stands clear of the backdrop": paper.mean() - farthest.mean()
         > CLEAR,
+        "as the far cartilage does, and of a far bone": apart(lit_cartilage, paper) > CLEAR
+        and apart(lit_cartilage, lit_far) > CLEAR,
         "a hip bone shows above the picture's bottom edge": apart(hip, paper) > 0.1,
         "a hip bone has faded into the backdrop on the edge": apart(edge, paper) < 0.05,
         "each view holds the bones above the hips with a margin": all(map(held, views.values())),
