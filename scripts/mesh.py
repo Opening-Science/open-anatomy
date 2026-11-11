@@ -15,7 +15,10 @@ box is centred on the origin. The share of a single structure's voxels outside
 its largest piece goes into the manifest as dropped_share; above
 MAX_DROPPED_SHARE the run stops (a structure in two pieces is a
 segmentation problem, not noise), unless the pieces are one bone split over
-thin bone, in line and within BRIDGE_GAP_MM: that gap is bridged and noted.
+thin bone, in line and within BRIDGE_GAP_MM: that gap is bridged and noted. The
+front ends of ribs 2 to 10 are evened out where the segmentation misses thin
+bone or adds dense lumps (even_end), and the volumes filled and taken off are
+noted with the node.
 
 --set organs (the default) needs every organ; --set reference adds the trunk
 skeleton and lists, rather than meshes, a bone the scan misses or cuts (the
@@ -106,6 +109,13 @@ CARTILAGE_SAMPLE_MM = 0.5  # centreline samples this far apart decide which voxe
 CARTILAGE_SQUARE = 3.0  # the band's section: 2 is an ellipse, 3 a flatter face with rounded edges
 UP = np.array([0.0, 0.0, 1.0])  # RAS superior
 KNOB_MAX_ML = 1.0  # a lump the opening separates from a rib is taken off below this volume
+EVENED_RIBS = range(2, 11)  # rib 1 is short and broad at its end; 11 and 12 taper to a point
+END_ZONE_MM = 30.0  # of a rib's front end are evened out: thin bone missed, dense lumps added
+END_REF_MM = 15.0  # of rib behind that zone gives the section the zone is held to
+END_FIT_MM = 60.0  # of centreline behind the zone, and the zone's, give its line (a parabola)
+END_MARGIN_MM = 1.5  # bone standing further than this outside the section is a lump
+END_FACE_MM = 10.0  # a fibre of the rib ending within this of the tip is part of its end face
+END_TIP_SHARE = 0.1  # of the section must be filled where the rib is taken to end
 RIB_BIN_MM = 3.0
 END_SKIP_BINS = 3  # bins of a rib's centreline at its front end that curl into a corner
 END_FIT_BINS = 7  # bins behind those (21 mm) that give the end's direction
@@ -1190,6 +1200,119 @@ def trim_knobs(mask: np.ndarray, voxel_ml: float) -> tuple[np.ndarray, float]:
     return trimmed, float((mask.sum() - trimmed.sum()) * voxel_ml)
 
 
+def even_end(
+    mask: np.ndarray, spacing: np.ndarray, front: np.ndarray
+) -> tuple[np.ndarray, float, float]:
+    """Evens out a rib's front end, where the segmentation of an old rib goes
+    wrong in two ways: it misses the thin, fatty bone just behind the dense
+    plate the rib ends in (a neck, then a knob), and it takes dense lumps at
+    the join with the cartilage for rib. The rib's section is taken from the
+    END_REF_MM behind the last END_ZONE_MM (what at least half of those
+    sections hold) and carried along the centreline, drawn again as a
+    parabola through the zone and the END_FIT_MM behind it. In the zone, bone
+    standing more than END_MARGIN_MM outside that section goes, and every
+    fibre of the section is filled up to the rib's end face: a plane through
+    where the fibres that reach the tip end, so a slanting end stays
+    slanting. Nothing within the margin is taken away, so a rib is shortened
+    only by a lump that stands outside it, and nothing is filled beyond the
+    rib's own end. `front` is the unit direction of the body's front in the
+    mask's millimetres. Returns the mask and the volumes filled and taken off
+    in ml; a rib too short to tell its section is left alone."""
+    from scipy.spatial import KDTree
+
+    untouched = (mask, 0.0, 0.0)
+    labels, count = ndimage.label(mask, structure=np.ones((3, 3, 3)))
+    if count == 0:
+        return untouched
+    bone = labels == int(np.argmax(np.bincount(labels.ravel())[1:])) + 1
+    voxels = np.argwhere(bone)
+    step = float(spacing.min()) / UPSAMPLE
+    axis = rib_axis(voxels * spacing, spacing, step)
+    if axis is None:
+        return untouched
+    curve, normals, _ = axis
+    if (curve[0] - curve[-1]) @ front > 0:
+        curve, normals = curve[::-1], normals[::-1]
+    zone, ref, fit = (round(mm / step) for mm in (END_ZONE_MM, END_REF_MM, END_FIT_MM))
+    start = int(KDTree(curve).query(voxels * spacing)[1].max()) - zone  # where the zone begins
+    if start - fit < RIB_LEAD_MM / step:
+        return untouched
+    # The centreline through the zone: a parabola through the rib behind it and
+    # the zone itself, too stiff for a lump at the end to pull aside, with a
+    # frame carried along. The walked centreline's last bins curl into a corner
+    # of the end (see rib_end_of), and its smoothing spreads that as far again.
+    at = np.arange(-ref, zone + ref) * step
+    curl = round(2 * END_SKIP_BINS * RIB_BIN_MM / step)
+    fitted = np.polyfit(
+        np.arange(-fit, zone + 1 - curl) * step, curve[start - fit : start + zone + 1 - curl], 2
+    )
+    line = np.stack([np.polyval(fitted[:, d], at) for d in range(3)], 1)
+    tangents = np.stack([np.polyval(np.polyder(fitted[:, d]), at) for d in range(3)], 1)
+    tangents /= np.linalg.norm(tangents, axis=1, keepdims=True)
+    across = normals[start]
+    frame = np.empty((len(at), 2, 3))
+    for i, tangent in enumerate(tangents):
+        across = across - (across @ tangent) * tangent
+        across /= np.linalg.norm(across)
+        frame[i] = across, np.cross(tangent, across)
+    tree = KDTree(line)
+    near = tree.query(voxels * spacing)
+    reach = float(near[0][near[1] < ref].max()) + 2 * END_MARGIN_MM
+    half = int(np.ceil(reach / step))
+    offsets = np.arange(-half, half + 1) * step
+    points = (
+        line[:, None, None, :]
+        + offsets[None, :, None, None] * frame[:, None, None, 0, :]
+        + offsets[None, None, :, None] * frame[:, None, None, 1, :]
+    ).reshape(-1, 3)
+    filled = ndimage.map_coordinates(bone.astype(np.float32), (points / spacing).T, order=1)
+    straight = filled.reshape(len(at), len(offsets), len(offsets)) >= 0.5
+    section = straight[:ref].mean(0) >= 0.5
+    if not section.any():
+        return untouched
+    allowed = ndimage.binary_dilation(section, iterations=max(round(END_MARGIN_MM / step), 1))
+    end_zone = straight[ref:]
+    held = (end_zone & section).sum((1, 2)) >= END_TIP_SHARE * section.sum()
+    if not held.any():
+        return untouched
+    tip = int(np.flatnonzero(held).max())
+    stations = np.arange(len(end_zone))
+    last = np.where(end_zone[: tip + 1], stations[: tip + 1, None, None], -1).max(0)
+    reaching = section & (last >= tip - END_FACE_MM / step)
+    face = np.full(section.shape, float(np.median(last[reaching])))
+    if reaching.sum() >= 0.5 * section.sum():
+        u, v = np.nonzero(reaching)
+        plane = np.linalg.lstsq(np.stack([u, v, np.ones(len(u))], 1), last[reaching], rcond=None)
+        grid = np.indices(section.shape)
+        face = np.clip(plane[0][0] * grid[0] + plane[0][1] * grid[1] + plane[0][2], 0, tip)
+    fill = section & (stations[:, None, None] <= face) & ~end_zone
+    lump = end_zone & ~allowed
+    # Back to the mask's voxels: each takes what its place in the zone says.
+    lo = np.maximum(np.floor((line.min(0) - reach) / spacing).astype(int), 0)
+    hi = np.minimum(np.ceil((line.max(0) + reach) / spacing).astype(int) + 1, mask.shape)
+    cells = np.indices(hi - lo).reshape(3, -1).T + lo
+    station = tree.query(cells * spacing)[1]
+    cells, station = cells[station >= ref], station[station >= ref]
+    offset = cells * spacing - line[station]
+    u = np.rint((offset * frame[station, 0]).sum(1) / step).astype(int) + half
+    v = np.rint((offset * frame[station, 1]).sum(1) / step).astype(int) + half
+    inside = (u >= 0) & (u < len(offsets)) & (v >= 0) & (v < len(offsets))
+    row = (station - ref).clip(max=len(end_zone) - 1)
+    add = np.zeros(len(cells), bool)
+    add[inside] = fill[row[inside], u[inside], v[inside]]
+    drop = ~inside  # further out than the section reaches at all
+    drop[inside] = lump[row[inside], u[inside], v[inside]]
+    evened = mask.copy()
+    evened[tuple(cells[add].T)] = True
+    evened[tuple(cells[drop].T)] &= ~bone[tuple(cells[drop].T)]
+    voxel_ml = float(np.prod(spacing)) / 1000
+    return (
+        evened,
+        float((evened & ~mask).sum() * voxel_ml),
+        float((mask & ~evened).sum() * voxel_ml),
+    )
+
+
 def reference_rules(reasons: dict[str, str | None]) -> dict[str, str | None]:
     """The drop rules of a reference body, applied to each label's cut_reason.
 
@@ -1811,6 +1934,7 @@ def main() -> None:
                     dropped[-1]["landmark"] = f"not used: cut at {''.join(sorted(faces))}"
             continue
         knobless, trimmed_ml, bridged_mm = settled.get(s.label), 0.0, None
+        filled_ml, lumps_ml = 0.0, 0.0
         if bone and path.exists():
             image = nib.load(path)
             spacing = np.linalg.norm(image.affine[:3, :3], axis=0)
@@ -1820,8 +1944,21 @@ def main() -> None:
                 # One long bone split over thin bone is bridged before anything
                 # else, or the knob trim would eat the far piece.
                 knobless, bridged_mm = bridge_gap(knobless, spacing)
-            if s.label.startswith("rib_"):
-                knobless, trimmed_ml = trim_knobs(knobless, float(np.prod(spacing)) / 1000)
+            voxel_ml = float(np.prod(spacing)) / 1000
+            if s.label.startswith("rib_") and rib_number(s.label) in EVENED_RIBS:
+                # Its end is evened out, and a knob goes only if it is one both
+                # before and after that. The trim alone would cut the rib at a
+                # neck the evening fills, and after the evening alone it takes
+                # other thin parts of the shaft.
+                front = image.affine[1, :3] / spacing  # RAS +A in the mask's millimetres
+                evened, filled_ml, lumps_ml = even_end(
+                    knobless, spacing, front / np.linalg.norm(front)
+                )
+                kept = trim_knobs(evened, voxel_ml)[0] | trim_knobs(knobless, voxel_ml)[0]
+                trimmed_ml = float((evened & ~kept).sum() * voxel_ml)
+                knobless = evened & kept
+            elif s.label.startswith("rib_"):
+                knobless, trimmed_ml = trim_knobs(knobless, voxel_ml)
         try:
             ras, triangles, voxel_ml, share = surface(
                 path, cap, pieces=s.label in SETS_OF_PIECES,
@@ -1842,7 +1979,8 @@ def main() -> None:
         parts.append({
             "structure": s, "vertices": ras @ RAS_TO_GLTF.T, "triangles": triangles,
             "voxel_ml": voxel_ml, "trimmed_ml": round(trimmed_ml, 2), "dropped_share": share,
-            "bridged_mm": bridged_mm,
+            "bridged_mm": bridged_mm, "filled_ml": round(filled_ml, 2),
+            "lumps_ml": round(lumps_ml, 2),
         })  # fmt: skip
         if bridged_mm:
             parts[-1]["bridged_ml"] = bridged_volume(path, settled.get(s.label))
@@ -1912,6 +2050,8 @@ def main() -> None:
                 **({"contoured_mask": p["contoured"]} if p.get("contoured") else {}),
                 "volume_drift": round(p["drift"], 4) if p["drift"] is not None else None,
                 **({"knobs_trimmed_ml": p["trimmed_ml"]} if p.get("trimmed_ml") else {}),
+                **({"end_lumps_trimmed_ml": p["lumps_ml"]} if p.get("lumps_ml") else {}),
+                **({"end_filled_ml": p["filled_ml"]} if p.get("filled_ml") else {}),
                 **({"dropped_share": round(p["dropped_share"], 4)} if "dropped_share" in p else {}),
                 **({"bridged_gap_mm": p["bridged_mm"]} if p.get("bridged_mm") else {}),
             }
