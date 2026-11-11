@@ -31,6 +31,10 @@ dataset's creator, DOI and case, so a GLB copied on its own keeps its
 attribution. It stops if any surface is open, non-manifold or inside out, or if its volume
 is more than 5% off the mask's voxel volume. VTK runs on
 one thread so the same masks give the same bytes.
+
+With --contoured it also writes each mask as it was contoured, after every
+declared change, to <case>.<set>.contoured/ beside the manifest, which names
+it per node (contoured_mask); atlas_check.py measures the mesh against it.
 """
 
 from __future__ import annotations
@@ -1563,6 +1567,35 @@ def signed_volume(vertices: np.ndarray, triangles: np.ndarray) -> float:
     return float(np.einsum("ij,ij->i", a, np.cross(b, c)).sum() / 6)
 
 
+def save_contoured(folder: Path, path: Path, mask: np.ndarray | None, pieces: bool) -> str:
+    """Writes the mask surface() contoured for the structure at path into
+    folder, under the same file name, and returns folder/name: the mask
+    given (after every piece moved, bridged, trimmed or evened), or the one
+    at path, cut down as surface() cuts it to its largest piece, or for a
+    set to its pieces of MIN_PIECE_VOXELS and more. atlas_check.py measures
+    the mesh against it, and it against the scan's own mask."""
+    image = nib.load(path)
+    data = mask if mask is not None else np.asanyarray(image.dataobj) > 0
+    labels, _ = ndimage.label(data, structure=np.ones((3, 3, 3)))
+    sizes = np.bincount(labels.ravel())[1:]
+    keep = np.flatnonzero(sizes >= MIN_PIECE_VOXELS) + 1 if pieces else [int(sizes.argmax()) + 1]
+    folder.mkdir(parents=True, exist_ok=True)
+    nib.save(
+        nib.Nifti1Image(np.isin(labels, keep).astype(np.uint8), image.affine), folder / path.name
+    )
+    return f"{folder.name}/{path.name}"
+
+
+def bridged_volume(path: Path, before: np.ndarray | None) -> float:
+    """The volume in ml that bridge_gap adds to a bone's mask: before, the
+    mask as settle_fragments left it, or the one at path."""
+    image = nib.load(path)
+    mask = before if before is not None else np.asanyarray(image.dataobj) > 0
+    spacing = np.linalg.norm(image.affine[:3, :3], axis=0)
+    added = bridge_gap(mask, spacing)[0] & ~mask
+    return round(float(added.sum() * np.prod(spacing)) / 1000, 2)
+
+
 def credit(case: str) -> dict:
     """The attribution a GLB built from case carries: creator, DOI, licence, case."""
     if case not in SOURCES["cases"]:
@@ -1685,6 +1718,10 @@ def main() -> None:
         "--synthetic", action="store_true", help="test masks with no source to credit"
     )
     parser.add_argument("--ct", type=Path, help="default: data/cases/<case>/ct.nii.gz")
+    parser.add_argument(
+        "--contoured", action="store_true",
+        help="also write each mask as it was contoured, for atlas_check.py",
+    )  # fmt: skip
     args = parser.parse_args()
     attribution = (
         {"copyright": "Synthetic test data", "extras": {"case": args.case}}
@@ -1807,6 +1844,14 @@ def main() -> None:
             "voxel_ml": voxel_ml, "trimmed_ml": round(trimmed_ml, 2), "dropped_share": share,
             "bridged_mm": bridged_mm,
         })  # fmt: skip
+        if bridged_mm:
+            parts[-1]["bridged_ml"] = bridged_volume(path, settled.get(s.label))
+        if args.contoured:
+            # The mask as it was contoured, after every declared change.
+            parts[-1]["contoured"] = save_contoured(
+                work / f"{args.case}.{args.set}.contoured", path, knobless,
+                s.label in SETS_OF_PIECES,
+            )  # fmt: skip
 
     everything = np.vstack([p["vertices"] for p in parts])
     centre = (everything.min(0) + everything.max(0)) / 2
@@ -1863,6 +1908,8 @@ def main() -> None:
                 "voxel_volume_ml": round(p["voxel_ml"], 1) if p["voxel_ml"] else None,
                 "modelled": bool(p.get("modelled")),
                 "pieces": "several" if p["structure"].label in SETS_OF_PIECES else "one",
+                **({"bridged_ml": p["bridged_ml"]} if p.get("bridged_ml") else {}),
+                **({"contoured_mask": p["contoured"]} if p.get("contoured") else {}),
                 "volume_drift": round(p["drift"], 4) if p["drift"] is not None else None,
                 **({"knobs_trimmed_ml": p["trimmed_ml"]} if p.get("trimmed_ml") else {}),
                 **({"dropped_share": round(p["dropped_share"], 4)} if "dropped_share" in p else {}),

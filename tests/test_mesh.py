@@ -1625,3 +1625,76 @@ def test_modelled_cartilage_without_usable_ribs_is_empty(tmp_path: Path) -> None
         ("rib_right_7", "its front end could not be measured"),
         ("rib_left_7", "its pair has no cartilage"),
     ]
+
+
+# The masks as they were contoured, for atlas_check.py
+
+
+def test_save_contoured_writes_what_surface_contours(tmp_path: Path) -> None:
+    mask = ellipsoid((40, 40, 40), np.array([10.0, 9.0, 14.0]))
+    whole = int(mask.sum())
+    mask[2:5, 2:5, 2:5] = True  # a stray blob, which surface() drops
+    path = save(tmp_path / "liver.nii.gz", mask)
+    name = mesh.save_contoured(tmp_path / "c.organs.contoured", path, None, pieces=False)
+    assert name == "c.organs.contoured/liver.nii.gz"
+    written = nib.load(tmp_path / name)
+    np.testing.assert_allclose(written.affine, FLIPPED, atol=1e-6)
+    kept = np.asanyarray(written.dataobj) > 0
+    assert int(kept.sum()) == whole and not kept[3, 3, 3]
+    _, _, voxel_ml, _ = mesh.surface(path, 5000)
+    assert kept.sum() * SPACING.prod() / 1000 == pytest.approx(voxel_ml)
+    # A mask handed over (trimmed, bridged) stands in for the one on disk.
+    trimmed = mask.copy()
+    trimmed[:, :, 22:] = False
+    mesh.save_contoured(tmp_path / "c.organs.contoured", path, trimmed, pieces=False)
+    kept = np.asanyarray(nib.load(tmp_path / name).dataobj) > 0
+    assert not kept[:, :, 22:].any() and kept[20, 20, 20]
+
+
+def test_save_contoured_keeps_the_pieces_of_a_set(tmp_path: Path) -> None:
+    mask = box((40, 40, 40), (2, 2, 2), (12, 12, 12)) | box(
+        (40, 40, 40), (20, 20, 20), (30, 30, 30)
+    )
+    mask[36:38, 36:38, 36:38] = True  # under MIN_PIECE_VOXELS: a loose blob
+    path = save(tmp_path / "costal_cartilages.nii.gz", mask)
+    name = mesh.save_contoured(tmp_path / "masks", path, None, pieces=True)
+    kept = np.asanyarray(nib.load(tmp_path / name).dataobj) > 0
+    assert int(kept.sum()) == 2000 and not kept[36, 36, 36]
+
+
+def test_bridged_volume_is_what_the_bridge_adds(tmp_path: Path) -> None:
+    mask = two_piece_rib(gap_voxels=5)
+    path = save(tmp_path / "rib_left_4.nii.gz", mask)
+    bridged, _ = mesh.bridge_gap(mask, SPACING)
+    added = float((bridged & ~mask).sum() * SPACING.prod()) / 1000
+    assert added > 0
+    assert mesh.bridged_volume(path, None) == pytest.approx(added, abs=0.005)
+    assert mesh.bridged_volume(path, mask) == pytest.approx(added, abs=0.005)
+    whole = save(tmp_path / "rib_left_5.nii.gz", bridged)
+    assert mesh.bridged_volume(whole, None) == 0.0
+
+
+@pytest.mark.parametrize("contoured", [False, True])
+def test_main_names_each_contoured_mask_in_the_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, contoured: bool
+) -> None:
+    seg = tmp_path / "seg"
+    seg.mkdir()
+    for k, s in enumerate(ORGANS):
+        mask = ellipsoid((32, 32, 32), np.array([7.0 + k / 2, 6.0, 9.0]))
+        if s.label == "stomach":
+            mask[2:4, 2:4, 2:4] = True
+        save(seg / f"{s.label}.nii.gz", mask)
+    argv = ["mesh.py", "--case", "c", "--synthetic", "--seg-dir", str(seg), "--out-dir",
+            str(tmp_path)]  # fmt: skip
+    monkeypatch.setattr(sys, "argv", argv + (["--contoured"] if contoured else []))
+    mesh.main()
+    manifest = json.loads((tmp_path / "c.organs.manifest.json").read_text())
+    names = [node.get("contoured_mask") for node in manifest["nodes"]]
+    if not contoured:
+        assert names == [None] * len(ORGANS) and not (tmp_path / "c.organs.contoured").exists()
+        return
+    assert names == [f"c.organs.contoured/{s.label}.nii.gz" for s in ORGANS]
+    stomach = np.asanyarray(nib.load(tmp_path / "c.organs.contoured/stomach.nii.gz").dataobj) > 0
+    raw = np.asanyarray(nib.load(seg / "stomach.nii.gz").dataobj) > 0
+    assert int((raw & ~stomach).sum()) == 8 and not (stomach & ~raw).any()
