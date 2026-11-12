@@ -217,6 +217,82 @@ def test_stray_fragments_are_dropped() -> None:
     assert ((cleared & scan_damage.FRAGMENT) > 0).sum() == (kept == 0).sum()
 
 
+# The same on a real ANNY body
+#
+# The ANNY bodies are baked locally into data/bodies and are not in git, so
+# this test is skipped where there is none (CI has none). A capsule figure
+# cannot stand in for it: the point is where a human shape hides its own
+# surface. Run it locally after any change to the sensors or the holes.
+
+ANNY_BODY = scan_damage.ROOT / "data" / "bodies" / "anny-adult-f.rigged.glb"
+# Share of each region's area that the default settings and seed 7 remove,
+# as measured on 12 Nov 2026; each must stay within SHARE_TOLERANCE.
+ANNY_SHARES = {
+    "armpits": 0.297,
+    "crotch": 0.280,
+    "soles": 0.753,
+    "crown": 0.622,
+    "fingers": 0.677,
+    "chest and back": 0.0,
+    "whole body": 0.105,
+}
+SHARE_TOLERANCE = 0.03
+
+
+@pytest.mark.skipif(not ANNY_BODY.exists(), reason=f"no baked ANNY body at {ANNY_BODY}")
+def test_an_anny_body_loses_the_parts_a_scanner_cannot_see() -> None:
+    from scipy.spatial import KDTree
+
+    from size_body import accessor, read_glb, world_positions
+
+    gltf, blob = read_glb(ANNY_BODY)
+    names = np.array([gltf["nodes"][j]["name"] for j in gltf["skins"][0]["joints"]])
+    attributes = gltf["meshes"][0]["primitives"][0]["attributes"]
+    joints = accessor(gltf, blob, attributes["JOINTS_0"]).astype(np.int64)
+    weights = accessor(gltf, blob, attributes["WEIGHTS_0"])
+    strongest = names[joints[np.arange(len(joints)), weights.argmax(1)]]
+    where = world_positions(gltf)
+    body = read_mesh(ANNY_BODY)
+    _, clean, labels, _ = damage(body, 7)
+    points, triangles = clean.points, clean.triangles
+    joint = strongest[KDTree(body.points).query(points)[1]]
+    normals = vertex_normals(points, triangles)
+    corners = points[triangles]
+    area = np.linalg.norm(
+        np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0]), axis=1
+    )
+    gone = labels["faceRemoved"] != 0
+
+    def bound_to(*starts: str) -> BoolArray:
+        return np.array([j.startswith(starts) for j in joint])
+
+    shoulder = np.minimum(
+        *[np.linalg.norm(points - where[f"upperarm01.{s}"], axis=1) for s in "LR"]
+    )
+    hips = (where["upperleg01.L"] + where["upperleg01.R"]) / 2
+    down, up = normals[:, 1], points[:, 1]
+    regions = {
+        # Under the arms: within 9 cm of a shoulder joint, facing down.
+        "armpits": (shoulder < 0.09) & (down < -0.3),
+        # Between the legs: within 12 cm of the middle of the hip joints, below it, facing down.
+        "crotch": (np.linalg.norm(points - hips, axis=1) < 0.12) & (down < -0.5) & (up < hips[1]),
+        "soles": bound_to("foot", "toe") & (down < -0.7),
+        # The top 3 cm of the head, facing up.
+        "crown": bound_to("head") & (down > 0.9) & (up > up.max() - 0.03),
+        # Fingers count as removed whether they were cut, joined into a lump or not seen.
+        "fingers": bound_to("finger"),
+        "chest and back": bound_to("spine") & (np.abs(normals[:, 2]) > 0.8),
+        "whole body": np.ones(len(points), dtype=bool),
+    }
+    shares = {}
+    for name, vertices in regions.items():
+        faces = vertices[triangles].all(1)
+        assert area[faces].sum() > 0.005, name  # at least 50 cm2 to measure on
+        shares[name] = area[faces & gone].sum() / area[faces].sum()
+    assert shares == pytest.approx(ANNY_SHARES, abs=SHARE_TOLERANCE)
+    assert shares["chest and back"] == 0.0  # exposed surface is never removed
+
+
 # Labels
 
 
