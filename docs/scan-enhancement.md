@@ -109,6 +109,75 @@ body. If it does, smoothing should be lighter where the data is good and
 stronger where it is poor. That is to be tested on the synthetic demo (where
 the "depth" can be simulated) before it is relied on.
 
+## A damage model, to train on synthetic bodies
+
+A model that repairs scans has to learn from pairs: a scan as the scanner
+gives it, and the body as it is. No real scan may be used for that, so
+`scripts/scan_damage.py` makes the pairs from clean synthetic ANNY bodies. It
+reads no scan and was not tuned against one: the scanner is modelled from
+its published specification, and what the specification leaves open is
+written down as an assumption.
+
+    python scripts/scan_damage.py --in data/bodies/anny-adult-f.rigged.glb \
+        --out data/work/demo/anny-adult-f.seed7 --seed 7
+
+It writes the clean body at the scanner's triangle density (`.clean.glb`, the
+training target), the damaged body (`.damaged.glb`), the labels
+(`.labels.npz`) and a record of every parameter, its basis and the counts
+(`.json`). One seed gives the same bytes every time. It needs only numpy and
+scipy, takes about 25 s for one body, and refuses a path under
+`data/vitronic/`.
+
+**What is published.** The flyer for the VITUS bodyscan (Humanetics Digital
+Europe, who now sell it; read 12 Nov 2026) gives: optical triangulation with
+eye-safe laser light, 8 sensors, a measuring range 2100 mm high and 1200 mm
+by 1200 mm, an average maximum girth error under 1 mm on a tube of 110 mm, a
+scan in 6 to 10 s, about 300 points per cm², colour as an option, and a
+scanner 2400 mm square and 2950 mm high. Maurer's paper on the VITUS scanners
+(Vitronic; 3rd Int. Conf. on 3D Body Scanning Technologies, Lugano 2012,
+pp. 99–105) describes how they work: each pillar holds a head that travels
+from top to bottom; the head's laser throws a horizontal line, and one camera
+above and one below the laser plane look at it slightly downward and upward;
+whatever no camera sees is missing from the scan; very dark or shiny surfaces
+leave gaps. Its table for the older VITUS smart XXL (4 heads of two cameras,
+12 s, 27 points per cm², 1000 mm deep) is the second model, `--model
+smart-xxl`.
+
+**The artefacts**, each with its own switch (`--no-holes` and so on):
+
+| Artefact | What it does | Rests on |
+| --- | --- | --- |
+| resample | halves edges longer than 4/3 of `--edge-mm` (5 mm) and joins linked vertices closer than half of it | assumption: the export's density is not published. An edge below the published point spacing (0.58 mm) is refused |
+| holes | a vertex is measured when a head's laser lights it and a camera of that head sees it, both within `--max-incidence-deg` (75°) of the surface normal; faces with an unmeasured corner go, and patches under `--min-island-faces` (30) with them | published: 4 heads of 2 cameras, horizontal laser line, cameras above and below, range. Assumptions: heads `--pillar-inset-m` (0.2 m) in from the corners of the footprint, so 1.5 m from the middle; body facing between two pillars; cameras `--baseline-m` (0.3 m) from the laser; the incidence limit; the island size |
+| fingers | a finger is cut short with chance `--finger-missing` (0.25), losing at least `--finger-lost-least` (0.3) of its length; neighbours closer than `--fuse-gap-mm` (10 mm) are joined into one lump with chance `--finger-fused` (0.5) | assumptions throughout. Fingers come from the joints of ANNY's rig |
+| banding | an offset along the line of sight, the same along each horizontal line and changing up the body, with standard deviation `--band-mm` (0.3 mm) | published: the head travels 2.1 m in 6 to 10 s. Assumptions: it shakes at `--ripple-hz` (25 Hz), which makes a band 10.5 mm high; the size of the offset |
+| noise | each point moves along the line to its camera by `--noise-mm` (0.5 mm standard deviation), and each of the 8 sensors by its own `--sensor-bias-mm` (0.15 mm) | noise: assumption, since the girth error says nothing about single points. Bias: derived, a girth error of 1 mm is a radius error of 0.16 mm |
+| seams | each sensor's vertex colours are scaled per channel by `--seam-gain` (5%), so the colour steps where views meet | assumption; only for a mesh with vertex colours, which ANNY has not |
+
+**The labels** say, for every vertex and face of the clean body, whether it
+is in the damaged one and if not why (not seen, finger cut, finger joined,
+stray fragment, outside the range), which clean vertex and face each damaged
+one is, which sensor it was taken from, and how far it was moved.
+
+**On the demo body** (ANNY adult female, seed 7): the clean body has 135 281
+vertices and no open edge. The damaged one has lost 13 235 vertices and
+29 683 faces (26 546 not seen, 653 of a cut finger, 3 718 of joined fingers,
+40 in stray fragments) and has 50 holes: the crown, the soles, the crotch,
+under the arms, and the thighs where the hands hang in front of them. Its
+points have moved 0.47 mm on average, 1.15 mm at the 95th percentile.
+Cleaned by `blender/cleanup_mesh.py` and measured by `scripts/scan_quality.py`,
+the holes go from 50 to 39 and the shape changes by 0.25 mm on average, inside
+every region's limit: the measures move the right way, and the present
+cleanup closes only the small holes. Filling the large ones is the model's
+job.
+
+**Not modelled**: the body swaying during the scan, gaps from dark or shiny
+surfaces, noise that grows as the surface turns away, clothing and hair, the
+scanner software's own hole filling and smoothing, and textures (only vertex
+colours get seams). The assumptions above are guesses at a sensible size, not
+measurements: before a model trained on these pairs is trusted, they need
+checking against what the maker or an owner of the scanner can state.
+
 ## Demo results (synthetic ANNY female, three damaged repeats)
 
 Each repeat damages the same skinned synthetic scan differently (8 holes
