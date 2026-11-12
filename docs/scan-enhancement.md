@@ -171,6 +171,34 @@ every region's limit: the measures move the right way, and the present
 cleanup closes only the small holes. Filling the large ones is the model's
 job.
 
+Share of each region's area removed on that body, pinned within 0.03 by a
+test (`test_an_anny_body_loses_the_parts_a_scanner_cannot_see`):
+
+| Region | How it is found | Removed |
+| --- | --- | --- |
+| armpits | within 9 cm of a shoulder joint, facing down | 0.30 |
+| crotch | within 12 cm of the middle of the hip joints, below it, facing down | 0.28 |
+| soles | skin of the feet and toes, facing down | 0.75 |
+| crown | the top 3 cm of the head, facing up | 0.62 |
+| fingers | skin of the fingers: cut, joined into a lump, or not seen | 0.68 |
+| chest and back | skin of the spine joints, facing front or back | 0.00 |
+| whole body | | 0.10 |
+
+The ANNY bodies are baked locally and are not in git, so that test runs only
+where `data/bodies/anny-adult-f.rigged.glb` exists and is skipped elsewhere
+(CI has no body). A capsule figure cannot replace it, since the point is
+where a human shape hides its own surface; the capsule tests cover the logic
+everywhere.
+
+`scripts/scan_sheet.py` draws a contact sheet of such a pair: clean and
+damaged, front and back, whole body, in grey. Every panel is cut off at the
+base of the neck and blanked above it, and the sheet says so: no face is
+rendered, a synthetic one included.
+
+    python scripts/scan_sheet.py --clean data/work/demo/anny-adult-f.seed7.clean.glb \
+        --damaged data/work/demo/anny-adult-f.seed7.damaged.glb \
+        --body data/bodies/anny-adult-f.rigged.glb --out data/work/demo/anny-adult-f.seed7.sheet.png
+
 **Not modelled**: the body swaying during the scan, gaps from dark or shiny
 surfaces, noise that grows as the surface turns away, clothing and hair, the
 scanner software's own hole filling and smoothing, and textures (only vertex
