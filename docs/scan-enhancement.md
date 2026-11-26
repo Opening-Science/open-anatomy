@@ -190,10 +190,18 @@ where `data/bodies/anny-adult-f.rigged.glb` exists and is skipped elsewhere
 where a human shape hides its own surface; the capsule tests cover the logic
 everywhere.
 
-`scripts/scan_sheet.py` draws a contact sheet of such a pair: clean and
-damaged, front and back, whole body, in grey. Every panel is cut off at the
-base of the neck and blanked above it, and the sheet says so: no face is
-rendered, a synthetic one included.
+`scripts/scan_sheet.py` draws a contact sheet of such a pair. The top row is
+the whole body, clean and damaged, front and back, cropped to the body from
+the floor to the neck. The second row shows each from under the floor (the
+soles and the crotch) and both hands close up from outside the body, cut out
+by the rig's hand joints so the thigh does not stand in the way. The outside
+of the body is grey; where a hole lets the inside show, it is red, so a hole
+never reads as a shadow. Each pixel shows the nearest surface, so a clean
+body shows no red and no speck of its far side; a test checks this on the
+capsule figure everywhere and on the ANNY female locally, along with red at
+the armpits and soles once damaged. Every panel draws only faces wholly below
+the base of the neck, and the sheet says so: no face is rendered, a synthetic
+one included.
 
     python scripts/scan_sheet.py --clean data/work/demo/anny-adult-f.seed7.clean.glb \
         --damaged data/work/demo/anny-adult-f.seed7.damaged.glb \
