@@ -9,9 +9,10 @@ will meet. Blender 5.2.x, headless. Never touches a real scan.
 The output is a skinned glTF binary: one skin with ANNY's joints, one mesh
 with POSITION, NORMAL, JOINTS_0, WEIGHTS_0, a cylindrical TEXCOORD_0, and
 three float attributes standing in for the scanner's own: _DepthMap (how
-squarely the nearest of eight cameras around the body sees each vertex, 0 to
-1), _GaussianCurvature and _MeanCurvature (angle-deficit and cotangent
-estimates). No texture image: ANNY has none.
+squarely the best of the scanner's eight cameras faces each vertex, 0 to 1;
+the cameras are those of scripts/scan_damage.py, which damages such a body
+the way the scanner would), _GaussianCurvature and _MeanCurvature
+(angle-deficit and cotangent estimates). No texture image: ANNY has none.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 import bmesh  # noqa: E402
 import bpy  # noqa: E402
@@ -33,7 +35,7 @@ from twinblend.blender_env import (  # noqa: E402
     script_args,
 )
 
-CAMERAS = 8
+from scan_damage import Settings, depth_map, scanner_heads  # noqa: E402
 
 
 def add_attributes(obj: bpy.types.Object) -> None:
@@ -43,13 +45,12 @@ def add_attributes(obj: bpy.types.Object) -> None:
     bm.verts.ensure_lookup_table()
     co = np.array([v.co[:] for v in bm.verts])
     normals = np.array([v.normal[:] for v in bm.verts])
-    centre = co.mean(0)
-    # Eight cameras in a ring at chest height, looking in at the body.
-    angles = np.linspace(0, 2 * math.pi, CAMERAS, endpoint=False)
-    cams = centre + np.stack([np.cos(angles), np.sin(angles), np.zeros(CAMERAS)], 1) * 1.5
-    view = cams[None, :, :] - co[:, None, :]
-    view /= np.linalg.norm(view, axis=2, keepdims=True)
-    depth = np.clip((view * normals[:, None, :]).sum(2).max(1), 0, 1)
+    # The scanner's heads as scan_damage.py places them. It works with +Y up
+    # and the body facing +Z; Blender has +Z up and the body facing -Y.
+    turned = np.stack([co[:, 0], co[:, 2], -co[:, 1]], 1)
+    heads = scanner_heads(turned, Settings())
+    turned_normals = np.stack([normals[:, 0], normals[:, 2], -normals[:, 1]], 1)
+    depth = depth_map(turned, turned_normals, heads, Settings().baseline_m)
     gauss = np.zeros(len(co))
     mean = np.zeros(len(co))
     for v in bm.verts:
