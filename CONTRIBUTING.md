@@ -16,6 +16,7 @@
    .venv/bin/pytest
    .venv/bin/python scripts/mesh_check.py
    .venv/bin/python scripts/bake_check.py
+   .venv/bin/python scripts/imaging_check.py
    npx pyright@1.1.414
    python3 scripts/data_guard.py
    python3 scripts/licence_check.py
