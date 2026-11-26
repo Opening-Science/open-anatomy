@@ -61,6 +61,39 @@ source.
   [`assets/cc-by-sa/`](assets/cc-by-sa/), under CC BY-SA. Share-alike material
   never mixes into the CC BY folder.
 
+## Credits
+
+[NOTICE](NOTICE) has every credit line in full. In short:
+
+- **TotalSegmentator dataset (CC BY 4.0): credit required.** Every mesh and
+  slice here, and the CT-derived layers of every reference body, are derived
+  from its CT scans; the skin and the body shape come from ANNY's CC0 shapes,
+  not from a scan. Attribution is the licence's condition, not a courtesy.
+  Cases s1086, s0903 and s0859 come from the small subset, s0667 from the
+  full dataset. Anything you share that is built from them must carry a
+  credit such as this one, ready to paste:
+
+  > Contains material derived from the TotalSegmentator dataset v2.0.1 by
+  > Jakob Wasserthal (https://doi.org/10.5281/zenodo.10047292 and small subset
+  > https://doi.org/10.5281/zenodo.10047263), licensed under CC BY 4.0
+  > (https://creativecommons.org/licenses/by/4.0/). Changes: the CT scans were
+  > segmented, meshed, smoothed and, for the reference bodies, fitted into a
+  > synthetic ANNY body.
+
+  Please also cite Wasserthal et al., *Radiology: Artificial Intelligence*
+  2023 ([10.1148/ryai.230024](https://doi.org/10.1148/ryai.230024)).
+- **TotalSegmentator (Apache-2.0):** the segmentation code and the weights of
+  the Apache-2.0 tasks we run. It is installed from PyPI, not redistributed
+  here, and ships no NOTICE file of its own; NOTICE credits it, and if you
+  redistribute its code, keep its licence with it.
+- **ANNY (CC0 shapes, Apache-2.0 code):** CC0 asks for no credit; we credit
+  NAVER LABS Europe anyway (arXiv:2511.03589), as good practice. The bake uses
+  only the CC0 shapes, never ANNY's non-commercial SMPL/SMPL-X data.
+- **BodyParts3D and HRA:** nothing from them is used in this repository's
+  outputs, so no credit is needed. `blender/fit_atlas.py` can fit them; if
+  you use it, credit them, and put BodyParts3D results (CC BY-SA) under
+  `assets/cc-by-sa/`.
+
 ## Personalisation (planned)
 
 A person's clinician-verified facts will adjust the layers at load time. For
