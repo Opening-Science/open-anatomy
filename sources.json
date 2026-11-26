@@ -27,6 +27,26 @@
       "bytes": 23581218285,
       "md5": "fe250e5718e0a3b5df4c4ea9d58a62fe",
       "sha256": "741dbc911a768e2ac2671c66d55332f7302ad624c915a57d08b142d8bdf0ca26"
+    },
+    "ansur-ii-male": {
+      "title": "ANSUR II anthropometric survey, male public data (US Army, 2012; released 2017)",
+      "record": "https://www.openlab.psu.edu/ansur2/",
+      "url": "https://tools.openlab.psu.edu/publicData/ANSUR_II_MALE_Public.csv",
+      "licence": "US government work (public domain in the US)",
+      "file": "ANSUR_II_MALE_Public.csv",
+      "bytes": 2000794,
+      "sha256": "0547aea0170e5293de519389981135e75803f02e6d40c77ace740decc0caac64",
+      "used": "blender/fit_body.py compares body proportions with its 1st, 50th and 99th percentiles, as a plausibility check only; never in a released asset (see NOTICE)"
+    },
+    "ansur-ii-female": {
+      "title": "ANSUR II anthropometric survey, female public data (US Army, 2012; released 2017)",
+      "record": "https://www.openlab.psu.edu/ansur2/",
+      "url": "https://tools.openlab.psu.edu/publicData/ANSUR_II_FEMALE_Public.csv",
+      "licence": "US government work (public domain in the US)",
+      "file": "ANSUR_II_FEMALE_Public.csv",
+      "bytes": 976573,
+      "sha256": "ed7e800aa97a4d42f8286b988be2fe1883a2e789588169db959864b707d1757a",
+      "used": "blender/fit_body.py compares body proportions with its 1st, 50th and 99th percentiles, as a plausibility check only; never in a released asset (see NOTICE)"
     }
   },
   "cases": {

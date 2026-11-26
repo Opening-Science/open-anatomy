@@ -38,6 +38,21 @@ ANNY body model
   any person is used. ANNY's non-commercial SMPL/SMPL-X conversion data is
   never downloaded or used.
 
+Reference data, not in any released asset
+-----------------------------------------
+
+ANSUR II anthropometric survey, public data (US Army, 2012; released 2017)
+  Male: https://tools.openlab.psu.edu/publicData/ANSUR_II_MALE_Public.csv
+  Female: https://tools.openlab.psu.edu/publicData/ANSUR_II_FEMALE_Public.csv
+  Record: https://www.openlab.psu.edu/ansur2/
+  Status: a work of the US government, so in the public domain in the US.
+  It does not carry a CC BY or CC0 licence, so it is used only as a
+  plausibility check: blender/fit_body.py compares body measures with its
+  1st, 50th and 99th percentiles and writes them to its local report. No
+  ANSUR II value goes into a GLB or any other released asset.
+  SHA-256 (male): 0547aea0170e5293de519389981135e75803f02e6d40c77ace740decc0caac64
+  SHA-256 (female): ed7e800aa97a4d42f8286b988be2fe1883a2e789588169db959864b707d1757a
+
 Tools
 -----
 
