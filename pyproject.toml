@@ -46,9 +46,11 @@ exclude = ["scripts/render.py", "scripts/self_check.py"]
 strict = [
   "scripts/data_guard.py",
   "scripts/licence_check.py",
+  "scripts/pins_check.py",
   "tests/conftest.py",
   "tests/test_data_guard.py",
   "tests/test_licence_check.py",
+  "tests/test_pins_check.py",
   "tests/test_repo_config.py",
 ]
 extraPaths = ["scripts"]
