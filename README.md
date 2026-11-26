@@ -144,6 +144,22 @@ DOI, case) and ANNY. Other headless Blender 5.2.x scripts in [`blender/`](blende
 meshes up and fit an atlas to a body limb by limb; `scripts/blender.py` runs
 them all.
 
+[`blender/fit_body.py`](blender/fit_body.py) fits the other way round, one to
+one: the CT's organs and skeleton keep their true size and shape, and ANNY is
+scaled, placed and posed so that its joints sit on the CT's. It runs through
+`scripts/blender.py`, which checks the Blender version and refuses any path
+under `data/vitronic/`:
+
+```bash
+python scripts/blender.py fit-body --body data/bodies/anny-adult-f.rigged.glb \
+    --ct data/work/s0859/s0859.reference.glb --outline data/work/s0859/s0859.outline.glb \
+    --landmarks data/work/s0859/s0859.landmarks.glb --case s0859 \
+    --out data/onetoone/s0859.onetoone.glb --report data/onetoone/s0859.onetoone.json
+```
+
+Its GLB carries the same credit as a reference body's: the TotalSegmentator
+dataset (CC BY 4.0, creator, DOI, case) and ANNY.
+
 ## Self-checks
 
 ```bash

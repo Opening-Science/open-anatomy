@@ -4,6 +4,8 @@ Runs the headless Blender scripts in blender/ with a checked Blender.
   python scripts/blender.py self-check
   python scripts/blender.py cleanup --in <glb> --out-dir <dir> [cleanup_mesh.py options]
   python scripts/blender.py assemble --body <glb> --ct <glb> --out <glb> --report <json>
+  python scripts/blender.py fit-body --body <glb> --ct <glb> --outline <glb> \
+      --out <glb> --report <json> --case <id> [fit_body.py options]
   python scripts/blender.py fit --atlas <glb> --scheme hra --body <glb> \
       --out <glb> --report <json> [fit_atlas.py options]
       (--scheme bodyparts3d also needs --allow-share-alike: its licence may be CC BY-SA)
@@ -11,8 +13,8 @@ Runs the headless Blender scripts in blender/ with a checked Blender.
 Blender comes from BLENDER_BIN, else `blender` on PATH, and must be 5.2.x LTS.
 Without one, self-check says so and exits 0, so CI (which has none) skips;
 the other tasks fail. self-check
-runs this repository's glTF round trip and both ported scripts on synthetic
-meshes. Any argument that points under a data/vitronic/ folder is refused,
+runs this repository's glTF round trip, both ported scripts and fit_body.py on
+synthetic meshes. Any argument that points under a data/vitronic/ folder is refused,
 input or output, given as `--flag path` or `--flag=path`: the scripts are only
 ever run on synthetic bodies, open atlases and open CT data, never on a scan of
 a person. self-check tests that guard first, with or without Blender.
@@ -32,6 +34,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SERIES = (5, 2)
+# Each task and the script in blender/ it runs.
+SCRIPTS = {
+    "cleanup": "cleanup_mesh.py",
+    "fit": "fit_atlas.py",
+    "assemble": "assemble.py",
+    "fit-body": "fit_body.py",
+}
 PERSONAL = re.compile(r"(^|[\\/])data[\\/]vitronic([\\/]|$)")
 
 
@@ -66,7 +75,7 @@ def personal_paths(args: list[str]) -> list[str]:
     from here and from the repository root, where Blender runs.
     """
     values = [a.split("=", 1)[1] if a.startswith("--") and "=" in a else a for a in args]
-    found = []
+    found: list[str] = []
     for value in filter(None, values):
         seen = (value, str(Path(value).resolve()), str((ROOT / value).resolve()))
         if any(PERSONAL.search(v) for v in seen):
@@ -83,19 +92,23 @@ def guard_check() -> list[str]:
         ["--render-dir=data/vitronic/renders"],
         ["--outline", "/home/someone/twin-llm/data/vitronic/p1/outline.glb"],
         ["--report", str(ROOT / "data" / "vitronic" / "fit.json")],
+        ["--body", "data/bodies/anny-adult-f.rigged.glb", "--ct", "data/vitronic/p1/ct.glb"],
+        ["--landmarks=data/vitronic/p1/landmarks.glb", "--case", "s0859"],
     ]
     allowed = [
         ["--in", "data/work/s1086/s1086.organs.glb", "--out-dir", "data/work/clean"],
         ["--atlas=data/atlas/hra.glb", "--scheme", "hra", "--max-shift", "0.5"],
         ["--out", "data/vitronic-like/x.glb"],
-    ]
+        ["--body", "data/bodies/anny-adult-f.rigged.glb", "--ct", "data/work/s0859/s0859.glb",
+         "--landmarks=data/work/s0859/s0859.landmarks.glb", "--case", "s0859", "--sex", "female"],
+    ]  # fmt: skip
     failures = [f"not refused: {a}" for a in refused if not personal_paths(a)]
     return failures + [f"refused: {a}" for a in allowed if personal_paths(a)]
 
 
 def main() -> int:
     task, args = (sys.argv[1], sys.argv[2:]) if len(sys.argv) > 1 else ("", [])
-    if task not in ("self-check", "cleanup", "fit", "assemble"):
+    if task != "self-check" and task not in SCRIPTS:
         print((__doc__ or "").split("\n\n")[1], file=sys.stderr)
         return 2
     if task == "self-check":
@@ -118,16 +131,16 @@ def main() -> int:
         return 2
 
     if task == "self-check":
-        checks = [
+        checks: list[tuple[Path, list[str]]] = [
             (ROOT / "scripts" / "self_check.py", []),
             (ROOT / "blender" / "fit_atlas.py", ["--self-check"]),
             (ROOT / "blender" / "cleanup_mesh.py", ["--self-check"]),
+            (ROOT / "blender" / "fit_body.py", ["--self-check"]),
         ]
         failed = [s.name for s, a in checks if run(blender, s, a) != 0]
         print("all Blender self-checks passed" if not failed else f"failed: {', '.join(failed)}")
         return 1 if failed else 0
-    script = {"cleanup": "cleanup_mesh.py", "fit": "fit_atlas.py", "assemble": "assemble.py"}[task]
-    return run(blender, ROOT / "blender" / script, args)
+    return run(blender, ROOT / "blender" / SCRIPTS[task], args)
 
 
 if __name__ == "__main__":
