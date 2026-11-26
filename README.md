@@ -30,8 +30,8 @@ For each reference body, in the gitignored `data/` folder:
 | --- | --- | --- | --- |
 | anny-adult-m | s0903, male, 88 | none | yes |
 | anny-adult-f | s0859, female, 74 | inflammation (thorax) | yes |
-| anny-adult-m-w0.9-h0.5.s0667 | s0667, male, 65 | none | yes |
-| anny-adult-m-w0.9-h0.9.s1086 | s1086, male, 45 | tumour (thorax, abdomen) | **no: a pathological reference** |
+| anny-adult-m-w0.95-h0.5.s0667 | s0667, male, 65 | none | yes |
+| anny-adult-m-w1.0-h0.8.s1086 | s1086, male, 45 | tumour (thorax, abdomen) | **no: a pathological reference** |
 
 The structures are the liver, gallbladder, stomach, pancreas, spleen, both
 kidneys, heart, aorta and inferior vena cava, and the trunk skeleton: the
@@ -72,15 +72,21 @@ uv venv .venv -p 3.12 && uv pip install --python .venv/bin/python -e '.[pipeline
    against the dataset's own reference masks;
 3. `scripts/mesh.py`: smooth, closed surfaces that keep each mask's volume;
 4. `scripts/bake_anny.py`: the ANNY body, sized to the case by
-   `scripts/size_body.py` (the two w0.9 bodies were sized on an older grid
-   that stopped at 0.9 and will be re-sized when the bodies are rebuilt);
+   `scripts/size_body.py` (s1086 sits at ANNY's weight limit of 1.0 and is
+   a little too slim for its CT,
+   [#44](https://github.com/Opening-Science/open-anatomy/issues/44));
 5. `blender/assemble.py`: the CT structures placed in the body and attached to
    its skeleton; with `--render`, front, three-quarter and trunk views.
+
+`scripts/imaging.py` (a prototype) cuts axial, coronal and sagittal slices
+through a reference body's own CT and places them inside the body; see
+[docs/imaging-layer.md](docs/imaging-layer.md).
 
 Self-checks, also run in CI:
 
 ```bash
 .venv/bin/python scripts/mesh_check.py
+.venv/bin/python scripts/imaging_check.py # the imaging layer's orientation and head guard
 scripts/self-check.sh         # Blender's; skips without Blender
 python3 scripts/bake_check.py # the ANNY bake's lock; --bake bakes again and compares
 ```
