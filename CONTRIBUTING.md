@@ -20,6 +20,7 @@
    npx pyright@1.1.414
    python3 scripts/data_guard.py
    python3 scripts/licence_check.py
+   python3 scripts/pins_check.py --skip-sources   # not in CI: data/ against sources.json
    gitleaks detect --source . --config .gitleaks.toml --redact
    scripts/self-check.sh   # needs Blender 5.2+; skips without it, fails in CI
    ```

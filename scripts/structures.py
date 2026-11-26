@@ -39,6 +39,7 @@ ORGANS: tuple[Structure, ...] = (
 )  # fmt: skip
 
 BONE = (0.86, 0.82, 0.70)
+CARTILAGE = (0.78, 0.84, 0.86)
 SKELETON: tuple[Structure, ...] = (
     Structure("vertebrae_C1", "FMA:12519", "atlas", "skeletal", BONE),
     Structure("vertebrae_C2", "FMA:12520", "axis", "skeletal", BONE),
@@ -90,6 +91,7 @@ SKELETON: tuple[Structure, ...] = (
     Structure("rib_right_11", "FMA:8531", "right eleventh rib", "skeletal", BONE),
     Structure("rib_right_12", "FMA:8533", "right twelfth rib", "skeletal", BONE),
     Structure("sternum", "FMA:7485", "sternum", "skeletal", BONE),
+    Structure("costal_cartilages", "FMA:85213", "set of costal cartilages", "skeletal", CARTILAGE),
     Structure("clavicula_left", "FMA:13323", "left clavicle", "skeletal", BONE),
     Structure("clavicula_right", "FMA:13322", "right clavicle", "skeletal", BONE),
     Structure("scapula_left", "FMA:13396", "left scapula", "skeletal", BONE),

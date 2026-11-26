@@ -133,8 +133,8 @@
       "case": "s0903",
       "built": {
         "file": "anny-adult-m.reference.glb",
-        "sha256": "b64a35640a30f5d37f2cd48ec2c4a0c9e7be4bb44927a32c62c36676209e0a08",
-        "ctSha256": "8066ab17167e0c25a7f491cd5b1051e6dec2d31b7623d94d7aab49f5374bcbaf",
+        "sha256": "99898781a4082b91047bd4a59af6580a54a9a0b6b6e402705ef7b85f99898358",
+        "ctSha256": "e3978188b9bff70c9d544bad46aee2bb7de1e9fff539fb0d0e34326dbbac6ee8",
         "note": "built on Linux x86_64, RTX 2080 Ti, Blender 5.2.3; GPU segmentation is not bit-exact across machines"
       }
     },
@@ -143,30 +143,20 @@
       "case": "s0859",
       "built": {
         "file": "anny-adult-f.reference.glb",
-        "sha256": "117059dd65a6ce7b18e2b5576de0091262dd5037d997d1aedef234893d99e19f",
-        "ctSha256": "0c8e031bb3a3ae3fc99d85b2c49acbf821f6242fa668449b3475786067c7ec21",
+        "sha256": "51575187d5e3dd0b28edc17925bb19ba92287421e1d33a68560fb59d7bf26cf2",
+        "ctSha256": "33634cd1ebfc1f0cd1f24bc3cc86c390c061410fc1341ea67801de009a4b958e",
         "note": "built on Linux x86_64, RTX 2080 Ti, Blender 5.2.3; GPU segmentation is not bit-exact across machines"
       }
     },
     "anny-adult-m-w0.95-h0.5.s0667": {
       "body": "anny-adult-m-w0.95-h0.5",
       "case": "s0667",
-      "built": {
-        "file": "anny-adult-m-w0.95-h0.5.s0667.reference.glb",
-        "sha256": "3e1642d3e086434fe67da1464c136fe0e3f21c820d1974567ab50c0e675e3d2c",
-        "ctSha256": "3615cc89914db81ee75358f88193bcdcbe2b1550c7b3f06c0ed13dd914f0d57d",
-        "note": "built on Linux x86_64, RTX 2080 Ti, Blender 5.2.3; GPU segmentation is not bit-exact across machines"
-      }
+      "notBuilt": "the scan cuts both humeri, so assemble.py cannot measure the hip-to-shoulder rise and stops"
     },
     "anny-adult-m-w1.0-h0.8.s1086": {
       "body": "anny-adult-m-w1.0-h0.8",
       "case": "s1086",
-      "built": {
-        "file": "anny-adult-m-w1.0-h0.8.s1086.reference.glb",
-        "sha256": "fbb57c5d4e7da54bce2658b3ec6b068cad70f9b53c11aecb987d1001f6e5ec6e",
-        "ctSha256": "e07ba695f02310fe6fb74da0f0a7d4e3b5a0d831f8b500d3d36a72f0ad5355bc",
-        "note": "built on Linux x86_64, RTX 2080 Ti, Blender 5.2.3; GPU segmentation is not bit-exact across machines"
-      }
+      "notBuilt": "the scan cuts both humeri, so assemble.py cannot measure the hip-to-shoulder rise and stops"
     }
   }
 }

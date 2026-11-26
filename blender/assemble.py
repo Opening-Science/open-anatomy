@@ -7,6 +7,9 @@ Inputs (after `--`):
   --body <glb>        a rigged ANNY body from scripts/bake_anny.py
   --ct <glb>          the CT structures from mesh.py --set reference
   --outline <glb>     the CT's trunk outline from the same run (measured, never exported)
+  [--landmarks <glb>] the cut femurs and humeri from the same run, for their heads
+                      (measured, never exported); a bone whose head the scan cut
+                      is in neither file, and its level uses the other side alone
   --out <glb>         the reference body: ANNY's skin and skeleton plus the CT nodes
   --report <json>     landmarks, the fit, the bone each node follows, containment
   [--render-dir <dir> --render-name <stem>]   front and three-quarter renders
@@ -16,11 +19,13 @@ The fit has two parts. Height comes from four joints that both have: each
 hip's centre (a sphere fitted to the femoral head) and each shoulder's (a
 sphere fitted to the humeral head), against ANNY's upperleg01 and upperarm01
 joints; the vertical scale makes the hip-to-shoulder rise match and the
-landmarks' mean height land on ANNY's. Width and depth come from the trunk
-outline (TotalSegmentator's body_trunc, --outline) against ANNY's skin
-vertices that follow the trunk, measured at four fractions of that rise: the
-median ratios set the scales and the outlines' centres the shift. The joints
-are not used for width because ANNY's sit wider than anatomical joint centres.
+landmarks' mean height land on ANNY's. A joint whose head the scan cut is
+left out on both sides, and its level uses the other side alone. Width and
+depth come from the trunk outline (TotalSegmentator's body_trunc, --outline)
+against ANNY's skin vertices that follow the trunk, measured at four fractions
+of that rise: the median ratios set the scales and the outlines' centres the
+shift. The joints are not used for width because ANNY's sit wider than
+anatomical joint centres.
 A second step then fits the shoulder girdle (fit_girdle): clavicles, scapulae
 and humeri, with the upper thorax following by height, so that a girdle a
 supine or stooped scan holds low or forward lands on ANNY's shoulders. The
@@ -436,6 +441,7 @@ def main() -> None:
     args = script_args()
     body_path, ct_path = option(args, "--body"), option(args, "--ct")
     outline_path = option(args, "--outline")
+    landmarks_path = option(args, "--landmarks")
     out, report_path = option(args, "--out"), option(args, "--report")
     if not (body_path and ct_path and outline_path and out and report_path):
         sys.stderr.write("assemble.py needs --body, --ct, --outline, --out and --report.\n")
@@ -456,23 +462,51 @@ def main() -> None:
     for o in ct:
         o.name = o.get("term", o.name).replace(":", "_")
         names[o.name] = o
+    # Bones the scan cut (the femurs, often the humeri) are not in the body, but
+    # their heads still give the joint landmarks: they come from the landmarks
+    # file, follow the same transform, and are deleted before export.
+    marks = []
+    if landmarks_path:
+        marks = [o for o in import_glb(landmarks_path) if o.type == "MESH"]
+        bake_world(marks)
+        for o in marks:
+            o.name = "landmark:" + o.get("term", o.name).replace(":", "_")
+    bones = dict(names)
+    bones.update({o.name.removeprefix("landmark:"): o for o in marks})
 
     # Landmarks: CT bone ends against ANNY's joints, in Blender's frame (+Z up).
-    ct_marks, anny_marks = {}, {}
-    midline = float(np.mean([coords(names[n])[:, 0].mean() for n in FEMUR]))
+    # A femur or humerus whose head the scan cut is in neither file (mesh.py
+    # leaves it out of the landmarks); its level then uses the other side alone.
+    ct_marks, anny_marks, missing = {}, {}, []
+    femurs = [n for n in FEMUR if n in bones]
+    if not femurs:
+        sys.stderr.write(f"Case {case}: no femur in the body or the landmarks file.\n")
+        sys.exit(1)
+    midline = float(np.mean([coords(bones[n])[:, 0].mean() for n in femurs]))
     for table, finder, bone in (
         (FEMUR, femoral_head, "upperleg01"),
         (HUMERUS, humeral_head, "upperarm01"),
     ):
         for name, side in table.items():
             key = f"{bone}.{side}"
-            ct_marks[key] = finder(coords(names[name]), midline)
+            if name not in bones:
+                missing.append(key)
+                continue
+            ct_marks[key] = finder(coords(bones[name]), midline)
             anny_marks[key] = joint(armature, key)
+        if not any(k.startswith(bone) for k in ct_marks):
+            sys.stderr.write(
+                f"Case {case}: neither {bone} landmark is in the body or the landmarks "
+                "file, so the hip-to-shoulder rise cannot be measured.\n"
+            )
+            sys.exit(1)
+    if missing:
+        print(f"landmarks not in the body or the landmarks file: {missing}")
     c = {k: ct_marks[k] for k in sorted(ct_marks)}
     a = {k: anny_marks[k] for k in sorted(anny_marks)}
 
     def mid(m, bone):
-        return (m[f"{bone}.L"] + m[f"{bone}.R"]) / 2
+        return np.mean([m[k] for k in sorted(m) if k.startswith(bone)], axis=0)
 
     # Height: the hip-to-shoulder rise. Width and depth: the trunk outlines at
     # the same fractions of that rise (ANNY's joints sit wider than anatomical
@@ -503,7 +537,7 @@ def main() -> None:
         np.mean(centres_a, 0)[1] - scale[1] * np.mean(centres_c, 0)[1],
         np.mean([m[2] for m in a.values()]) - sz * np.mean([m[2] for m in c.values()]),
     ])  # fmt: skip
-    for o in ct:
+    for o in [*ct, *marks]:
         set_coords(o, coords(o) * scale + shift)
     tree = skin_tree(skin)
     if inside_share(np.array([joint(armature, "spine03")]), tree) < 1:
@@ -512,10 +546,14 @@ def main() -> None:
     residuals = {k: float(np.linalg.norm(c[k] * scale + shift - a[k])) for k in c}
     trunk_residuals = dict(residuals)
     before = {o.name: inside_share(coords(o)[::4], tree) for o in ct}
-    girdle = fit_girdle(ct, names, a, tree, midline=shift[0] + scale[0] * midline)
-    for key, name in (("upperarm01.L", "FMA_23131"), ("upperarm01.R", "FMA_23130")):
-        head = humeral_head(coords(names[name]), girdle["midline"])
-        residuals[key] = float(np.linalg.norm(head - a[key]))
+    has_girdle = all(n in names for n in (*CLAVICLE, *SCAPULA, *HUMERUS))
+    if has_girdle:
+        girdle = fit_girdle(ct, names, a, tree, midline=shift[0] + scale[0] * midline)
+        for key, name in (("upperarm01.L", "FMA_23131"), ("upperarm01.R", "FMA_23130")):
+            head = humeral_head(coords(names[name]), girdle["midline"])
+            residuals[key] = float(np.linalg.norm(head - a[key]))
+    for o in marks:
+        bpy.data.objects.remove(o)  # measured only; never exported or rendered
 
     # Attach each node rigidly to one ANNY bone, keeping where it is.
     followed = {}
@@ -529,33 +567,39 @@ def main() -> None:
         followed[o.name] = bone
 
     inside = {o.name: round(inside_share(coords(o)[::4], tree), 3) for o in ct}
-    moved = [n for n, w in girdle["weights"].items() if w > 0]
-    girdle_report = {
-        "verticalShiftM": round(girdle["dz"], 4),
-        "frontToBackShiftM": round(girdle["dy"], 4),
-        "sideToSideScale": round(girdle["sx"], 3),
-        "weights": {n: round(w, 2) for n, w in sorted(girdle["weights"].items()) if w > 0},
-        "insideSkinBefore": round(float(np.mean([before[n] for n in moved])), 3),
-        "insideSkinAfter": round(float(np.mean([inside[n] for n in moved])), 3),
-        "allInsideSkinBefore": round(float(np.mean(list(before.values()))), 3),
-        "gridSettingsTied": girdle["tied"],
-        "onGridEdge": girdle["edge"],
-        "largestJointShiftM": girdle["joints"][0]["shiftApartM"] if girdle["joints"] else 0.0,
-        "jointShifts": girdle["joints"][:10],
-        "bonesInOrgansBefore": girdle["overlapBefore"],
-        "bonesInOrgansAfter": girdle["overlapAfter"],
-        "score": round(girdle["score"], 4),
-        "overlapWeight": OVERLAP_WEIGHT,
-        "meanBoneShareInOrgans": round(girdle["overlap"], 4),
-        "heartLimitMet": girdle["heartMet"],
-        "maxBoneShareInHeart": round(girdle["heart"], 4),
-        "bonesInHeart": girdle["inHeart"],
-        "residualNote": (
-            "trunkFitResidualM is the trunk fit's alone. residualM is after the girdle "
-            "step, whose vertical shift puts the humeral heads' mean height on ANNY's "
-            "shoulders, so the upperarm01 residuals drop partly by construction."
-        ),
-    }
+    if not has_girdle:
+        girdle_report = {"skipped": "no shoulder girdle in this body (the scan cut it)"}
+    moved = [n for n, w in girdle["weights"].items() if w > 0] if has_girdle else []
+    girdle_report = (
+        girdle_report
+        if not has_girdle
+        else {
+            "verticalShiftM": round(girdle["dz"], 4),
+            "frontToBackShiftM": round(girdle["dy"], 4),
+            "sideToSideScale": round(girdle["sx"], 3),
+            "weights": {n: round(w, 2) for n, w in sorted(girdle["weights"].items()) if w > 0},
+            "insideSkinBefore": round(float(np.mean([before[n] for n in moved])), 3),
+            "insideSkinAfter": round(float(np.mean([inside[n] for n in moved])), 3),
+            "allInsideSkinBefore": round(float(np.mean(list(before.values()))), 3),
+            "gridSettingsTied": girdle["tied"],
+            "onGridEdge": girdle["edge"],
+            "largestJointShiftM": (girdle["joints"][0]["shiftApartM"] if girdle["joints"] else 0.0),
+            "jointShifts": girdle["joints"][:10],
+            "bonesInOrgansBefore": girdle["overlapBefore"],
+            "bonesInOrgansAfter": girdle["overlapAfter"],
+            "score": round(girdle["score"], 4),
+            "overlapWeight": OVERLAP_WEIGHT,
+            "meanBoneShareInOrgans": round(girdle["overlap"], 4),
+            "heartLimitMet": girdle["heartMet"],
+            "maxBoneShareInHeart": round(girdle["heart"], 4),
+            "bonesInHeart": girdle["inHeart"],
+            "residualNote": (
+                "trunkFitResidualM is the trunk fit's alone. residualM is after the girdle "
+                "step, whose vertical shift puts the humeral heads' mean height on ANNY's "
+                "shoulders, so the upperarm01 residuals drop partly by construction."
+            ),
+        }
+    )
 
     bpy.data.objects.remove(outline)  # measured only; never exported or rendered
     mat = skin_material()
@@ -605,6 +649,7 @@ def main() -> None:
             }
             for k in c
         },
+        "landmarksMissing": missing,
         "nodes": {
             o.name: {"bone": followed[o.name], "insideSkin": inside[o.name]}
             for o in sorted(ct, key=lambda o: o.name)
@@ -615,18 +660,21 @@ def main() -> None:
           + ", ".join(f"{k} {trunk_residuals[k] * 100:.1f} -> {v * 100:.1f}"
                       for k, v in residuals.items()))  # fmt: skip
     g = girdle_report
-    print(f"girdle: inside {g['insideSkinBefore']:.1%} -> {g['insideSkinAfter']:.1%} "
-          f"over {len(moved)} bones; all nodes {g['allInsideSkinBefore']:.1%} -> "
-          f"{np.mean(list(inside.values())):.1%}")  # fmt: skip
-    if g["onGridEdge"]:
-        print(f"warning: the girdle's best setting is on the grid's edge ({g['onGridEdge']})")
-    if not g["heartLimitMet"]:
-        print(f"warning: no grid setting keeps every moved bone out of the heart (limit 0); "
-              f"the least leaves {g['maxBoneShareInHeart']:.1%} of a bone in it: "
-              f"{g['bonesInHeart'] or 'under 1% each'}")  # fmt: skip
-    print(f"girdle: {g['gridSettingsTied']} grid settings tied; largest joint shift "
-          f"{g['largestJointShiftM'] * 100:.1f} cm; bones in organs after: "
-          f"{g['bonesInOrgansAfter'] or 'none'}")  # fmt: skip
+    if has_girdle:
+        print(f"girdle: inside {g['insideSkinBefore']:.1%} -> {g['insideSkinAfter']:.1%} "
+              f"over {len(moved)} bones; all nodes {g['allInsideSkinBefore']:.1%} -> "
+              f"{np.mean(list(inside.values())):.1%}")  # fmt: skip
+        if g["onGridEdge"]:
+            print(f"warning: the girdle's best setting is on the grid's edge ({g['onGridEdge']})")
+        if not g["heartLimitMet"]:
+            print(f"warning: no grid setting keeps every moved bone out of the heart (limit 0); "
+                  f"the least leaves {g['maxBoneShareInHeart']:.1%} of a bone in it: "
+                  f"{g['bonesInHeart'] or 'under 1% each'}")  # fmt: skip
+        print(f"girdle: {g['gridSettingsTied']} grid settings tied; largest joint shift "
+              f"{g['largestJointShiftM'] * 100:.1f} cm; bones in organs after: "
+              f"{g['bonesInOrgansAfter'] or 'none'}")  # fmt: skip
+    else:
+        print(f"girdle: {g['skipped']}; all nodes {np.mean(list(inside.values())):.1%} inside")
     outside = {k: v for k, v in inside.items() if v < 0.95}
     print(f"{len(ct)} nodes; under 95% inside the skin: {outside or 'none'}")
 
