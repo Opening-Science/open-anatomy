@@ -494,7 +494,7 @@ def merge_close_vertices(mesh: Mesh, cell: float, extra: FloatArray) -> tuple[Me
     cells = np.floor((points - points.min(0)) / cell).astype(np.int64)
     pairs = triangles[:, [0, 1, 1, 2, 2, 0]].reshape(-1, 2)
     pairs = pairs[(cells[pairs[:, 0]] == cells[pairs[:, 1]]).all(1)]
-    graph = coo_matrix((np.ones(len(pairs)), (pairs[:, 0], pairs[:, 1])), shape=(len(points),) * 2)
+    graph = coo_matrix((np.ones(len(pairs)), (pairs[:, 0], pairs[:, 1])), shape=(len(points), len(points)))
     group = connected_components(graph, directed=False)[1].astype(np.int64)
     size = np.bincount(group).astype(float)
 
@@ -589,7 +589,7 @@ def damage_fingers(mesh: Mesh, rng: np.random.Generator, settings: Settings):
         j = i + 1
         if j not in faces or j // HAND != i // HAND or "missing" in (state[i], state[j]):
             continue
-        gap = float(KDTree(points[verts[i]]).query(points[verts[j]])[0].min())
+        gap = float(np.min(KDTree(points[verts[i]]).query(points[verts[j]])[0]))
         if gap * 1000 > settings.fuse_gap_mm or draws[i][2] >= settings.finger_fused:
             continue
         if chains and chains[-1][-1] == i:
