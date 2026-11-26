@@ -494,7 +494,8 @@ def merge_close_vertices(mesh: Mesh, cell: float, extra: FloatArray) -> tuple[Me
     cells = np.floor((points - points.min(0)) / cell).astype(np.int64)
     pairs = triangles[:, [0, 1, 1, 2, 2, 0]].reshape(-1, 2)
     pairs = pairs[(cells[pairs[:, 0]] == cells[pairs[:, 1]]).all(1)]
-    graph = coo_matrix((np.ones(len(pairs)), (pairs[:, 0], pairs[:, 1])), shape=(len(points), len(points)))
+    side = len(points)
+    graph = coo_matrix((np.ones(len(pairs)), (pairs[:, 0], pairs[:, 1])), shape=(side, side))
     group = connected_components(graph, directed=False)[1].astype(np.int64)
     size = np.bincount(group).astype(float)
 
