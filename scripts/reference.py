@@ -8,13 +8,14 @@ skeleton, check the baked body against its pin, and assemble them in Blender.
 A reference names its ANNY body and its CT case in sources.json; bodies of
 other sizes are baked with the weight and height pinned there.
 
-Writes data/reference/<body>.reference.glb and <body>.report.json, and with
---render three PNGs per body in data/renders/. Each step is a script on its
-own (fetch.py, segment.py, mesh.py, bake_anny.py, blender/assemble.py); this
-only runs them in order and stops at the first that fails. It copies the
-case's record (pathology, location, whether the body is typical) from
-sources.json into the report. Needs Blender
-5.2.x (scripts/blender.py finds it) and uv for the ANNY bake.
+Writes data/reference/<body>.reference.glb and <body>.report.json, with
+--render three PNGs per body in data/renders/, and with --qa the close-up QA
+(blender/qa.py) and its contact sheets in data/qa/<reference>/. Each step is a
+script on its own (fetch.py, segment.py, mesh.py, bake_anny.py,
+blender/assemble.py); this only runs them in order and stops at the first that
+fails. It copies the case's record (pathology, location, whether the body is
+typical) from sources.json into the report. Needs Blender 5.2.x
+(scripts/blender.py finds it) and uv for the ANNY bake.
 """
 
 from __future__ import annotations
@@ -54,6 +55,7 @@ def main() -> None:
     parser.add_argument("bodies", nargs="*", default=list(SOURCES["references"]))
     parser.add_argument("--render", action="store_true")
     parser.add_argument("--skip-segment", action="store_true", help="reuse existing masks")
+    parser.add_argument("--qa", action="store_true", help="close-up QA and contact sheets")
     args = parser.parse_args()
     python = sys.executable
     blender = [python, ROOT / "scripts" / "blender.py"]
@@ -64,6 +66,13 @@ def main() -> None:
         if not args.skip_segment:
             step(python, ROOT / "scripts" / "segment.py", "--case", case, "--set", "reference")
         step(python, ROOT / "scripts" / "mesh.py", "--case", case, "--set", "reference")
+        if args.qa:
+            work = ROOT / "data" / "work" / case
+            qa_dir = ROOT / "data" / "qa" / name
+            glb, manifest = work / f"{case}.reference.glb", work / f"{case}.reference.manifest.json"
+            step(*blender, "qa", "--in", glb, "--manifest", manifest, "--out-dir", qa_dir)
+            step(python, ROOT / "scripts" / "qa_sheet.py", "--qa-dir", qa_dir, "--title",
+                 f"{name} ({case})")  # fmt: skip
         body = body_file(SOURCES["references"][name].get("body", name))
         out = ROOT / "data" / "reference"
         assemble = [
